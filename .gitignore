@@ -1,0 +1,119 @@
+# ==============================================================================
+# Git Ignore Rules for ANTIGRAVITY-BYPASS-RUSSIA
+# ==============================================================================
+
+# --- Rust & Compiler Build Outputs ---
+/target/
+dist/
+build/
+out/
+bin/
+**/*.rs.bk
+*.pdb
+*.d
+*.rlib
+*.rmeta
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.ilk
+
+# --- Compiled Binaries & Shared Libraries ---
+*.exe
+*.dll
+*.so
+*.dylib
+*.node
+*.bin
+# Linux / macOS compiled binary names in root
+/antigravity-bypass-russia
+/ag_dns
+
+# --- Release Archives ---
+*.zip
+*.tar
+*.tar.gz
+*.tar.xz
+*.7z
+*.rar
+
+# --- Backup & Temporary Files ---
+*.bak
+*.exe.bak
+*.js.bak
+*.original
+*.tmp*
+.tmp_*
+tmp_*
+scripts/*.bak
+scripts/*.tmp*
+configs/*.local.json
+upstream.conf
+
+# --- Electron & ASAR Caches ---
+*.asar
+*.asar.unpacked/
+node_modules/
+
+# --- Logs & Runtime Dumps ---
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+stderr.log
+stdout.log
+
+# --- Python Caches & Environments ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# --- Local Secrets, Certificates & Overrides ---
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+*.cer
+*.crt
+
+# --- OS Metadata & System Files ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+.AppleDouble
+.LSOverride
+ehthumbs.db
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- IDE & Editor Configurations ---
+.idea/
+.vscode/
+*.code-workspace
+.fleet/
+.zed/
+*.swp
+*.swo
+*.swn
+*~
+*.sublime-project
+*.sublime-workspace
+
+# --- AI Assistant & Index Caches ---
+/.codegraph/
+.gemini/
+.claude/
+.cursor/
+.copilot/
+
+
