@@ -81,7 +81,7 @@
 
 ---
 
-### 🍏 macOS (Apple Silicon M1–M4 & Intel)
+### 🍏 macOS (Apple Silicon & Intel)
 
 1. Откройте **Терминал** и выполните команду:
    ```bash

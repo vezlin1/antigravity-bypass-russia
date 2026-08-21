@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Antigravity Bypass Russia (v1.0) for macOS (Apple Silicon M1-M4 & Intel)
+# Antigravity Bypass Russia (v1.0) for macOS (Apple Silicon & Intel)
 # Supports: Antigravity 2.0+ (Core), IDE UI (main.js) & Antigravity CLI (agy)
 # Dual-level patching: ARM64 / x64 Opcodes + Strings + Mach-O Code Signing
 # Network: /etc/resolver Scoped Domain DNS Routing + VPN Bypass Support
