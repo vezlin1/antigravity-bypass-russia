@@ -110,10 +110,42 @@ pub fn enable() -> Result<(), String> {
     let dst = installed_exe();
 
     if !dst.exists() || !same_file_bytes(&src, &dst) {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = no_window(&mut Command::new("schtasks"))
+                .args(["/End", "/TN", TASK_NAME])
+                .output();
+            let _ = no_window(&mut Command::new("taskkill"))
+                .args(["/F", "/T", "/IM", EXE_NAME])
+                .output();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = Command::new("launchctl").args(["bootout", &format!("system/{}", LAUNCHD_LABEL)]).output();
+            let _ = Command::new("launchctl").args(["unload", "-w", LAUNCHD_PLIST]).output();
+        }
+
         crate::system::process::stop_process_by_name(EXE_NAME);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        let _ = fs::remove_file(&dst);
-        fs::copy(&src, &dst).map_err(|e| {
+
+        let mut copy_res = Err(std::io::Error::new(std::io::ErrorKind::Other, "init"));
+        for attempt in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let _ = fs::remove_file(&dst);
+            copy_res = fs::copy(&src, &dst);
+            if copy_res.is_ok() {
+                break;
+            }
+            if attempt % 5 == 0 {
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = no_window(&mut Command::new("schtasks")).args(["/End", "/TN", TASK_NAME]).output();
+                    let _ = no_window(&mut Command::new("taskkill")).args(["/F", "/T", "/IM", EXE_NAME]).output();
+                }
+                crate::system::process::stop_process_by_name(EXE_NAME);
+            }
+        }
+
+        copy_res.map_err(|e| {
             format!(
                 "Не удалось скопировать бинарник службы ({} -> {}): {}",
                 src.display(),
@@ -316,6 +348,9 @@ pub fn disable() -> Result<(), String> {
         let _ = no_window(&mut Command::new("schtasks"))
             .args(["/Delete", "/TN", TASK_NAME, "/F"])
             .output();
+        let _ = no_window(&mut Command::new("taskkill"))
+            .args(["/F", "/T", "/IM", EXE_NAME])
+            .output();
     }
     #[cfg(target_os = "macos")]
     {
@@ -327,13 +362,17 @@ pub fn disable() -> Result<(), String> {
     }
 
     crate::system::process::stop_process_by_name(EXE_NAME);
-    std::thread::sleep(std::time::Duration::from_millis(100));
 
     let dir = install_dir();
     let current_exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf()));
     if dir.exists() && Some(&dir) != current_exe_dir.as_ref() {
-        let _ = fs::remove_file(installed_exe());
-        let _ = fs::remove_dir_all(&dir);
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let _ = fs::remove_file(installed_exe());
+            if fs::remove_dir_all(&dir).is_ok() || !dir.exists() {
+                break;
+            }
+        }
     }
     Ok(())
 }

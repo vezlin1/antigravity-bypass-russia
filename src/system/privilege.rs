@@ -20,8 +20,69 @@ pub fn is_admin() -> bool {
     false
 }
 
+#[cfg(target_os = "windows")]
+pub fn enable_debug_privilege() {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    const TOKEN_ADJUST_PRIVILEGES: u32 = 0x0020;
+    const TOKEN_QUERY: u32 = 0x0008;
+    const SE_PRIVILEGE_ENABLED: u32 = 0x00000002;
+
+    #[repr(C)]
+    struct LUID {
+        low_part: u32,
+        high_part: i32,
+    }
+
+    #[repr(C)]
+    struct LUID_AND_ATTRIBUTES {
+        luid: LUID,
+        attributes: u32,
+    }
+
+    #[repr(C)]
+    struct TOKEN_PRIVILEGES {
+        privilege_count: u32,
+        privileges: [LUID_AND_ATTRIBUTES; 1],
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn OpenProcessToken(ProcessHandle: *mut std::ffi::c_void, DesiredAccess: u32, TokenHandle: *mut *mut std::ffi::c_void) -> i32;
+        fn LookupPrivilegeValueW(lpSystemName: *const u16, lpName: *const u16, lpLuid: *mut LUID) -> i32;
+        fn AdjustTokenPrivileges(TokenHandle: *mut std::ffi::c_void, DisableAllPrivileges: i32, NewState: *const TOKEN_PRIVILEGES, BufferLength: u32, PreviousState: *mut std::ffi::c_void, ReturnLength: *mut u32) -> i32;
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    }
+
+    let mut token: *mut std::ffi::c_void = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token) } != 0 {
+        let priv_name: Vec<u16> = OsStr::new("SeDebugPrivilege").encode_wide().chain(std::iter::once(0)).collect();
+        let mut luid = LUID { low_part: 0, high_part: 0 };
+        if unsafe { LookupPrivilegeValueW(std::ptr::null(), priv_name.as_ptr(), &mut luid) } != 0 {
+            let tp = TOKEN_PRIVILEGES {
+                privilege_count: 1,
+                privileges: [LUID_AND_ATTRIBUTES {
+                    luid,
+                    attributes: SE_PRIVILEGE_ENABLED,
+                }],
+            };
+            unsafe { AdjustTokenPrivileges(token, 0, &tp, std::mem::size_of::<TOKEN_PRIVILEGES>() as u32, std::ptr::null_mut(), std::ptr::null_mut()) };
+        }
+        unsafe { CloseHandle(token) };
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn enable_debug_privilege() {}
+
 pub fn ensure_admin() {
     if is_admin() {
+        enable_debug_privilege();
         return;
     }
 

@@ -349,6 +349,8 @@ $XBOX_SERVERS       = @("111.88.96.50", "111.88.96.51", "2a00:ab00:1233:26::50",
 
 function Stop-AntigravityProcesses {
     Write-Host "Завершение процессов..." -ForegroundColor Gray
+    Stop-ScheduledTask -TaskName 'AntigravityBypassRussia' -ErrorAction SilentlyContinue | Out-Null
+    taskkill /F /T /IM ag_dns.exe 2>$null | Out-Null
     $procs = @("Antigravity", "Antigravity IDE", "Antigravity CLI", "antigravity", "antigravity-ide", "agy", "language_server", "language_server_windows_x64", "language_server_windows_arm64", "ag_dns")
     foreach ($p in $procs) {
         Stop-Process -Name $p -Force -ErrorAction SilentlyContinue
