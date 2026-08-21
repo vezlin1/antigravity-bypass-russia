@@ -1,0 +1,28 @@
+[package]
+name = "antigravity-bypass-russia"
+version = "1.0.0"
+edition = "2021"
+authors = ["Antigravity Contributors"]
+license = "MIT"
+description = "Clean & Fast Antigravity 2.0 / Gemini Bypass and Rollback Tool for Windows & macOS (No VPN, SmartDNS NRPT & SIMD Binary Patcher)"
+readme = "README.md"
+keywords = ["antigravity", "antigravity-russia", "gemini", "dns-forwarder", "cross-platform"]
+
+[dependencies]
+regex = { version = "1.10", default-features = false, features = ["std", "perf"] }
+memchr = "2.7"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = { version = "0.1", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+overflow-checks = false
+rpath = false
