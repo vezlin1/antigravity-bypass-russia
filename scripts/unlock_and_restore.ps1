@@ -323,7 +323,18 @@ $NRPT_DOMAINS = @(
     "sts.googleapis.com",
     "aiplatform.googleapis.com",
     "s-aiplatform.googleapis.com",
-    "play.googleapis.com"
+    "play.googleapis.com",
+    "oauth2.googleapis.com",
+    "apis.google.com",
+    "clients6.google.com",
+    "servicecontrol.googleapis.com",
+    "servicemanagement.googleapis.com",
+    "sheets.googleapis.com",
+    "docs.googleapis.com",
+    "drive.googleapis.com",
+    "script.google.com",
+    "script.googleusercontent.com",
+    "spreadsheets.google.com"
 )
 
 $ALL_DNS_IPS        = @("111.88.96.50", "111.88.96.51", "176.108.243.68", "176.108.243.69", "176.108.243.70", "176.108.243.71")

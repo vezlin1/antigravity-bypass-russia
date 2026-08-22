@@ -56,6 +56,24 @@ pub const NRPT_DOMAINS: &[&str] = &[
     ".aiplatform.googleapis.com",
     ".s-aiplatform.googleapis.com",
     ".play.googleapis.com",
+    // Antigravity OAuth & Backend Services
+    ".oauth2.googleapis.com",
+    ".apis.google.com",
+    ".clients6.google.com",
+    ".servicecontrol.googleapis.com",
+    ".servicemanagement.googleapis.com",
+    ".sheets.googleapis.com",
+    ".docs.googleapis.com",
+    ".drive.googleapis.com",
+    ".script.google.com",
+    ".script.googleusercontent.com",
+    ".spreadsheets.google.com",
+    // Exact domain names for strict matching
+    "oauth2.googleapis.com",
+    "apis.google.com",
+    "antigravity.google",
+    "gemini.google",
+    "deepmind.google",
 ];
 
 pub const ALL_DNS_IPS: &[&str] = &[
@@ -83,7 +101,11 @@ impl DnsProvider {
 
     pub fn server_ips(&self) -> Vec<String> {
         match self {
-            Self::XboxDns => vec!["111.88.96.50".to_string(), "176.108.243.68".to_string()],
+            Self::XboxDns => vec![
+                "111.88.96.50".to_string(),
+                "111.88.96.51".to_string(),
+                "176.108.243.68".to_string(),
+            ],
             Self::Custom(s) => {
                 let ips: Vec<String> = s
                     .split([',', ' '])
