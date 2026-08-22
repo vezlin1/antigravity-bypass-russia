@@ -5,7 +5,7 @@ use crate::system::privilege::is_admin;
 
 pub fn banner() {
     println!("\x1b[96m=====================================================\x1b[0m");
-    println!("\x1b[96m          ANTIGRAVITY-BYPASS-RUSSIA (v1.0)           \x1b[0m");
+    println!("\x1b[96m          ANTIGRAVITY-BYPASS-RUSSIA (v1.0.1)         \x1b[0m");
     println!("\x1b[96m=====================================================\x1b[0m");
     println!(" Открытая утилита обхода блокировок и чистого отката\n");
 }

@@ -298,7 +298,11 @@ pub fn native_remove_nrpt_rules() -> usize {
                 display_name = parse_wide_string(&disp_data, disp_len);
             }
 
-            let is_managed = comment.contains(NRPT_TAG) || display_name.contains(NRPT_TAG);
+            let key_os = OsString::from_wide(rule_key_name);
+            let key_str = key_os.to_string_lossy();
+            let is_managed = key_str.starts_with("ANTIGRAVITY_BYPASS_")
+                || comment.contains(NRPT_TAG)
+                || display_name.contains(NRPT_TAG);
 
             if is_managed {
                 keys_to_delete.push(rule_key_name.to_vec());
@@ -322,6 +326,17 @@ pub fn native_remove_nrpt_rules() -> usize {
 }
 
 #[cfg(target_os = "windows")]
+fn multi_sz_str(s: &str) -> Vec<u16> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
 pub fn apply_nrpt_rules_direct(servers_csv: &str, domains: &[&str], tag: &str, display_prefix: &str) -> usize {
     use std::ptr::null_mut;
 
@@ -329,6 +344,7 @@ pub fn apply_nrpt_rules_direct(servers_csv: &str, domains: &[&str], tag: &str, d
     const KEY_ALL_ACCESS: u32 = 0xF003F;
     const REG_SZ: u32 = 1;
     const REG_DWORD: u32 = 4;
+    const REG_MULTI_SZ: u32 = 7;
 
     #[link(name = "advapi32")]
     extern "system" {
@@ -357,6 +373,7 @@ pub fn apply_nrpt_rules_direct(servers_csv: &str, domains: &[&str], tag: &str, d
     let base_path = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
     let servers_wide = wide_str(servers_csv);
     let comment_wide = wide_str(tag);
+    let empty_wide = wide_str("");
     let version_val: u32 = 2;
     let config_options: u32 = 8;
     let mut count = 0;
@@ -381,16 +398,17 @@ pub fn apply_nrpt_rules_direct(servers_csv: &str, domains: &[&str], tag: &str, d
         };
 
         if ret == 0 && hrule != 0 {
-            let ns_wide = wide_str(domain);
+            let ns_multi = multi_sz_str(domain);
             let disp_name = format!("{} ({})", display_prefix, domain);
             let disp_wide = wide_str(&disp_name);
 
             unsafe {
                 RegSetValueExW(hrule, wide_str("Version").as_ptr(), 0, REG_DWORD, &version_val as *const _ as *const u8, 4);
-                RegSetValueExW(hrule, wide_str("Name").as_ptr(), 0, REG_SZ, ns_wide.as_ptr() as *const u8, (ns_wide.len() * 2) as u32);
+                RegSetValueExW(hrule, wide_str("Name").as_ptr(), 0, REG_MULTI_SZ, ns_multi.as_ptr() as *const u8, (ns_multi.len() * 2) as u32);
                 RegSetValueExW(hrule, wide_str("GenericDNSServers").as_ptr(), 0, REG_SZ, servers_wide.as_ptr() as *const u8, (servers_wide.len() * 2) as u32);
                 RegSetValueExW(hrule, wide_str("Comment").as_ptr(), 0, REG_SZ, comment_wide.as_ptr() as *const u8, (comment_wide.len() * 2) as u32);
                 RegSetValueExW(hrule, wide_str("DisplayName").as_ptr(), 0, REG_SZ, disp_wide.as_ptr() as *const u8, (disp_wide.len() * 2) as u32);
+                RegSetValueExW(hrule, wide_str("IPSECCARestriction").as_ptr(), 0, REG_SZ, empty_wide.as_ptr() as *const u8, (empty_wide.len() * 2) as u32);
                 RegSetValueExW(hrule, wide_str("ConfigOptions").as_ptr(), 0, REG_DWORD, &config_options as *const _ as *const u8, 4);
                 RegCloseKey(hrule);
             }

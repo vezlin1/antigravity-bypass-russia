@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Antigravity Bypass Russia (v1.0) for macOS (Apple Silicon & Intel)
+# Antigravity Bypass Russia (v1.0.1) for macOS (Apple Silicon & Intel)
 # Supports: Antigravity 2.0+ (Core), IDE UI (main.js) & Antigravity CLI (agy)
 # Dual-level patching: ARM64 / x64 Opcodes + Strings + Mach-O Code Signing
 # Network: /etc/resolver Scoped Domain DNS Routing + VPN Bypass Support
@@ -43,6 +43,9 @@ DOMAINS=(
     "antigravity.google"
     "antigravity-unleash.goog"
     "cloudaicompanion.googleapis.com"
+    "cloudaicompanion.sandbox.googleapis.com"
+    "optimizationguide-pa.googleapis.com"
+    "developerprofiles-pa.googleapis.com"
     "aicode.googleapis.com"
     "aida.googleapis.com"
     "geller-pa.googleapis.com"
@@ -618,7 +621,7 @@ main_menu() {
     while true; do
         safe_clear
         echo -e "${CYAN}=====================================================${NC}"
-        echo -e "${CYAN}     ANTIGRAVITY-BYPASS-RUSSIA (v1.0) FOR macOS      ${NC}"
+        echo -e "${CYAN}    ANTIGRAVITY-BYPASS-RUSSIA (v1.0.1) FOR macOS     ${NC}"
         echo -e "${CYAN}=====================================================${NC}"
         echo -e "Утилита обхода региональных ограничений и чистый откат\n"
 

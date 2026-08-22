@@ -28,7 +28,7 @@ use std::process::Command;
 use crate::system::process::no_window;
 
 pub fn apply_dns_rules(provider: &DnsProvider) -> Result<(), String> {
-    apply_dns_rules_advanced(provider, true)
+    apply_dns_rules_advanced(provider, false)
 }
 
 pub fn apply_dns_rules_advanced(provider: &DnsProvider, enable_relay: bool) -> Result<(), String> {
@@ -113,5 +113,16 @@ pub fn remove_dns_rules() {
         }
         let _ = Command::new("dscacheutil").arg("-flushcache").output();
         let _ = Command::new("killall").args(["-HUP", "mDNSResponder"]).output();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apply_and_remove_rules() {
+        let res = apply_dns_rules(&DnsProvider::XboxDns);
+        assert!(res.is_ok(), "apply_dns_rules failed: {:?}", res);
     }
 }

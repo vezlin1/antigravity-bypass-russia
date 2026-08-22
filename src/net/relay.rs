@@ -8,11 +8,7 @@ use std::time::Duration;
 use crate::net::client::query_raw_via;
 use crate::net::egress;
 
-pub const LISTEN_IP: &str = if cfg!(target_os = "windows") {
-    "127.0.0.53"
-} else {
-    "127.0.0.1"
-};
+pub const LISTEN_IP: &str = "127.0.0.1";
 pub const LISTEN_PORT: u16 = 53;
 const WORKER_THREADS: usize = 4;
 const UPSTREAM_TIMEOUT: Duration = Duration::from_millis(1500);
@@ -115,34 +111,6 @@ pub fn run() -> Result<(), String> {
     let _ = crate::net::socket::set_socket_buffers(&socket, 512 * 1024);
     let sock_arc = Arc::new(socket);
 
-    if let Some(e) = egress::detect_fast() {
-        CACHED_IF_INDEX.store(e.if_index, std::sync::atomic::Ordering::Release);
-    }
-
-    let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, SocketAddr)>(1024);
-    let rx_arc = Arc::new(Mutex::new(rx));
-
-    for _ in 0..WORKER_THREADS {
-        let rx_c = Arc::clone(&rx_arc);
-        let sock_c = Arc::clone(&sock_arc);
-        thread::spawn(move || {
-            loop {
-                let task = {
-                    let lock = rx_c.lock().unwrap_or_else(|p| p.into_inner());
-                    lock.recv().ok()
-                };
-                match task {
-                    Some((query, client_addr)) => {
-                        if let Some(resp) = relay(&query) {
-                            let _ = sock_c.send_to(&resp, client_addr);
-                        }
-                    }
-                    None => break,
-                }
-            }
-        });
-    }
-
     let mut buf = [0u8; 1500];
     let mut backoff_ms = 100;
     loop {
@@ -150,7 +118,15 @@ pub fn run() -> Result<(), String> {
             Ok((n, client_addr)) => {
                 backoff_ms = 100;
                 if n >= 12 {
-                    let _ = tx.try_send((buf[..n].to_vec(), client_addr));
+                    let query = buf[..n].to_vec();
+                    let sock_c = Arc::clone(&sock_arc);
+                    thread::spawn(move || {
+                        if let Some(resp) = relay(&query) {
+                            let _ = sock_c.send_to(&resp, client_addr);
+                        } else {
+                            log_fatal(&format!("relay returned None for query from {:?}", client_addr));
+                        }
+                    });
                 }
             }
             Err(e) => {
@@ -163,34 +139,40 @@ pub fn run() -> Result<(), String> {
 }
 
 fn relay(query: &[u8]) -> Option<Vec<u8>> {
-    let mut if_index = CACHED_IF_INDEX.load(std::sync::atomic::Ordering::Relaxed);
-    if if_index == 0 {
-        if let Some(e) = egress::detect() {
-            if_index = e.if_index;
-            CACHED_IF_INDEX.store(if_index, std::sync::atomic::Ordering::Release);
-        }
-    }
     let servers = load_upstream_servers();
 
     for &srv in &servers {
-        if let Ok(resp) = query_raw_via(query, srv, if_index, Duration::from_millis(800)) {
-            if resp.len() >= 12 {
-                return Some(resp);
-            }
-        } else if if_index > 0 {
-            // If interface index changed (e.g. Wi-Fi switched or woken from sleep), re-detect
-            if let Some(e) = egress::detect() {
-                if e.if_index != if_index {
-                    if_index = e.if_index;
-                    CACHED_IF_INDEX.store(if_index, std::sync::atomic::Ordering::Release);
-                    if let Ok(resp) = query_raw_via(query, srv, if_index, Duration::from_millis(800)) {
-                        if resp.len() >= 12 {
-                            return Some(resp);
-                        }
-                    }
-                }
-            }
+        match query_raw_via(query, srv, 0, Duration::from_millis(800)) {
+            Ok(resp) if resp.len() >= 12 => return Some(resp),
+            Ok(resp) => log_fatal(&format!("Short resp from {}: len {}", srv, resp.len())),
+            Err(e) => log_fatal(&format!("Query error for {}: {}", srv, e)),
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_loopback_cross_send() {
+        let srv = UdpSocket::bind("127.0.0.53:53535").expect("bind srv");
+        let cli = UdpSocket::bind("127.0.0.1:0").expect("bind cli");
+        cli.connect("127.0.0.53:53535").expect("connect");
+        cli.send(b"hello").expect("send");
+
+        let mut buf = [0u8; 100];
+        let (_n, from) = srv.recv_from(&mut buf).expect("recv srv");
+        println!("Server received from: {:?}", from);
+
+        let res = srv.send_to(b"world", from);
+        println!("Server send_to result: {:?}", res);
+        assert!(res.is_ok());
+
+        let mut cli_buf = [0u8; 100];
+        let n_cli = cli.recv(&mut cli_buf).expect("recv cli");
+        assert_eq!(&cli_buf[..n_cli], b"world");
+        println!("Client received response successfully!");
+    }
 }
