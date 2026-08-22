@@ -56,6 +56,9 @@ pub fn add_static_routes(provider: &DnsProvider) {
         }
 
         let gw = row.dw_forward_next_hop.to_ne_bytes();
+        if gw == [0, 0, 0, 0] {
+            return;
+        }
         let gateway = format!("{}.{}.{}.{}", gw[0], gw[1], gw[2], gw[3]);
         let if_index = row.dw_forward_if_index;
 

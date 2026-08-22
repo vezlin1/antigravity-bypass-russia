@@ -130,16 +130,12 @@ pub fn question_name(buf: &[u8]) -> Option<String> {
 pub fn query_raw_via(
     packet: &[u8],
     server: Ipv4Addr,
-    if_index: u32,
+    _if_index: u32,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Bind error: {}", e))?;
     let _ = sock.set_read_timeout(Some(timeout));
     let _ = sock.set_write_timeout(Some(timeout));
-
-    if if_index > 0 {
-        let _ = bind_socket_to_interface(&sock, if_index);
-    }
 
     let target = SocketAddrV4::new(server, 53);
     sock.send_to(packet, target)
@@ -148,7 +144,7 @@ pub fn query_raw_via(
     let mut buf = [0u8; 1500];
     let (n, _) = sock
         .recv_from(&mut buf)
-        .map_err(|e| format!("Recv error: {}", e))?;
+        .map_err(|e| format!("Recv error from {}: {}", server, e))?;
     Ok(buf[..n].to_vec())
 }
 

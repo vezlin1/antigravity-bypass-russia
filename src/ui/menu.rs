@@ -279,7 +279,7 @@ pub fn handle_diagnostics() {
         };
 
         if is_relay {
-            format!("\x1b[92m[✓] Локальный релей (127.0.0.53:53) -> {}\x1b[0m (правил: {})", display_label, nrpt_count)
+            format!("\x1b[92m[✓] Локальный релей (127.0.0.1:53) -> {}\x1b[0m (правил: {})", display_label, nrpt_count)
         } else {
             format!("\x1b[92m[✓] ({})\x1b[0m (правил: {})", display_label, nrpt_count)
         }
