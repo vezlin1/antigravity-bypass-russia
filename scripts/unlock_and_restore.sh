@@ -89,20 +89,6 @@ DOMAINS=(
     "aiplatform.googleapis.com"
     "s-aiplatform.googleapis.com"
     "play.googleapis.com"
-    "oauth2.googleapis.com"
-    "accounts.google.com"
-    "sheets.googleapis.com"
-    "docs.googleapis.com"
-    "drive.googleapis.com"
-    "script.google.com"
-    "script.googleusercontent.com"
-    "spreadsheets.google.com"
-    "docs.google.com"
-    "drive.google.com"
-    "apis.google.com"
-    "www.googleapis.com"
-    "googleapis.com"
-    "google.com"
 )
 
 # --- DNS Upstream Providers ---
