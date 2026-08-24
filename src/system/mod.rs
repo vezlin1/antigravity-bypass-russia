@@ -1,5 +1,3 @@
-#![allow(unused_imports, dead_code)]
-
 pub mod env;
 pub mod fs_utils;
 pub mod lock;
@@ -7,9 +5,6 @@ pub mod privilege;
 pub mod process;
 pub mod service;
 
-pub use env::*;
-pub use fs_utils::*;
-pub use lock::*;
-pub use privilege::*;
-pub use process::*;
-pub use service::*;
+pub use lock::check_single_instance;
+pub use privilege::ensure_admin;
+pub use service::FORWARDER_FLAG;

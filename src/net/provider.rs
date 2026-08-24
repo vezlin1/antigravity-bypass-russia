@@ -1,131 +1,70 @@
 pub const NRPT_TAG: &str = "ANTIGRAVITY-BYPASS-RUSSIA";
 
-pub const NRPT_DOMAINS: &[&str] = &[
-    // Antigravity & AI Core Endpoints
-    ".cloudcode-pa.googleapis.com",
-    ".daily-cloudcode-pa.googleapis.com",
-    ".daily-cloudcode-pa.sandbox.googleapis.com",
-    ".antigravity-pa.googleapis.com",
-    ".antigravity.googleapis.com",
-    ".antigravity.google",
-    ".antigravity-unleash.goog",
-    ".cloudaicompanion.googleapis.com",
-    ".cloudaicompanion.sandbox.googleapis.com",
-    ".optimizationguide-pa.googleapis.com",
-    ".developerprofiles-pa.googleapis.com",
-    ".aicode.googleapis.com",
-    ".aida.googleapis.com",
-    ".geller-pa.googleapis.com",
-    ".proactivebackend-pa.googleapis.com",
-    ".robinfrontend-pa.googleapis.com",
+/// Studio/Gemini canaries. Cloud Code is a separate family: xbox-dns and
+/// comss currently pass it through to real Google, so their IPs must not
+/// sit in that host's NRPT fallback list.
+pub const SUBSTITUTION_CANARIES: &[&str] = &[
+    "aistudio.google.com",
+    "makersuite.google.com",
+    "generativelanguage.googleapis.com",
+    "gemini.google.com",
+];
+
+/// Browser AI surfaces (AI Studio, Gemini, NotebookLM, …).
+/// These must NOT include Cloud Code, Unleash, OAuth, or www.googleapis.com:
+/// those names either passthrough (extra DNS delay) or hang the IDE splash.
+pub const NRPT_STUDIO: &[&str] = &[
     ".generativelanguage.googleapis.com",
+    "generativelanguage.googleapis.com",
     ".gemini.google.com",
+    "gemini.google.com",
     ".gemini.google",
+    "gemini.google",
     ".gemini.gstatic.com",
     ".bard.google.com",
     ".generativeai.google",
     ".aistudio.google.com",
+    "aistudio.google.com",
     ".ai.studio",
+    "ai.studio",
     ".ai.google.dev",
+    "ai.google.dev",
     ".makersuite.google.com",
+    "makersuite.google.com",
     ".alkalicore-pa.clients6.google.com",
     ".alkalimakersuite-pa.clients6.google.com",
     ".webchannel-alkalimakersuite-pa.clients6.google.com",
     ".alkalimakersuite-pa.googleapis.com",
     ".alkalimakersuiteapplets.pa.googleapis.com",
-    ".people-pa.clients6.google.com",
     ".notebooklm-pa.googleapis.com",
     ".notebooklm.googleapis.com",
     ".notebooklm.google",
     ".notebooklm.google.com",
-    ".notebook.google.com",
     ".jules.google",
     ".jules.google.com",
-    ".opal.google",
-    ".opal.google.com",
-    ".labs.google",
-    ".labs.google.com",
-    ".flow.google",
     ".aisandbox-pa.googleapis.com",
     ".deepmind.com",
     ".deepmind.google",
-    ".stitch.withgoogle.com",
-    ".iamcredentials.googleapis.com",
-    ".cloudresourcemanager.googleapis.com",
-    ".sts.googleapis.com",
+    "deepmind.google",
     ".aiplatform.googleapis.com",
     ".s-aiplatform.googleapis.com",
-    ".play.googleapis.com",
-    // Antigravity OAuth & Backend Services
-    ".oauth2.googleapis.com",
-    ".apis.google.com",
-    ".clients6.google.com",
-    ".servicecontrol.googleapis.com",
-    ".servicemanagement.googleapis.com",
-    ".sheets.googleapis.com",
-    ".docs.googleapis.com",
-    ".drive.googleapis.com",
-    ".script.google.com",
-    ".script.googleusercontent.com",
-    ".spreadsheets.google.com",
-    // Exact domain names for strict matching
-    "oauth2.googleapis.com",
-    "apis.google.com",
-    "antigravity.google",
-    "gemini.google",
-    "deepmind.google",
 ];
 
-pub const ALL_DNS_IPS: &[&str] = &[
-    "111.88.96.50",
-    "111.88.96.51",
-    "176.108.243.68",
-    "176.108.243.69",
-    "176.108.243.70",
-    "176.108.243.71",
+/// Agent Cloud Code hosts. Each gets its own NRPT nameserver list —
+/// only providers that actually substitute *this* name. xbox-dns is
+/// fine for Studio and poison for daily-cloudcode-pa.
+pub const NRPT_AGENT: &[&str] = &[
+    "daily-cloudcode-pa.googleapis.com",
+    "cloudcode-pa.googleapis.com",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DnsProvider {
-    XboxDns,
-    Custom(String),
-}
+/// Geohide HTTP/SNI frontends. Used when VPN makes SmartDNS skip substitution:
+/// we still TLS-probe these with Cloud Code SNI and pin whoever answers.
+pub const GEOHIDE_PROXY_V4: &[&str] = &["37.230.192.51", "45.155.204.190"];
 
-impl DnsProvider {
-    pub fn name(&self) -> &str {
-        match self {
-            Self::XboxDns => "Xbox-DNS.ru (Быстрый SmartDNS)",
-            Self::Custom(s) => s.as_str(),
-        }
-    }
-
-    pub fn server_ips(&self) -> Vec<String> {
-        match self {
-            Self::XboxDns => vec![
-                "111.88.96.50".to_string(),
-                "111.88.96.51".to_string(),
-                "176.108.243.68".to_string(),
-            ],
-            Self::Custom(s) => {
-                let ips: Vec<String> = s
-                    .split([',', ' '])
-                    .map(|x| x.trim().to_string())
-                    .filter(|x| !x.is_empty() && x.parse::<std::net::Ipv4Addr>().is_ok())
-                    .collect();
-                if ips.is_empty() {
-                    vec!["111.88.96.50".to_string()]
-                } else {
-                    ips
-                }
-            }
-        }
-    }
-
-    pub fn to_nameservers_arg(&self, via_relay: bool) -> String {
-        if via_relay {
-            crate::net::relay::LISTEN_IP.to_string()
-        } else {
-            self.server_ips().join(",")
-        }
-    }
+pub fn nrpt_domains() -> Vec<&'static str> {
+    let mut out = Vec::with_capacity(NRPT_AGENT.len() + NRPT_STUDIO.len());
+    out.extend_from_slice(NRPT_AGENT);
+    out.extend_from_slice(NRPT_STUDIO);
+    out
 }

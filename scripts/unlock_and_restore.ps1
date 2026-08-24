@@ -1,4 +1,4 @@
-# ANTIGRAVITY-BYPASS-RUSSIA (v1.0.1) - PowerShell Bypass & Rollback Tool
+# ANTIGRAVITY-BYPASS-RUSSIA (v1.1.0) - PowerShell Bypass & Rollback Tool
 # Поддержка: Antigravity 2.0+ (Core), IDE UI (main.js) & Antigravity CLI (agy)
 # Двухуровневый патчинг (Опкоды x64/ARM64 + Строки) + Высокоскоростной C# движок + Обход VPN
 
@@ -64,10 +64,10 @@ public static class AgFastEngine {
     private static readonly byte[] MgrArm64Restore = new byte[] { 0x03, 0x20, 0x40, 0x39, 0x04, 0x00, 0x00, 0x14 };
     private static readonly byte[] MgrArm64Patched = new byte[] { 0x23, 0x00, 0x80, 0x52, 0x03, 0x20, 0x00, 0x39, 0x62, 0x03, 0x00, 0xAA };
 
-    private static readonly byte[] CliX64OrigHead = new byte[] { 0x48, 0x85, 0xC0, 0x0F, 0x84 };
-    private static readonly byte[] CliX64Fix      = new byte[] { 0x48, 0x85, 0xC0, 0x90 };
-    private static readonly byte[] CliX64Restore  = new byte[] { 0x80, 0x78, 0x08, 0x00 };
-    private static readonly byte[] CliX64PatMid   = new byte[] { 0x48, 0x85, 0xC0, 0x90, 0x0F, 0x85 };
+    private static readonly byte[] CliX64OrigHead = new byte[] { 0x48, 0x85, 0xC0, 0x74 };
+    private static readonly byte[] CliX64Fix      = new byte[] { 0x48, 0x85, 0xC0, 0x90, 0x90 };
+    private static readonly byte[] CliX64LongHead = new byte[] { 0x48, 0x85, 0xC0, 0x0F, 0x84 };
+    private static readonly byte[] CliX64LongFix  = new byte[] { 0x48, 0x85, 0xC0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
 
     public static bool IsAdmin() {
         try {
@@ -137,6 +137,18 @@ public static class AgFastEngine {
         var matches = new List<int>();
         int idx = 0;
         while ((idx = IndexOfSequence(data, CliX64OrigHead, idx)) != -1) {
+            if (idx + 7 <= data.Length && data[idx + 5] == 0x48 && data[idx + 6] == 0x8B) {
+                matches.Add(idx);
+            }
+            idx++;
+        }
+        return matches;
+    }
+
+    public static List<int> FindCliX64LongOrig(byte[] data) {
+        var matches = new List<int>();
+        int idx = 0;
+        while ((idx = IndexOfSequence(data, CliX64LongHead, idx)) != -1) {
             if (idx + 15 <= data.Length &&
                 data[idx + 9] == 0x80 && data[idx + 10] == 0x78 &&
                 data[idx + 11] == 0x08 && data[idx + 12] == 0x00 &&
@@ -154,13 +166,15 @@ public static class AgFastEngine {
             byte[] data = File.ReadAllBytes(path);
             if (IndexOfSequence(data, MgrX64PatHead) != -1 ||
                 IndexOfSequence(data, MgrArm64Patched) != -1 ||
-                IndexOfSequence(data, CliX64PatMid) != -1 ||
+                IndexOfSequence(data, CliX64Fix) != -1 ||
+                IndexOfSequence(data, CliX64LongFix) != -1 ||
                 IndexOfSequence(data, StringTo) != -1) {
                 return "patched";
             }
             if (FindMgrX64Orig(data).Count > 0 ||
                 IndexOfSequence(data, MgrArm64Orig) != -1 ||
                 FindCliX64Orig(data).Count > 0 ||
+                FindCliX64LongOrig(data).Count > 0 ||
                 IndexOfSequence(data, StringFrom) != -1) {
                 return "stock";
             }
@@ -197,13 +211,23 @@ public static class AgFastEngine {
         }
 
         if (name.Contains("agy") || (!matchedX64 && !matchedArm)) {
-            var cliHits = FindCliX64Orig(data);
+            var cliLongHits = FindCliX64LongOrig(data);
             bool matchedCli = false;
-            foreach (int idx in cliHits) {
-                int offset = idx + 9;
-                if (offset + CliX64Fix.Length <= data.Length) {
-                    Buffer.BlockCopy(CliX64Fix, 0, data, offset, CliX64Fix.Length);
-                    matchedCli = true;
+            if (cliLongHits.Count > 0 && cliLongHits.Count <= 8) {
+                foreach (int idx in cliLongHits) {
+                    if (idx + CliX64LongFix.Length <= data.Length) {
+                        Buffer.BlockCopy(CliX64LongFix, 0, data, idx, CliX64LongFix.Length);
+                        matchedCli = true;
+                    }
+                }
+            }
+            var cliHits = FindCliX64Orig(data);
+            if (cliHits.Count > 0 && cliHits.Count <= 8) {
+                foreach (int idx in cliHits) {
+                    if (idx + CliX64Fix.Length <= data.Length) {
+                        Buffer.BlockCopy(CliX64Fix, 0, data, idx, CliX64Fix.Length);
+                        matchedCli = true;
+                    }
                 }
             }
             if (matchedCli) details.Add("CLI_GATE(x64)");
@@ -221,47 +245,12 @@ public static class AgFastEngine {
     public static string RestoreBinary(string path) {
         ClearReadOnly(path);
         byte[] data = File.ReadAllBytes(path);
-        string name = Path.GetFileName(path).ToLower();
-        var details = new List<string>();
-
-        if (name.Contains("language_server")) {
-            int idx = 0;
-            bool matchedX64 = false;
-            while ((idx = IndexOfSequence(data, MgrX64PatHead, idx)) != -1) {
-                Buffer.BlockCopy(MgrX64Restore, 0, data, idx, MgrX64Restore.Length);
-                matchedX64 = true;
-                idx += MgrX64Restore.Length;
-            }
-            if (matchedX64) details.Add("opcodes_x64");
-
-            int armIdx = 0;
-            bool matchedArm = false;
-            while ((armIdx = IndexOfSequence(data, MgrArm64Patched, armIdx)) != -1) {
-                Buffer.BlockCopy(MgrArm64Restore, 0, data, armIdx, MgrArm64Restore.Length);
-                matchedArm = true;
-                armIdx += MgrArm64Restore.Length;
-            }
-            if (matchedArm) details.Add("opcodes_arm64");
-        }
-
-        if (name.Contains("agy")) {
-            int idx = 0;
-            bool matchedCli = false;
-            while ((idx = IndexOfSequence(data, CliX64PatMid, idx)) != -1) {
-                Buffer.BlockCopy(CliX64Restore, 0, data, idx, CliX64Restore.Length);
-                matchedCli = true;
-                idx += CliX64Restore.Length;
-            }
-            if (matchedCli) details.Add("opcodes_cli");
-        }
-
         int strCount = ReplaceSlice(data, StringTo, StringFrom);
-        if (strCount > 0) details.Add("strings(" + strCount + ")");
-
-        if (details.Count == 0) return "файл уже в исходном состоянии";
-
+        if (strCount == 0) {
+            return "нет .bak и нечего откатывать строками (опкоды без бэкапа не трогаем)";
+        }
         File.WriteAllBytes(path, data);
-        return "исходные байты восстановлены (" + string.Join(" + ", details.ToArray()) + ")";
+        return "строковый откат без .bak (" + strCount + "). Опкоды не тронуты — нужен .bak";
     }
 }
 "@
@@ -270,75 +259,48 @@ public static class AgFastEngine {
 $NRPT_TAG = "ANTIGRAVITY-BYPASS-RUSSIA"
 
 $NRPT_DOMAINS = @(
-    "cloudcode-pa.googleapis.com",
     "daily-cloudcode-pa.googleapis.com",
-    "daily-cloudcode-pa.sandbox.googleapis.com",
-    "antigravity-pa.googleapis.com",
-    "antigravity.googleapis.com",
-    "antigravity.google",
-    "antigravity-unleash.goog",
-    "cloudaicompanion.googleapis.com",
-    "cloudaicompanion.sandbox.googleapis.com",
-    "optimizationguide-pa.googleapis.com",
-    "developerprofiles-pa.googleapis.com",
-    "aicode.googleapis.com",
-    "aida.googleapis.com",
-    "geller-pa.googleapis.com",
-    "proactivebackend-pa.googleapis.com",
-    "robinfrontend-pa.googleapis.com",
+    "cloudcode-pa.googleapis.com",
+    ".generativelanguage.googleapis.com",
     "generativelanguage.googleapis.com",
+    ".generativelanguage.googleapis.com",
+    "generativelanguage.googleapis.com",
+    ".gemini.google.com",
     "gemini.google.com",
+    ".gemini.google",
     "gemini.google",
-    "gemini.gstatic.com",
-    "bard.google.com",
-    "generativeai.google",
+    ".gemini.gstatic.com",
+    ".bard.google.com",
+    ".generativeai.google",
+    ".aistudio.google.com",
     "aistudio.google.com",
+    ".ai.studio",
     "ai.studio",
+    ".ai.google.dev",
     "ai.google.dev",
+    ".makersuite.google.com",
     "makersuite.google.com",
-    "alkalicore-pa.clients6.google.com",
-    "alkalimakersuite-pa.clients6.google.com",
-    "webchannel-alkalimakersuite-pa.clients6.google.com",
-    "alkalimakersuite-pa.googleapis.com",
-    "alkalimakersuiteapplets.pa.googleapis.com",
-    "people-pa.clients6.google.com",
-    "notebooklm-pa.googleapis.com",
-    "notebooklm.googleapis.com",
-    "notebooklm.google",
-    "notebooklm.google.com",
-    "notebook.google.com",
-    "jules.google",
-    "jules.google.com",
-    "opal.google",
-    "opal.google.com",
-    "labs.google",
-    "labs.google.com",
-    "flow.google",
-    "aisandbox-pa.googleapis.com",
-    "deepmind.com",
+    ".alkalicore-pa.clients6.google.com",
+    ".alkalimakersuite-pa.clients6.google.com",
+    ".webchannel-alkalimakersuite-pa.clients6.google.com",
+    ".alkalimakersuite-pa.googleapis.com",
+    ".alkalimakersuiteapplets.pa.googleapis.com",
+    ".notebooklm-pa.googleapis.com",
+    ".notebooklm.googleapis.com",
+    ".notebooklm.google",
+    ".notebooklm.google.com",
+    ".jules.google",
+    ".jules.google.com",
+    ".aisandbox-pa.googleapis.com",
+    ".deepmind.com",
+    ".deepmind.google",
     "deepmind.google",
-    "stitch.withgoogle.com",
-    "iamcredentials.googleapis.com",
-    "cloudresourcemanager.googleapis.com",
-    "sts.googleapis.com",
-    "aiplatform.googleapis.com",
-    "s-aiplatform.googleapis.com",
-    "play.googleapis.com",
-    "oauth2.googleapis.com",
-    "apis.google.com",
-    "clients6.google.com",
-    "servicecontrol.googleapis.com",
-    "servicemanagement.googleapis.com",
-    "sheets.googleapis.com",
-    "docs.googleapis.com",
-    "drive.googleapis.com",
-    "script.google.com",
-    "script.googleusercontent.com",
-    "spreadsheets.google.com"
+    ".aiplatform.googleapis.com",
+    ".s-aiplatform.googleapis.com"
 )
 
-$ALL_DNS_IPS        = @("111.88.96.50", "111.88.96.51", "176.108.243.68", "176.108.243.69", "176.108.243.70", "176.108.243.71")
-$XBOX_SERVERS       = @("111.88.96.50", "111.88.96.51", "2a00:ab00:1233:26::50", "2a00:ab00:1233:26::51")
+$ALL_DNS_IPS        = @("111.88.96.50", "111.88.96.51", "83.220.169.155", "212.109.195.93", "195.133.25.16", "45.155.204.190", "37.230.192.51")
+$XBOX_SERVERS       = $ALL_DNS_IPS
 
 function Stop-AntigravityProcesses {
     Write-Host "Завершение процессов..." -ForegroundColor Gray
@@ -620,7 +582,7 @@ function Take-OverConflictingRules {
 
 function Select-DnsServers {
     Write-Host "`nВыберите DNS-провайдер для маршрутизации:" -ForegroundColor Cyan
-    Write-Host "  1. Xbox-DNS.ru (111.88.96.50, 111.88.96.51)" -ForegroundColor Yellow
+    Write-Host "  1. SmartDNS пул (xbox-dns + comss + geohide)" -ForegroundColor Yellow
     Write-Host "  2. Ввести свой DNS / IP адрес личного VPS" -ForegroundColor Green
     
     $c = Read-Host "Ваш выбор [1-2] (Enter - Xbox-DNS)"
@@ -640,9 +602,53 @@ function Select-DnsServers {
     }
 }
 
+function Disable-SystemDoh {
+    $backup = "$env:ProgramData\AntigravityBypassRussia\doh_backup.conf"
+    New-Item -ItemType Directory -Force -Path "$env:ProgramData\AntigravityBypassRussia" | Out-Null
+    $auto = "absent"
+    $policy = "absent"
+    try {
+        $v = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" -Name "EnableAutoDoh" -ErrorAction SilentlyContinue
+        if ($null -ne $v) { $auto = [string]$v.EnableAutoDoh }
+    } catch {}
+    try {
+        $v = Get-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "DoHPolicy" -ErrorAction SilentlyContinue
+        if ($null -ne $v) { $policy = [string]$v.DoHPolicy }
+    } catch {}
+    "EnableAutoDoh=$auto`nDoHPolicy=$policy`n" | Set-Content -LiteralPath $backup -Encoding ASCII
+    New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" -Force | Out-Null
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" -Name "EnableAutoDoh" -Value 0 -Type DWord -ErrorAction SilentlyContinue
+    New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Force | Out-Null
+    Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "DoHPolicy" -Value 2 -Type DWord -ErrorAction SilentlyContinue
+}
+
+function Restore-SystemDoh {
+    $backup = "$env:ProgramData\AntigravityBypassRussia\doh_backup.conf"
+    $auto = "absent"
+    $policy = "absent"
+    if (Test-Path -LiteralPath $backup) {
+        Get-Content -LiteralPath $backup | ForEach-Object {
+            if ($_ -like "EnableAutoDoh=*") { $auto = $_.Substring(14) }
+            if ($_ -like "DoHPolicy=*") { $policy = $_.Substring(10) }
+        }
+        Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+    }
+    if ($auto -eq "absent") {
+        Remove-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" -Name "EnableAutoDoh" -ErrorAction SilentlyContinue
+    } elseif ($auto -match '^\d+$') {
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters" -Name "EnableAutoDoh" -Value ([int]$auto) -Type DWord -ErrorAction SilentlyContinue
+    }
+    if ($policy -eq "absent") {
+        Remove-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "DoHPolicy" -ErrorAction SilentlyContinue
+    } elseif ($policy -match '^\d+$') {
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient" -Name "DoHPolicy" -Value ([int]$policy) -Type DWord -ErrorAction SilentlyContinue
+    }
+}
+
 function Apply-DnsSettings($servers, $label) {
     Remove-DnsSettings
     Take-OverConflictingRules
+    Disable-SystemDoh
     
     $pool = [runspacefactory]::CreateRunspacePool(1, [System.Math]::Min(16, [Environment]::ProcessorCount * 2))
     $pool.Open()
@@ -672,6 +678,7 @@ function Apply-DnsSettings($servers, $label) {
 function Remove-DnsSettings {
     Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Comment -eq $NRPT_TAG } | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue
     Remove-DirectDnsRoutes
+    Restore-SystemDoh
     [AgFastEngine]::DnsFlushResolverCache() | Out-Null
     netsh interface ipv6 set prefixpolicy ::ffff:0:0/96 35 4 | Out-Null
 
@@ -728,7 +735,7 @@ function Print-Dashboard {
                 $ns = "111.88.96.50"
             }
         }
-        $prov = if ($ns -like "*111.88.96.50*" -or $ns -like "*176.108.243.68*" -or $ns -like "*111.88.96.51*") {
+        $prov = if ($ns -like "*111.88.96.*" -or $ns -like "*45.155.204.*" -or $ns -like "*83.220.169.*") {
             "Xbox-DNS.ru"
         } else {
             "Пользовательский DNS"
@@ -823,13 +830,13 @@ function Show-Diagnostics {
 function Show-Menu {
     Clear-Host
     Write-Host "=====================================================" -ForegroundColor Cyan
-    Write-Host "          ANTIGRAVITY-BYPASS-RUSSIA (v1.0.1)         " -ForegroundColor Cyan
+    Write-Host "          ANTIGRAVITY-BYPASS-RUSSIA (v1.1.0)         " -ForegroundColor Cyan
     Write-Host "=====================================================" -ForegroundColor Cyan
     Write-Host "Открытая утилита обхода блокировок и чистого отката`n"
 
     Print-Dashboard
 
-    Write-Host "1. Полная разблокировка (Файлы Core 2.0/IDE/CLI + Сеть/DNS)" -ForegroundColor Green
+    Write-Host "1. Полная разблокировка" -ForegroundColor Green
     Write-Host "2. Только файлы (Работа без смены страны аккаунта)" -ForegroundColor Cyan
     Write-Host "3. Только DNS и сеть (Работа без VPN)" -ForegroundColor Yellow
     Write-Host "4. Указать путь к Antigravity вручную" -ForegroundColor White

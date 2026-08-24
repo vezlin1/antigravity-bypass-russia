@@ -7,6 +7,7 @@ use crate::system::env::expand_env_vars;
 pub enum TargetKind {
     LanguageServer,
     IdeMainJs,
+    IdeAsar,
     AgyCli,
 }
 
@@ -292,6 +293,21 @@ pub fn find_targets_in_path(root: &Path) -> Vec<FoundTarget> {
         }
     }
 
+    if let Some(asar) = find_asar_in_path(root) {
+        if !targets.iter().any(|t: &FoundTarget| t.path == asar) {
+            let name = asar
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            targets.push(FoundTarget {
+                path: asar,
+                kind: TargetKind::IdeAsar,
+                name: format!("{} (IDE)", name),
+            });
+        }
+    }
+
     // Shallow walk fallback (depth <= 4) for any unconventional subfolder
     walk_targets(root, 0, 4, &mut targets);
 
@@ -385,7 +401,7 @@ pub fn get_quick_status() -> SystemComponentsStatus {
                         status.core_status = Some(state);
                     }
                 }
-                TargetKind::IdeMainJs => {
+                TargetKind::IdeMainJs | TargetKind::IdeAsar => {
                     if status.ide_status.is_none() || status.ide_status == Some(BinaryState::Stock) {
                         status.ide_status = Some(state);
                     }

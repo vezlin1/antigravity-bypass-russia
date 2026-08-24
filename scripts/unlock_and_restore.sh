@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Antigravity Bypass Russia (v1.0.1) for macOS (Apple Silicon & Intel)
+# Antigravity Bypass Russia (v1.1.0) for macOS (Apple Silicon & Intel)
 # Supports: Antigravity 2.0+ (Core), IDE UI (main.js) & Antigravity CLI (agy)
 # Dual-level patching: ARM64 / x64 Opcodes + Strings + Mach-O Code Signing
 # Network: /etc/resolver Scoped Domain DNS Routing + VPN Bypass Support
@@ -35,22 +35,8 @@ INSTALL_DIR="/Library/Application Support/AntigravityBypassRussia"
 
 # --- Domains for Selective DNS Routing ---
 DOMAINS=(
-    "cloudcode-pa.googleapis.com"
     "daily-cloudcode-pa.googleapis.com"
-    "daily-cloudcode-pa.sandbox.googleapis.com"
-    "antigravity-pa.googleapis.com"
-    "antigravity.googleapis.com"
-    "antigravity.google"
-    "antigravity-unleash.goog"
-    "cloudaicompanion.googleapis.com"
-    "cloudaicompanion.sandbox.googleapis.com"
-    "optimizationguide-pa.googleapis.com"
-    "developerprofiles-pa.googleapis.com"
-    "aicode.googleapis.com"
-    "aida.googleapis.com"
-    "geller-pa.googleapis.com"
-    "proactivebackend-pa.googleapis.com"
-    "robinfrontend-pa.googleapis.com"
+    "cloudcode-pa.googleapis.com"
     "generativelanguage.googleapis.com"
     "gemini.google.com"
     "gemini.google"
@@ -66,44 +52,21 @@ DOMAINS=(
     "webchannel-alkalimakersuite-pa.clients6.google.com"
     "alkalimakersuite-pa.googleapis.com"
     "alkalimakersuiteapplets.pa.googleapis.com"
-    "people-pa.clients6.google.com"
     "notebooklm-pa.googleapis.com"
     "notebooklm.googleapis.com"
     "notebooklm.google"
     "notebooklm.google.com"
-    "notebook.google.com"
     "jules.google"
     "jules.google.com"
-    "opal.google"
-    "opal.google.com"
-    "labs.google"
-    "labs.google.com"
-    "flow.google"
     "aisandbox-pa.googleapis.com"
     "deepmind.com"
     "deepmind.google"
-    "stitch.withgoogle.com"
-    "iamcredentials.googleapis.com"
-    "cloudresourcemanager.googleapis.com"
-    "sts.googleapis.com"
     "aiplatform.googleapis.com"
     "s-aiplatform.googleapis.com"
-    "play.googleapis.com"
-    "oauth2.googleapis.com"
-    "apis.google.com"
-    "clients6.google.com"
-    "servicecontrol.googleapis.com"
-    "servicemanagement.googleapis.com"
-    "sheets.googleapis.com"
-    "docs.googleapis.com"
-    "drive.googleapis.com"
-    "script.google.com"
-    "script.googleusercontent.com"
-    "spreadsheets.google.com"
 )
 
 # --- DNS Upstream Providers ---
-XBOX_SERVERS=("111.88.96.50" "111.88.96.51")
+XBOX_SERVERS=("111.88.96.50" "111.88.96.51" "83.220.169.155" "212.109.195.93" "195.133.25.16" "45.155.204.190" "37.230.192.51")
 
 # --- Privilege Elevation & Real User Resolution ---
 if [[ -n "$SUDO_USER" && "$SUDO_USER" != "root" ]]; then
@@ -624,7 +587,7 @@ main_menu() {
 
         show_dashboard
 
-        echo -e "${GREEN}1. Полная разблокировка (Файлы Core 2.0/IDE/CLI + /etc/resolver DNS)${NC}"
+        echo -e "${GREEN}1. Полная разблокировка${NC}"
         echo -e "${CYAN}2. Только файлы (Работа без смены страны аккаунта)${NC}"
         echo -e "${YELLOW}3. Только DNS и сеть (Работа без VPN)${NC}"
         echo -e "4. Указать путь к Antigravity вручную"
