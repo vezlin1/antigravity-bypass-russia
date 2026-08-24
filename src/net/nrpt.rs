@@ -200,7 +200,7 @@ pub fn get_nrpt_status_info() -> (usize, Option<String>, bool) {
                 }
             }
         }
-        let is_relay = ns.as_deref() == Some("127.0.0.1");
+        let is_relay = ns.as_deref() == Some("127.0.0.1") || ns.as_deref() == Some("127.0.0.53");
         (count, ns, is_relay)
     }
 
@@ -337,7 +337,7 @@ fn multi_sz_str(s: &str) -> Vec<u16> {
 }
 
 #[cfg(target_os = "windows")]
-pub fn apply_nrpt_rules_direct(servers_csv: &str, domains: &[&str], tag: &str, display_prefix: &str) -> usize {
+pub fn apply_nrpt_rules_direct(rules: &[(String, String)], tag: &str, display_prefix: &str) -> usize {
     use std::ptr::null_mut;
 
     const HKEY_LOCAL_MACHINE: usize = 0x80000002u32 as i32 as isize as usize;
@@ -371,14 +371,14 @@ pub fn apply_nrpt_rules_direct(servers_csv: &str, domains: &[&str], tag: &str, d
     }
 
     let base_path = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig";
-    let servers_wide = wide_str(servers_csv);
     let comment_wide = wide_str(tag);
     let empty_wide = wide_str("");
     let version_val: u32 = 2;
     let config_options: u32 = 8;
     let mut count = 0;
 
-    for (i, domain) in domains.iter().enumerate() {
+    for (i, (domain, servers_csv)) in rules.iter().enumerate() {
+        let servers_wide = wide_str(servers_csv);
         let rule_key = format!(r"{}\ANTIGRAVITY_BYPASS_{:03}", base_path, i + 1);
         let rule_wide = wide_str(&rule_key);
         let mut hrule: usize = 0;
@@ -419,36 +419,138 @@ pub fn apply_nrpt_rules_direct(servers_csv: &str, domains: &[&str], tag: &str, d
     count
 }
 
-pub fn take_over_conflicting_rules(_namespaces: &[&str]) -> Vec<String> {
-    #[cfg(target_os = "windows")]
-    {
-        let ps_cmd = r#"
-            $res = @()
-            Get-DnsClientNrptRule -ErrorAction SilentlyContinue | ForEach-Object {
-                $rule = $_
-                foreach ($ns in $args) {
-                    if ($rule.Namespace -eq $ns -or $rule.Namespace -eq ".$ns" -or $rule.Namespace -eq $ns.TrimStart('.')) {
-                        Remove-DnsClientNrptRule -Name $rule.Name -Force -ErrorAction SilentlyContinue
-                        $res += $rule.Name
-                        break
-                    }
-                }
-            }
-            $res -join ','
-        "#;
-        let mut cmd = Command::new("powershell");
-        no_window(&mut cmd);
-        cmd.args(["-NoProfile", "-Command", ps_cmd]);
-        for ns in _namespaces {
-            cmd.arg(ns);
-        }
-        let out = cmd.output().ok();
-        if let Some(o) = out {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if !s.is_empty() {
-                return s.split(',').map(|x| x.trim().to_string()).collect();
+fn norm_ns(s: &str) -> String {
+    s.trim().trim_start_matches('.').trim_end_matches('.').to_lowercase()
+}
+
+#[cfg(target_os = "windows")]
+fn parse_multi_sz(bytes: &[u8], len: u32) -> Vec<String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    let u16_len = (len as usize) / 2;
+    if u16_len == 0 {
+        return Vec::new();
+    }
+    let slice: &[u16] = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u16, u16_len) };
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for i in 0..u16_len {
+        if slice[i] == 0 {
+            if i > start {
+                out.push(OsString::from_wide(&slice[start..i]).to_string_lossy().to_string());
+                start = i + 1;
+            } else {
+                break;
             }
         }
     }
-    Vec::new()
+    out
+}
+
+pub fn take_over_conflicting_rules(namespaces: &[&str]) -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        use std::ptr::null_mut;
+
+        const HKEY_LOCAL_MACHINE: usize = 0x80000002u32 as i32 as isize as usize;
+        const KEY_READ: u32 = 0x20019;
+        const KEY_WRITE: u32 = 0x20006;
+
+        #[link(name = "advapi32")]
+        extern "system" {
+            fn RegOpenKeyExW(hKey: usize, lpSubKey: *const u16, ulOptions: u32, samDesired: u32, phkResult: *mut usize) -> i32;
+            fn RegEnumKeyExW(hKey: usize, dwIndex: u32, lpName: *mut u16, lpcchName: *mut u32, lpReserved: *mut u32, lpClass: *mut u16, lpcchClass: *mut u32, lpftLastWriteTime: *mut u64) -> i32;
+            fn RegQueryValueExW(hKey: usize, lpValueName: *const u16, lpReserved: *mut u32, lpType: *mut u32, lpData: *mut u8, lpcbData: *mut u32) -> i32;
+            fn RegDeleteKeyW(hKey: usize, lpSubKey: *const u16) -> i32;
+            fn RegCloseKey(hKey: usize) -> i32;
+        }
+
+        let ours: Vec<String> = namespaces.iter().map(|s| norm_ns(s)).collect();
+        let subkey = wide_str(r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig");
+        let mut hkey: usize = 0;
+        if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.as_ptr(), 0, KEY_READ | KEY_WRITE, &mut hkey) } != 0 {
+            return Vec::new();
+        }
+
+        let comment_val = wide_str("Comment");
+        let display_val = wide_str("DisplayName");
+        let name_val = wide_str("Name");
+        let mut keys_to_delete: Vec<(Vec<u16>, String)> = Vec::new();
+        let mut idx = 0u32;
+
+        loop {
+            let mut name_buf = [0u16; 256];
+            let mut name_len = name_buf.len() as u32;
+            let ret = unsafe {
+                RegEnumKeyExW(hkey, idx, name_buf.as_mut_ptr(), &mut name_len, null_mut(), null_mut(), null_mut(), null_mut())
+            };
+            if ret != 0 {
+                break;
+            }
+            idx += 1;
+
+            let key_os = OsString::from_wide(&name_buf[..name_len as usize]);
+            let key_str = key_os.to_string_lossy().to_string();
+            let rule_subkey = wide_str(&format!(
+                r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\DnsPolicyConfig\{}",
+                key_str
+            ));
+            let mut hrule: usize = 0;
+            if unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, rule_subkey.as_ptr(), 0, KEY_READ, &mut hrule) } != 0 {
+                continue;
+            }
+
+            let mut comment = String::new();
+            let mut display_name = String::new();
+            let mut data = [0u8; 512];
+            let mut data_len = data.len() as u32;
+            if unsafe { RegQueryValueExW(hrule, comment_val.as_ptr(), null_mut(), null_mut(), data.as_mut_ptr(), &mut data_len) } == 0 {
+                comment = parse_wide_string(&data, data_len);
+            }
+            let mut disp_data = [0u8; 512];
+            let mut disp_len = disp_data.len() as u32;
+            if unsafe { RegQueryValueExW(hrule, display_val.as_ptr(), null_mut(), null_mut(), disp_data.as_mut_ptr(), &mut disp_len) } == 0 {
+                display_name = parse_wide_string(&disp_data, disp_len);
+            }
+
+            let is_ours = key_str.starts_with("ANTIGRAVITY_BYPASS_")
+                || comment.contains(NRPT_TAG)
+                || display_name.contains(NRPT_TAG);
+
+            if !is_ours {
+                let mut ns_data = [0u8; 2048];
+                let mut ns_len = ns_data.len() as u32;
+                if unsafe { RegQueryValueExW(hrule, name_val.as_ptr(), null_mut(), null_mut(), ns_data.as_mut_ptr(), &mut ns_len) } == 0 {
+                    let names = parse_multi_sz(&ns_data, ns_len);
+                    let overlap = names.iter().any(|n| {
+                        let nn = norm_ns(n);
+                        ours.iter().any(|o| o == &nn)
+                    });
+                    if overlap {
+                        let mut key_wide = name_buf[..name_len as usize].to_vec();
+                        key_wide.push(0);
+                        keys_to_delete.push((key_wide, key_str.clone()));
+                    }
+                }
+            }
+            unsafe { RegCloseKey(hrule) };
+        }
+
+        let mut removed = Vec::new();
+        for (key_wide, key_str) in keys_to_delete {
+            if unsafe { RegDeleteKeyW(hkey, key_wide.as_ptr()) } == 0 {
+                removed.push(key_str);
+            }
+        }
+        unsafe { RegCloseKey(hkey) };
+        removed
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = namespaces;
+        Vec::new()
+    }
 }

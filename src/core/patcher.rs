@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use crate::core::asar::{asar_js_is_patched, patch_asar_main_js, restore_asar_main_js};
 use crate::core::detector::{FoundTarget, TargetKind};
 use crate::core::opcodes::*;
 use crate::system::fs_utils::robust_write_file;
@@ -50,6 +51,15 @@ pub fn check_binary_state(path: &Path) -> BinaryState {
 }
 
 fn check_binary_state_uncached(path: &Path) -> BinaryState {
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    if file_name.ends_with(".asar") {
+        return match asar_js_is_patched(path) {
+            Some(true) => BinaryState::Patched,
+            Some(false) => BinaryState::Stock,
+            None => BinaryState::Unknown,
+        };
+    }
+
     let Ok(mut file) = File::open(path) else {
         return BinaryState::Unknown;
     };
@@ -58,17 +68,11 @@ fn check_binary_state_uncached(path: &Path) -> BinaryState {
         return BinaryState::Unknown;
     }
 
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
     if file_name.ends_with(".js") {
         let Ok(text) = String::from_utf8(data) else {
             return BinaryState::Unknown;
         };
-        let is_patched = text.contains("resetIsTierGCPTos(),true")
-            || text.contains("resetIsTierGCPTos();true")
-            || text.contains("resetIsTierGCPTos(),!0")
-            || text.contains("resetIsTierGCPTos();!0");
-
-        if is_patched {
+        if regex_ide_js_patched().is_match(&text) {
             return BinaryState::Patched;
         }
         if regex_ide_main_js_stock().is_match(&text) {
@@ -90,6 +94,7 @@ fn check_binary_state_uncached(path: &Path) -> BinaryState {
     if regex_mgr_x64_patched().is_match(&data)
         || regex_mgr_arm64_patched().is_match(&data)
         || regex_cli_x64_patched().is_match(&data)
+        || regex_cli_x64_long_patched().is_match(&data)
     {
         return BinaryState::Patched;
     }
@@ -97,6 +102,7 @@ fn check_binary_state_uncached(path: &Path) -> BinaryState {
     if regex_mgr_x64_orig().is_match(&data)
         || regex_mgr_arm64_orig().is_match(&data)
         || regex_cli_x64_orig().is_match(&data)
+        || regex_cli_x64_long_orig().is_match(&data)
     {
         return BinaryState::Stock;
     }
@@ -113,6 +119,7 @@ pub fn patch_target(target: &FoundTarget) -> Result<String, String> {
     kill_processes();
     match target.kind {
         TargetKind::IdeMainJs => patch_main_js(&target.path),
+        TargetKind::IdeAsar => patch_asar_main_js(&target.path),
         TargetKind::LanguageServer | TargetKind::AgyCli => patch_binary_file(&target.path),
     }
 }
@@ -122,6 +129,7 @@ pub fn restore_target(target: &FoundTarget) -> Result<String, String> {
     kill_processes();
     match target.kind {
         TargetKind::IdeMainJs => restore_main_js(&target.path),
+        TargetKind::IdeAsar => restore_asar_main_js(&target.path),
         TargetKind::LanguageServer | TargetKind::AgyCli => restore_binary_file(&target.path),
     }
 }
@@ -130,12 +138,7 @@ fn patch_main_js(path: &Path) -> Result<String, String> {
     let data = fs::read(path).map_err(|e| format!("Ошибка чтения {}: {}", path.display(), e))?;
     let content = String::from_utf8(data).map_err(|e| format!("Файл не в UTF-8: {}", e))?;
 
-    let is_already = content.contains("resetIsTierGCPTos(),true")
-        || content.contains("resetIsTierGCPTos();true")
-        || content.contains("resetIsTierGCPTos(),!0")
-        || content.contains("resetIsTierGCPTos();!0");
-
-    if is_already {
+    if regex_ide_js_patched().is_match(&content) {
         return Ok("Уже пропатчен (isGoogleInternal -> true)".to_string());
     }
 
@@ -145,14 +148,36 @@ fn patch_main_js(path: &Path) -> Result<String, String> {
     }
 
     let re = regex_ide_main_js_stock();
-    let count = re.find_iter(&content).count();
-    if count == 0 {
+    let spans: Vec<(usize, usize, usize)> = re
+        .captures_iter(&content)
+        .filter_map(|c| {
+            let full = c.get(0)?;
+            let prefix = c.get(1)?;
+            Some((full.start(), prefix.end(), full.end()))
+        })
+        .collect();
+
+    if spans.is_empty() {
         return Err("Сигнатура isGoogleInternal не найдена".to_string());
     }
 
-    let new_content = re.replace_all(&content, "${1}true").to_string();
+    let mut new_content = content;
+    for (_start, prefix_end, end) in spans.iter().copied().rev() {
+        let rest_len = end - prefix_end;
+        if rest_len < 4 {
+            continue;
+        }
+        let replacement = format!("true{}", " ".repeat(rest_len - 4));
+        new_content.replace_range(prefix_end..end, &replacement);
+    }
+
+    let count = regex_ide_js_patched().find_iter(&new_content).count();
+    if count == 0 {
+        return Err("Не удалось сохранить размер при патче main.js".to_string());
+    }
+
     robust_write_file(path, new_content.as_bytes())?;
-    Ok(format!("Пропатчен успешно (замен: {})", count))
+    Ok(format!("Пропатчен успешно (замен: {}, размер сохранён)", count))
 }
 
 fn restore_main_js(path: &Path) -> Result<String, String> {
@@ -175,25 +200,12 @@ fn restore_main_js(path: &Path) -> Result<String, String> {
 
     let data = fs::read(path).map_err(|e| format!("Ошибка чтения: {}", e))?;
     let content = String::from_utf8_lossy(&data);
-    let patched_patterns = [
-        ("resetIsTierGCPTos(),true", "resetIsTierGCPTos(),this.isGoogleInternal"),
-        ("resetIsTierGCPTos();true", "resetIsTierGCPTos();this.isGoogleInternal"),
-        ("resetIsTierGCPTos(),!0", "resetIsTierGCPTos(),this.isGoogleInternal"),
-        ("resetIsTierGCPTos();!0", "resetIsTierGCPTos();this.isGoogleInternal"),
-    ];
-
-    let mut restored = content.to_string();
-    let mut count = 0;
-    for (pat, repl) in &patched_patterns {
-        if restored.contains(pat) {
-            restored = restored.replace(pat, repl);
-            count += 1;
+    if let Ok(re) = regex::Regex::new(r"(resetIsTierGCPTos\(\)[ \t\r\n]*[,;][ \t\r\n]*)true[ \t\r\n]*") {
+        if re.is_match(&content) {
+            let restored = re.replace_all(&content, "${1}this.isGoogleInternal").to_string();
+            robust_write_file(path, restored.as_bytes())?;
+            return Ok("Откат main.js выполнен без .bak".to_string());
         }
-    }
-
-    if count > 0 {
-        robust_write_file(path, restored.as_bytes())?;
-        return Ok(format!("Откат выполнен (замен: {})", count));
     }
 
     Ok("Уже в исходном состоянии".to_string())
@@ -221,9 +233,14 @@ fn patch_binary_file(path: &Path) -> Result<String, String> {
 
     let re_x64_orig = regex_mgr_x64_orig();
     let re_x64_patched = regex_mgr_x64_patched();
-    if let Some(m) = re_x64_orig.find(&data) {
-        let start = m.start();
-        data[start..start + MGR_GATE_X64_FIX.len()].copy_from_slice(MGR_GATE_X64_FIX);
+    let x64_hits: Vec<usize> = re_x64_orig.find_iter(&data).map(|m| m.start()).collect();
+    if x64_hits.len() > 5 {
+        return Err("x64 Core: слишком много совпадений сигнатуры, отказ патчить".to_string());
+    }
+    if !x64_hits.is_empty() {
+        for start in x64_hits {
+            data[start..start + MGR_GATE_X64_FIX.len()].copy_from_slice(MGR_GATE_X64_FIX);
+        }
         applied_patches.push("x64 Core 2.0 (hasValidAuth=true)");
     } else if re_x64_patched.is_match(&data) {
         applied_patches.push("x64 Core 2.0 (уже пропатчен)");
@@ -231,19 +248,40 @@ fn patch_binary_file(path: &Path) -> Result<String, String> {
 
     let re_arm_orig = regex_mgr_arm64_orig();
     let re_arm_patched = regex_mgr_arm64_patched();
-    if let Some(m) = re_arm_orig.find(&data) {
-        let start = m.start();
-        data[start..start + MGR_GATE_ARM64_FIX.len()].copy_from_slice(MGR_GATE_ARM64_FIX);
+    let arm_hits: Vec<usize> = re_arm_orig.find_iter(&data).map(|m| m.start()).collect();
+    if arm_hits.len() > 5 {
+        return Err("ARM64 Core: слишком много совпадений сигнатуры, отказ патчить".to_string());
+    }
+    if !arm_hits.is_empty() {
+        for start in arm_hits {
+            data[start..start + MGR_GATE_ARM64_FIX.len()].copy_from_slice(MGR_GATE_ARM64_FIX);
+        }
         applied_patches.push("ARM64 Core 2.0 (hasValidAuth=true)");
     } else if re_arm_patched.is_match(&data) {
         applied_patches.push("ARM64 Core 2.0 (уже пропатчен)");
     }
 
+    let re_cli_long_orig = regex_cli_x64_long_orig();
+    let re_cli_long_patched = regex_cli_x64_long_patched();
+    let cli_long_hits: Vec<usize> = re_cli_long_orig.find_iter(&data).map(|m| m.start()).collect();
+    if !cli_long_hits.is_empty() && cli_long_hits.len() <= 8 {
+        for start in cli_long_hits {
+            data[start..start + CLI_GATE_X64_LONG_FIX.len()].copy_from_slice(CLI_GATE_X64_LONG_FIX);
+        }
+        applied_patches.push("CLI Gate long (agy)");
+    } else if re_cli_long_patched.is_match(&data) {
+        applied_patches.push("CLI Gate long (уже пропатчен)");
+    }
+
     let re_cli_orig = regex_cli_x64_orig();
     let re_cli_patched = regex_cli_x64_patched();
-    if let Some(m) = re_cli_orig.find(&data) {
-        let start = m.start();
-        data[start..start + CLI_GATE_X64_FIX.len()].copy_from_slice(CLI_GATE_X64_FIX);
+    let cli_hits: Vec<usize> = re_cli_orig.find_iter(&data).map(|m| m.start()).collect();
+    if cli_hits.len() > 8 {
+        // too generic — skip rather than corrupt the binary
+    } else if !cli_hits.is_empty() {
+        for start in cli_hits {
+            data[start..start + CLI_GATE_X64_FIX.len()].copy_from_slice(CLI_GATE_X64_FIX);
+        }
         applied_patches.push("CLI Gate (agy)");
     } else if re_cli_patched.is_match(&data) {
         applied_patches.push("CLI Gate (уже пропатчен)");
@@ -292,30 +330,8 @@ fn restore_binary_file(path: &Path) -> Result<String, String> {
         }
     }
 
+    // Without .bak do not guess original jump offsets — only reverse the string swap.
     let mut data = fs::read(path).map_err(|e| format!("Ошибка чтения {}: {}", path.display(), e))?;
-    let mut restored_patches = Vec::new();
-
-    let re_x64_patched = regex_mgr_x64_patched();
-    if let Some(m) = re_x64_patched.find(&data) {
-        let start = m.start();
-        data[start..start + MGR_GATE_X64_RESTORE.len()].copy_from_slice(MGR_GATE_X64_RESTORE);
-        restored_patches.push("x64 Core 2.0 (возврат opcodes)");
-    }
-
-    let re_arm_patched = regex_mgr_arm64_patched();
-    if let Some(m) = re_arm_patched.find(&data) {
-        let start = m.start();
-        data[start..start + MGR_GATE_ARM64_RESTORE.len()].copy_from_slice(MGR_GATE_ARM64_RESTORE);
-        restored_patches.push("ARM64 Core 2.0 (возврат opcodes)");
-    }
-
-    let re_cli_patched = regex_cli_x64_patched();
-    if let Some(m) = re_cli_patched.find(&data) {
-        let start = m.start();
-        data[start..start + CLI_GATE_X64_RESTORE.len()].copy_from_slice(CLI_GATE_X64_RESTORE);
-        restored_patches.push("CLI Gate (возврат opcodes)");
-    }
-
     let finder = memchr::memmem::Finder::new(STRING_TO.as_bytes());
     let to_bytes = STRING_FROM.as_bytes();
     let from_len = STRING_TO.len();
@@ -328,13 +344,12 @@ fn restore_binary_file(path: &Path) -> Result<String, String> {
         pos = abs_idx + from_len;
     }
     if count > 0 {
-        restored_patches.push("Строковый откат (inexigible -> ineligible)");
-    }
-
-    if !restored_patches.is_empty() {
         robust_write_file(path, &data)?;
-        return Ok(restored_patches.join(", "));
+        return Ok(format!(
+            "Строковый откат без .bak (inexigible -> ineligible, {}). Опкоды не тронуты — нужен .bak",
+            count
+        ));
     }
 
-    Ok("Уже в исходном состоянии".to_string())
+    Ok("Нет .bak и нечего откатывать строками".to_string())
 }

@@ -13,8 +13,9 @@ fn main() {
             res.set("ProductName", "ANTIGRAVITY-BYPASS-RUSSIA");
             res.set("OriginalFilename", "antigravity-bypass-russia.exe");
             res.set("LegalCopyright", "Copyright (c) 2026 Antigravity Contributors");
-            res.set("FileVersion", "1.0.1");
-            res.set("ProductVersion", "1.0.1");
+            let ver = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "1.1.0".into());
+            res.set("FileVersion", &ver);
+            res.set("ProductVersion", &ver);
             
             res.set_manifest(r#"
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">

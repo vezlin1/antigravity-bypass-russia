@@ -1,7 +1,5 @@
-#![allow(dead_code)]
-
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::time::Duration;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddrV4, UdpSocket};
+use std::time::{Duration, Instant};
 use crate::net::socket::bind_socket_to_interface;
 
 #[inline]
@@ -26,74 +24,142 @@ pub fn build_query(name: &str, id: u16) -> Vec<u8> {
 }
 
 #[inline]
-pub fn parse_a_records(buf: &[u8], expect_id: u16) -> Vec<Ipv4Addr> {
-    if buf.len() < 12 {
-        return Vec::new();
-    }
-    let id = u16::from_be_bytes([buf[0], buf[1]]);
-    if id != expect_id {
-        return Vec::new();
-    }
-    let flags = u16::from_be_bytes([buf[2], buf[3]]);
-    if (flags & 0x8000) == 0 || (flags & 0x000F) != 0 {
-        return Vec::new();
-    }
-
-    let qdcount = u16::from_be_bytes([buf[4], buf[5]]) as usize;
-    let ancount = u16::from_be_bytes([buf[6], buf[7]]) as usize;
-
-    let mut pos = 12;
-    for _ in 0..qdcount {
-        pos = skip_name(buf, pos);
-        if pos + 4 > buf.len() {
-            return Vec::new();
-        }
-        pos += 4;
-    }
-
-    let mut addrs = Vec::new();
-    for _ in 0..ancount {
-        if pos >= buf.len() {
-            break;
-        }
-        pos = skip_name(buf, pos);
-        if pos + 10 > buf.len() {
-            break;
-        }
-        let rtype = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
-        let rclass = u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]);
-        let rdlen = u16::from_be_bytes([buf[pos + 8], buf[pos + 9]]) as usize;
-        pos += 10;
-
-        if pos + rdlen > buf.len() {
-            break;
-        }
-        if rtype == 1 && rclass == 1 && rdlen == 4 {
-            let ip = Ipv4Addr::new(buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]);
-            if !ip.is_unspecified() && !addrs.contains(&ip) {
-                addrs.push(ip);
-            }
-        }
-        pos += rdlen;
-    }
-    addrs
+fn skip_name(buf: &[u8], pos: usize) -> usize {
+    skip_name_opt(buf, pos).unwrap_or(buf.len())
 }
 
-#[inline]
-fn skip_name(buf: &[u8], mut pos: usize) -> usize {
+fn skip_name_opt(buf: &[u8], mut pos: usize) -> Option<usize> {
     let mut hops = 0;
     while pos < buf.len() && hops < 64 {
         hops += 1;
-        let len = buf[pos] as usize;
+        let len = *buf.get(pos)? as usize;
         if len == 0 {
-            return pos + 1;
+            return Some(pos + 1);
         }
         if (len & 0xC0) == 0xC0 {
-            return pos + 2;
+            return if pos + 1 < buf.len() { Some(pos + 2) } else { None };
         }
         pos += 1 + len;
     }
-    pos.min(buf.len())
+    None
+}
+
+pub fn answer_addrs(buf: &[u8]) -> Vec<IpAddr> {
+    let mut out = Vec::new();
+    if buf.len() < 12 {
+        return out;
+    }
+    let questions = u16::from_be_bytes([buf[4], buf[5]]) as usize;
+    let answers = u16::from_be_bytes([buf[6], buf[7]]) as usize;
+    let mut i = 12;
+    for _ in 0..questions {
+        i = match skip_name_opt(buf, i) {
+            Some(n) => n + 4,
+            None => return out,
+        };
+    }
+    for _ in 0..answers {
+        i = match skip_name_opt(buf, i) {
+            Some(n) => n,
+            None => return out,
+        };
+        if i + 10 > buf.len() {
+            return out;
+        }
+        let rtype = u16::from_be_bytes([buf[i], buf[i + 1]]);
+        let rdlen = u16::from_be_bytes([buf[i + 8], buf[i + 9]]) as usize;
+        i += 10;
+        if i + rdlen > buf.len() {
+            return out;
+        }
+        match (rtype, rdlen) {
+            (1, 4) => out.push(IpAddr::V4(Ipv4Addr::new(buf[i], buf[i + 1], buf[i + 2], buf[i + 3]))),
+            (28, 16) => {
+                let mut o = [0u8; 16];
+                o.copy_from_slice(&buf[i..i + 16]);
+                out.push(IpAddr::V6(Ipv6Addr::from(o)));
+            }
+            _ => {}
+        }
+        i += rdlen;
+    }
+    out
+}
+
+/// Drop listed addresses from the answer section when the packet shape is simple
+/// (no authority, optional trailing OPT). Returns None if the edit is unsafe.
+pub fn without_addrs(reply: &[u8], drop: &[IpAddr]) -> Option<Vec<u8>> {
+    if reply.len() < 12 || drop.is_empty() {
+        return None;
+    }
+    let questions = u16::from_be_bytes([reply[4], reply[5]]) as usize;
+    let answers = u16::from_be_bytes([reply[6], reply[7]]) as usize;
+    let authority = u16::from_be_bytes([reply[8], reply[9]]) as usize;
+    let additional = u16::from_be_bytes([reply[10], reply[11]]) as usize;
+    if authority != 0 || additional > 1 || answers == 0 {
+        return None;
+    }
+
+    let mut i = 12;
+    for _ in 0..questions {
+        i = skip_name_opt(reply, i)? + 4;
+    }
+    let question_end = i;
+
+    let mut kept: Vec<(usize, usize)> = Vec::new();
+    let mut removed = 0usize;
+    for _ in 0..answers {
+        let start = i;
+        let after_name = skip_name_opt(reply, i)?;
+        if after_name + 10 > reply.len() {
+            return None;
+        }
+        let rtype = u16::from_be_bytes([reply[after_name], reply[after_name + 1]]);
+        let rdlen = u16::from_be_bytes([reply[after_name + 8], reply[after_name + 9]]) as usize;
+        let rdata = after_name + 10;
+        let end = rdata.checked_add(rdlen)?;
+        if end > reply.len() {
+            return None;
+        }
+        let addr = match (rtype, rdlen) {
+            (1, 4) => Some(IpAddr::V4(Ipv4Addr::new(
+                reply[rdata],
+                reply[rdata + 1],
+                reply[rdata + 2],
+                reply[rdata + 3],
+            ))),
+            (28, 16) => {
+                let mut o = [0u8; 16];
+                o.copy_from_slice(&reply[rdata..rdata + 16]);
+                Some(IpAddr::V6(Ipv6Addr::from(o)))
+            }
+            _ => None,
+        };
+        if addr.is_some_and(|a| drop.contains(&a)) {
+            removed += 1;
+        } else {
+            kept.push((start, end));
+        }
+        i = end;
+    }
+    if removed == 0 || kept.is_empty() {
+        return None;
+    }
+    let tail = &reply[i..];
+    if additional == 1 && (tail.len() < 11 || tail[0] != 0) {
+        return None;
+    }
+
+    let mut out = Vec::with_capacity(reply.len());
+    out.extend_from_slice(&reply[..12]);
+    let count = (answers - removed) as u16;
+    out[6..8].copy_from_slice(&count.to_be_bytes());
+    out.extend_from_slice(&reply[12..question_end]);
+    for (start, end) in kept {
+        out.extend_from_slice(&reply[start..end]);
+    }
+    out.extend_from_slice(tail);
+    Some(out)
 }
 
 pub fn question_name(buf: &[u8]) -> Option<String> {
@@ -127,13 +193,55 @@ pub fn question_name(buf: &[u8]) -> Option<String> {
     }
 }
 
+/// DNS question type (A=1, AAAA=28, ...) from a standard query packet.
+pub fn question_type(buf: &[u8]) -> Option<u16> {
+    if buf.len() < 12 {
+        return None;
+    }
+    let mut pos = 12;
+    pos = skip_name(buf, pos);
+    if pos + 4 > buf.len() {
+        return None;
+    }
+    Some(u16::from_be_bytes([buf[pos], buf[pos + 1]]))
+}
+
+/// NODATA response for AAAA: keep clients from falling back to IPv6.
+pub fn nodata_response(query: &[u8]) -> Vec<u8> {
+    let mut resp = query.to_vec();
+    if resp.len() < 12 {
+        resp.resize(12, 0);
+    }
+    // QR=1, RD copied, RA=1, RCODE=0, ANCOUNT=0
+    resp[2] = (resp[2] & 0x01) | 0x80;
+    resp[3] = 0x80;
+    resp[6] = 0;
+    resp[7] = 0;
+    resp[8] = 0;
+    resp[9] = 0;
+    resp[10] = 0;
+    resp[11] = 0;
+    resp
+}
+
+pub fn is_successful_response(buf: &[u8]) -> bool {
+    if buf.len() < 12 {
+        return false;
+    }
+    let flags = u16::from_be_bytes([buf[2], buf[3]]);
+    (flags & 0x8000) != 0 && (flags & 0x000F) == 0
+}
+
 pub fn query_raw_via(
     packet: &[u8],
-    server: Ipv4Addr,
-    _if_index: u32,
+    server: std::net::Ipv4Addr,
+    if_index: u32,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
     let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Bind error: {}", e))?;
+    if if_index > 0 {
+        let _ = bind_socket_to_interface(&sock, if_index);
+    }
     let _ = sock.set_read_timeout(Some(timeout));
     let _ = sock.set_write_timeout(Some(timeout));
 
@@ -141,26 +249,23 @@ pub fn query_raw_via(
     sock.send_to(packet, target)
         .map_err(|e| format!("Send error: {}", e))?;
 
+    let want_id = packet.get(0..2).map(|b| [b[0], b[1]]);
+    let deadline = Instant::now() + timeout;
     let mut buf = [0u8; 1500];
-    let (n, _) = sock
-        .recv_from(&mut buf)
-        .map_err(|e| format!("Recv error from {}: {}", server, e))?;
-    Ok(buf[..n].to_vec())
-}
-
-pub fn resolve_a_via(host: &str, server: Ipv4Addr, if_index: u32) -> Result<Vec<Ipv4Addr>, String> {
-    let id = (std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        & 0xFFFF) as u16;
-
-    let pkt = build_query(host, id);
-    let resp = query_raw_via(&pkt, server, if_index, Duration::from_millis(1500))?;
-    let addrs = parse_a_records(&resp, id);
-    if addrs.is_empty() {
-        Err("No A records".to_string())
-    } else {
-        Ok(addrs)
+    loop {
+        let (n, from) = sock
+            .recv_from(&mut buf)
+            .map_err(|e| format!("Recv error from {}: {}", server, e))?;
+        let right_source = from.ip() == IpAddr::V4(server);
+        let right_id = match (want_id, n >= 12) {
+            (Some(id), true) => buf[0..2] == id,
+            _ => false,
+        };
+        if right_source && right_id {
+            return Ok(buf[..n].to_vec());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("Recv error from {}: timeout", server));
+        }
     }
 }

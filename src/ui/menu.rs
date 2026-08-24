@@ -1,69 +1,58 @@
-use crate::core::detector::{find_asar_in_path, find_installations, find_targets_in_path};
+use std::path::Path;
+use crate::core::asar::read_asar_package_version;
+use crate::core::detector::{find_asar_in_path, find_installations, find_targets_in_path, FoundTarget};
 use crate::core::patcher::{check_binary_state, patch_target, restore_target, BinaryState};
 use crate::core::v8_cache::clear_ide_v8_caches;
-use crate::core::asar::read_asar_package_version;
-use crate::net::health::test_google_connectivity;
 use crate::net::nrpt::get_nrpt_status_info;
-use crate::net::provider::DnsProvider;
 use crate::net::{apply_dns_rules, remove_dns_rules};
 use crate::system::env::{expand_env_vars, mask_path};
 use crate::system::privilege::is_admin;
 use crate::ui::dashboard::{banner, print_dashboard};
 use crate::ui::terminal::{clear_screen, pause, prompt};
 
-pub fn select_dns_provider() -> DnsProvider {
-    clear_screen();
-    banner();
-    println!("\x1b[96m=== ВЫБОР DNS ДЛЯ РАЗБЛОКИРОВКИ API И СЕТИ ===\x1b[0m\n");
-    println!("1. \x1b[92mXbox-DNS.ru\x1b[0m (Рекомендуется, быстрый SmartDNS в РФ)");
-    println!("2. Свой DNS (ввести IP-адрес вручную)");
+fn patch_root(root: &Path) {
+    println!("\x1b[96mПапка:\x1b[0m {}", mask_path(root));
+    for t in find_targets_in_path(root) {
+        print_patch_result(&t, patch_target(&t));
+    }
+}
 
-    loop {
-        match prompt("\nВыберите DNS [1-2, Enter=1]: ").as_str() {
-            "1" | "" => return DnsProvider::XboxDns,
-            "2" => {
-                let custom = prompt("Введите IP-адреса DNS через запятую: ");
-                if !custom.is_empty() {
-                    return DnsProvider::Custom(custom);
-                }
-            }
-            _ => println!("\x1b[31mНеверный выбор.\x1b[0m"),
-        }
+fn print_patch_result(t: &FoundTarget, result: Result<String, String>) {
+    match result {
+        Ok(msg) => println!("  \x1b[92m[✓]\x1b[0m {} - {}", t.name, msg),
+        Err(e) => println!("  \x1b[31m[✗]\x1b[0m {} - {}", t.name, e),
+    }
+}
+
+fn apply_files_side() {
+    let caches = clear_ide_v8_caches();
+    println!("  \x1b[92m[✓]\x1b[0m Кэш V8 сброшен ({} папок)", caches);
+    for note in crate::core::endpoint::apply_all() {
+        println!("  \x1b[92m[✓]\x1b[0m Endpoint: {}", note);
     }
 }
 
 pub fn handle_unlock_all() {
-    let provider = select_dns_provider();
     clear_screen();
     banner();
-    println!("\x1b[92m=== ПОЛНАЯ РАЗБЛОКИРОВКА (ФАЙЛЫ + DNS/СЕТЬ) ===\x1b[0m\n");
+    println!("\x1b[92m=== ПОЛНАЯ РАЗБЛОКИРОВКА ===\x1b[0m\n");
 
     let installs = find_installations();
     if installs.is_empty() {
         println!("\x1b[93m[!] Antigravity не найден в стандартных путях (используйте пункт 4 для ручного ввода).\x1b[0m");
     }
-
     for inst in &installs {
-        println!("\x1b[96mПапка:\x1b[0m {}", mask_path(inst));
-        let targets = find_targets_in_path(inst);
-        for t in &targets {
-            match patch_target(t) {
-                Ok(msg) => println!("  \x1b[92m[✓]\x1b[0m {} - {}", t.name, msg),
-                Err(e) => println!("  \x1b[31m[✗]\x1b[0m {} - {}", t.name, e),
-            }
-        }
+        patch_root(inst);
+    }
+    apply_files_side();
+
+    println!("\n\x1b[93mНастройка сети...\x1b[0m");
+    match apply_dns_rules() {
+        Ok(msg) => println!("  \x1b[92m[✓]\x1b[0m {}", msg),
+        Err(e) => println!("  \x1b[31m[✗]\x1b[0m Ошибка сети: {}", e),
     }
 
-    let caches = clear_ide_v8_caches();
-    println!("  \x1b[92m[✓]\x1b[0m Кэш V8 сброшен ({} папок)", caches);
-
-    println!("\n\x1b[93mНастройка селективной DNS-маршрутизации через {}...\x1b[0m", provider.name());
-    match apply_dns_rules(&provider) {
-        Ok(_) => println!("  \x1b[92m[✓]\x1b[0m Правила DNS и локальный релей успешно применены!"),
-        Err(e) => println!("  \x1b[31m[✗]\x1b[0m Ошибка DNS: {}", e),
-    }
-
-    println!("\n\x1b[92mГотово! Запустите Antigravity и войдите в аккаунт.\x1b[0m");
+    println!("\n\x1b[92mГотово. Запустите Antigravity и войдите в аккаунт.\x1b[0m");
     pause();
 }
 
@@ -76,34 +65,23 @@ pub fn handle_patch_files_only() {
     if installs.is_empty() {
         println!("\x1b[93m[!] Antigravity не найден в стандартных путях (используйте пункт 4 для ручного ввода).\x1b[0m");
     }
-
     for inst in &installs {
-        println!("\x1b[96mПапка:\x1b[0m {}", mask_path(inst));
-        let targets = find_targets_in_path(inst);
-        for t in &targets {
-            match patch_target(t) {
-                Ok(msg) => println!("  \x1b[92m[✓]\x1b[0m {} - {}", t.name, msg),
-                Err(e) => println!("  \x1b[31m[✗]\x1b[0m {} - {}", t.name, e),
-            }
-        }
+        patch_root(inst);
     }
-
-    let caches = clear_ide_v8_caches();
-    println!("  \x1b[92m[✓]\x1b[0m Кэш V8 сброшен ({} папок)", caches);
+    apply_files_side();
     println!("\n\x1b[92m[✓] Патчинг файлов завершен! Запустите Antigravity.\x1b[0m");
     pause();
 }
 
 pub fn handle_dns_only() {
-    let provider = select_dns_provider();
     clear_screen();
     banner();
-    println!("\x1b[93m=== ТОЛЬКО DNS И СЕТЬ (РАБОТА БЕЗ VPN) ===\x1b[0m\n");
-    println!("Применение селективной маршрутизации через {}...", provider.name());
+    println!("\x1b[93m=== ТОЛЬКО СЕТЬ ===\x1b[0m\n");
+    println!("Настройка сети...");
 
-    match apply_dns_rules(&provider) {
-        Ok(_) => println!("\x1b[92m[✓] Правила DNS, локальный релей и маршруты успешно применены!\x1b[0m"),
-        Err(e) => println!("\x1b[31m[✗] Ошибка настройки DNS: {}\x1b[0m", e),
+    match apply_dns_rules() {
+        Ok(msg) => println!("\x1b[92m[✓] {}\x1b[0m", msg),
+        Err(e) => println!("\x1b[31m[✗] Ошибка сети: {}\x1b[0m", e),
     }
     pause();
 }
@@ -130,13 +108,9 @@ pub fn handle_manual_path() {
     } else {
         println!("Найдено целей: {}\n", targets.len());
         for t in &targets {
-            match patch_target(t) {
-                Ok(msg) => println!("  \x1b[92m[✓]\x1b[0m {} - {}", t.name, msg),
-                Err(e) => println!("  \x1b[31m[✗]\x1b[0m {} - {}", t.name, e),
-            }
+            print_patch_result(t, patch_target(t));
         }
-        let caches = clear_ide_v8_caches();
-        println!("  \x1b[92m[✓]\x1b[0m Кэш V8 сброшен ({} папок)", caches);
+        apply_files_side();
         println!("\n\x1b[92m[✓] Патчинг по указанному пути успешно завершен! Запустите Antigravity.\x1b[0m");
     }
     pause();
@@ -152,10 +126,7 @@ pub fn handle_rollback() {
         println!("\x1b[96mПапка:\x1b[0m {}", mask_path(inst));
         let targets = find_targets_in_path(inst);
         for t in &targets {
-            match restore_target(t) {
-                Ok(msg) => println!("  \x1b[92m[✓]\x1b[0m {} - {}", t.name, msg),
-                Err(e) => println!("  \x1b[31m[✗]\x1b[0m {} - {}", t.name, e),
-            }
+            print_patch_result(t, restore_target(t));
         }
 
         let app_dir = inst.join("resources").join("app");
@@ -169,6 +140,9 @@ pub fn handle_rollback() {
     let caches = clear_ide_v8_caches();
     println!("  \x1b[92m[✓]\x1b[0m Кэш V8 сброшен ({} папок)", caches);
 
+    crate::core::endpoint::remove_all();
+    println!("  \x1b[92m[✓]\x1b[0m jetski.cloudCodeUrl / CLOUD_CODE_URL сняты");
+
     println!("\n\x1b[93mУдаление сетевых правил и служб:\x1b[0m");
     remove_dns_rules();
     println!("  \x1b[92m[✓]\x1b[0m Служба DNS-релея остановлена и удалена");
@@ -177,7 +151,7 @@ pub fn handle_rollback() {
 
     #[cfg(target_os = "windows")]
     {
-        delete_user_env_vars(&["GEMINI_API_BASE_URL", "GOOGLE_GEMINI_ENDPOINT"]);
+        delete_user_env_vars(&["GEMINI_API_BASE_URL", "GOOGLE_GEMINI_ENDPOINT", "CLOUD_CODE_URL"]);
         println!("  \x1b[92m[✓]\x1b[0m Переменные окружения сброшены");
     }
 
@@ -249,39 +223,12 @@ pub fn handle_diagnostics() {
     };
     println!("  1. Права процесса:       {}", admin_str);
 
-    let (nrpt_count, nrpt_server, is_relay) = get_nrpt_status_info();
+    let (nrpt_count, _nrpt_server, is_relay) = get_nrpt_status_info();
     let dns_str = if nrpt_count > 0 {
-        let srv = nrpt_server.unwrap_or_default();
-        let clean_upstream = srv
-            .split([';', ',', ' '])
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty() && *s != "127.0.0.53" && *s != "127.0.0.1")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let display_label = if clean_upstream.contains("111.88.96.50")
-            || clean_upstream.contains("176.108.243.68")
-            || clean_upstream.contains("111.88.96.51")
-        {
-            "Xbox-DNS.ru".to_string()
-        } else if !clean_upstream.is_empty() {
-            clean_upstream
-        } else {
-            let upstreams = crate::net::relay::load_upstream_servers();
-            let upstream_strs: Vec<String> = upstreams.iter().map(|ip| ip.to_string()).collect();
-            if upstream_strs.iter().any(|ip| ip == "111.88.96.50" || ip == "176.108.243.68" || ip == "111.88.96.51") {
-                "Xbox-DNS.ru".to_string()
-            } else if !upstream_strs.is_empty() {
-                upstream_strs.join(", ")
-            } else {
-                "Xbox-DNS.ru".to_string()
-            }
-        };
-
         if is_relay {
-            format!("\x1b[92m[✓] Локальный релей (127.0.0.1:53) -> {}\x1b[0m (правил: {})", display_label, nrpt_count)
+            format!("\x1b[92m[✓] Релей 127.0.0.53:53\x1b[0m (правил: {})", nrpt_count)
         } else {
-            format!("\x1b[92m[✓] ({})\x1b[0m (правил: {})", display_label, nrpt_count)
+            format!("\x1b[92m[✓] NRPT\x1b[0m (правил: {})", nrpt_count)
         }
     } else {
         "\x1b[90m[Не настроено]\x1b[0m".to_string()
@@ -314,13 +261,44 @@ pub fn handle_diagnostics() {
 
     print!("  5. Связь с Google API:   ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    match test_google_connectivity() {
-        Ok((target, latency)) => {
-            println!("\x1b[92m[✓] Доступен ({} мс) — {}\x1b[0m", latency, target);
+    let report = crate::net::health::probe_google_api();
+    if let Some(err) = &report.error {
+        println!("\x1b[31m[✗] {}\x1b[0m", err);
+        if !report.resolved.is_empty() {
+            println!("       DNS отдал: {}", report.resolved.join(", "));
         }
-        Err(e) => {
-            println!("\x1b[31m[✗] Не удалось подключиться ({})\x1b[0m", e);
+    } else {
+        let ip_note = if report.used_ipv6 { "IPv6" } else { "IPv4" };
+        println!(
+            "\x1b[92m[✓] Доступен ({} мс, {}) — {}\x1b[0m",
+            report.latency_ms,
+            ip_note,
+            report.connected.unwrap_or_default()
+        );
+        if !report.resolved.is_empty() {
+            println!("       DNS: {}", report.resolved.join(", "));
         }
+        if report.used_ipv6 {
+            println!("       \x1b[93m[!] Ушло в IPv6 — Google может снова видеть РФ. Релей должен глушить AAAA.\x1b[0m");
+        }
+        if report.looks_like_google {
+            println!("       \x1b[93m[!] DNS отдал адрес Google, не SNI-прокси. Подмена не сработала — будет 400 по гео.\x1b[0m");
+        }
+    }
+
+    let doh_str = if crate::net::doh::is_doh_disabled() {
+        "\x1b[92m[✓] Auto-DoH выключен (NRPT не обходится Chromium)\x1b[0m"
+    } else {
+        "\x1b[93m[!] Auto-DoH не выключен — Electron может игнорировать NRPT\x1b[0m"
+    };
+    println!("  6. Windows DoH:          {}", doh_str);
+
+    let upstreams = crate::net::relay::load_upstream_servers();
+    if upstreams.is_empty() {
+        println!("  7. Upstream SmartDNS:    \x1b[90m[-- нет]\x1b[0m");
+    } else {
+        let list: Vec<String> = upstreams.iter().map(|ip| ip.to_string()).collect();
+        println!("  7. Upstream SmartDNS:    {}", list.join(", "));
     }
 
     println!("\n\x1b[96m--- Обнаруженные установки и файлы ---\x1b[0m");
@@ -359,7 +337,7 @@ pub fn run_app() {
         banner();
         print_dashboard();
 
-        println!("1. \x1b[92mПолная разблокировка\x1b[0m (Файлы Core 2.0/IDE/CLI + DNS-релей/Сеть)");
+        println!("1. \x1b[92mПолная разблокировка\x1b[0m");
         println!("2. \x1b[94mТолько файлы\x1b[0m (Работа без смены страны аккаунта)");
         println!("3. \x1b[93mТолько DNS и сеть\x1b[0m (Работа без VPN)");
         println!("4. \x1b[95mУказать путь вручную\x1b[0m (к папке или файлу Antigravity)");

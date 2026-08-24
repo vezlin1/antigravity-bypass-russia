@@ -5,13 +5,16 @@ use crate::system::privilege::is_admin;
 
 pub fn banner() {
     println!("\x1b[96m=====================================================\x1b[0m");
-    println!("\x1b[96m          ANTIGRAVITY-BYPASS-RUSSIA (v1.0.1)         \x1b[0m");
+    println!(
+        "\x1b[96m          ANTIGRAVITY-BYPASS-RUSSIA (v{})        \x1b[0m",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("\x1b[96m=====================================================\x1b[0m");
     println!(" Открытая утилита обхода блокировок и чистого отката\n");
 }
 
 pub fn print_dashboard() {
-    let (nrpt_count, nrpt_server, _is_relay) = get_nrpt_status_info();
+    let (nrpt_count, _, _) = get_nrpt_status_info();
     let comp_status = get_quick_status();
 
     let admin_str = if is_admin() {
@@ -21,34 +24,7 @@ pub fn print_dashboard() {
     };
 
     let dns_str = if nrpt_count > 0 {
-        let raw_server = nrpt_server.unwrap_or_else(|| "Активен".to_string());
-        let clean_upstream = raw_server
-            .split([';', ',', ' '])
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty() && *s != "127.0.0.53" && *s != "127.0.0.1")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let display_label = if clean_upstream.contains("111.88.96.50")
-            || clean_upstream.contains("176.108.243.68")
-            || clean_upstream.contains("111.88.96.51")
-        {
-            "Xbox-DNS.ru".to_string()
-        } else if !clean_upstream.is_empty() {
-            clean_upstream
-        } else {
-            let upstreams = crate::net::relay::load_upstream_servers();
-            let upstream_strs: Vec<String> = upstreams.iter().map(|ip| ip.to_string()).collect();
-            if upstream_strs.iter().any(|ip| ip == "111.88.96.50" || ip == "176.108.243.68" || ip == "111.88.96.51") {
-                "Xbox-DNS.ru".to_string()
-            } else if !upstream_strs.is_empty() {
-                upstream_strs.join(", ")
-            } else {
-                "Xbox-DNS.ru".to_string()
-            }
-        };
-
-        format!("\x1b[92m[✓] ({})\x1b[0m", display_label)
+        "\x1b[92m[✓] Настроено\x1b[0m".to_string()
     } else {
         "\x1b[90m[Не настроено]\x1b[0m".to_string()
     };
@@ -77,6 +53,15 @@ pub fn print_dashboard() {
     println!("\x1b[90m┌──────────────────── ТЕКУЩИЙ СТАТУС ────────────────────┐\x1b[0m");
     println!("  • Права процесса:       {}", admin_str);
     println!("  • Сеть и DNS (NRPT):    {}", dns_str);
+
+    let relay_str = if crate::system::service::is_running() {
+        "\x1b[92m[✓] 127.0.0.53:53\x1b[0m"
+    } else if crate::system::service::is_enabled() {
+        "\x1b[93m[!] Зарегистрирован, не запущен\x1b[0m"
+    } else {
+        "\x1b[90m[-- Выключен]\x1b[0m"
+    };
+    println!("  • DNS-релей:            {}", relay_str);
     println!("  • Antigravity 2.0 Core: {}", core_str);
     println!("  • Antigravity IDE UI:   {}", ide_str);
     println!("  • Antigravity CLI:      {}", cli_str);

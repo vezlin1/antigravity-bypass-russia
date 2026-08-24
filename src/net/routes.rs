@@ -1,5 +1,10 @@
+use std::fs;
+use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::process::Command;
-use crate::net::provider::{DnsProvider, ALL_DNS_IPS};
+
+use crate::net::egress::detect_physical;
+use crate::net::resolvers::all_provider_v4;
 use crate::system::process::no_window;
 
 pub fn set_ipv4_preference() {
@@ -20,73 +25,114 @@ pub fn restore_ipv4_preference() {
     }
 }
 
-pub fn add_static_routes(provider: &DnsProvider) {
+fn extra_path() -> PathBuf {
+    crate::net::relay::log_dir().join("proxy_host_routes.conf")
+}
+
+fn load_extra() -> Vec<Ipv4Addr> {
+    let Ok(text) = fs::read_to_string(extra_path()) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| l.trim().parse::<Ipv4Addr>().ok())
+        .collect()
+}
+
+fn save_extra(ips: &[Ipv4Addr]) {
+    let dir = crate::net::relay::log_dir();
+    let _ = fs::create_dir_all(&dir);
+    let body = ips
+        .iter()
+        .map(|ip| ip.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = fs::write(extra_path(), body);
+}
+
+#[cfg(target_os = "windows")]
+fn pin_via_physical(ips: &[String]) {
+    let Some((if_index, gateway)) = detect_physical() else {
+        return;
+    };
+    let if_index = if_index.to_string();
+    for ip in ips {
+        let _ = no_window(&mut Command::new("route"))
+            .args(["delete", ip])
+            .output();
+        let _ = no_window(&mut Command::new("route"))
+            .args([
+                "add",
+                ip,
+                "mask",
+                "255.255.255.255",
+                &gateway,
+                "metric",
+                "1",
+                "if",
+                &if_index,
+            ])
+            .output();
+    }
+}
+
+/// /32 through the physical NIC for SmartDNS *and* the ranked Cloud Code
+/// proxy IPs, so HTTPS does not follow a full-tunnel VPN default route.
+pub fn sync_physical_hosts(extra: &[Ipv4Addr]) {
     #[cfg(not(target_os = "windows"))]
-    let _ = provider;
+    {
+        let _ = extra;
+        return;
+    }
     #[cfg(target_os = "windows")]
     {
-        #[repr(C)]
-        struct MibIpForwardRow {
-            dw_forward_dest: u32,
-            dw_forward_mask: u32,
-            dw_forward_policy: u32,
-            dw_forward_next_hop: u32,
-            dw_forward_if_index: u32,
-            dw_forward_type: u32,
-            dw_forward_proto: u32,
-            dw_forward_age: u32,
-            dw_forward_next_hop_as: u32,
-            dw_forward_metric1: u32,
-            dw_forward_metric2: u32,
-            dw_forward_metric3: u32,
-            dw_forward_metric4: u32,
-            dw_forward_metric5: u32,
-        }
-
-        #[link(name = "iphlpapi")]
-        extern "system" {
-            fn GetBestRoute(dwDestAddr: u32, dwSourceAddr: u32, pBestRoute: *mut MibIpForwardRow) -> u32;
-        }
-
-        let mut row: MibIpForwardRow = unsafe { std::mem::zeroed() };
-        let dest: u32 = u32::from_ne_bytes([8, 8, 8, 8]);
-        let res = unsafe { GetBestRoute(dest, 0, &mut row) };
-        if res != 0 {
-            return;
-        }
-
-        let gw = row.dw_forward_next_hop.to_ne_bytes();
-        if gw == [0, 0, 0, 0] {
-            return;
-        }
-        let gateway = format!("{}.{}.{}.{}", gw[0], gw[1], gw[2], gw[3]);
-        let if_index = row.dw_forward_if_index;
-
-        let mut ips = provider.server_ips();
-        for &static_ip in ALL_DNS_IPS {
-            if !ips.contains(&static_ip.to_string()) {
-                ips.push(static_ip.to_string());
+        let mut extra_u: Vec<Ipv4Addr> = Vec::new();
+        for ip in extra {
+            if !extra_u.contains(ip) {
+                extra_u.push(*ip);
             }
         }
-
-        for ip in ips {
-            let _ = no_window(&mut Command::new("route"))
-                .args(["delete", &ip])
-                .output();
-            let _ = no_window(&mut Command::new("route"))
-                .args(["add", &ip, "mask", "255.255.255.255", &gateway, "metric", "1", "if", &if_index.to_string()])
-                .output();
+        let old = load_extra();
+        for ip in &old {
+            if !extra_u.contains(ip) && !all_provider_v4().iter().any(|s| s.parse::<Ipv4Addr>().ok() == Some(*ip)) {
+                let _ = no_window(&mut Command::new("route"))
+                    .args(["delete", &ip.to_string()])
+                    .output();
+            }
         }
+        save_extra(&extra_u);
+
+        let mut all: Vec<String> = all_provider_v4().into_iter().map(|s| s.to_string()).collect();
+        for ip in extra_u {
+            let s = ip.to_string();
+            if !all.contains(&s) {
+                all.push(s);
+            }
+        }
+        pin_via_physical(&all);
+    }
+}
+
+pub fn add_static_routes() {
+    #[cfg(target_os = "windows")]
+    {
+        let ips: Vec<String> = all_provider_v4().into_iter().map(|s| s.to_string()).collect();
+        pin_via_physical(&ips);
     }
 }
 
 pub fn remove_static_routes() {
     #[cfg(target_os = "windows")]
     {
-        for &ip in ALL_DNS_IPS {
+        for ip in all_provider_v4() {
             let _ = no_window(&mut Command::new("route"))
                 .args(["delete", ip])
                 .output();
         }
+        for ip in load_extra() {
+            let _ = no_window(&mut Command::new("route"))
+                .args(["delete", &ip.to_string()])
+                .output();
+        }
+        let _ = fs::remove_file(extra_path());
     }
 }
