@@ -34,12 +34,16 @@ fn apply_files_side() {
 
 fn ask_enable_auto_watcher() {
     if !crate::core::watcher::is_watcher_running() {
-        println!("\n\x1b[95m[?] Включить автоматический репатч при обновлениях Antigravity (Watcher)? [y/N]:\x1b[0m ");
-        let ans = prompt("> ");
-        let lower = ans.trim().to_lowercase();
-        if lower == "y" || lower == "yes" || lower == "д" || lower == "да" {
+        println!("\x1b[95m[?] Включить автоматический репатч при обновлениях Antigravity ?\x1b[0m");
+        println!("  1. Да");
+        println!("  2. Нет");
+        let ans = prompt("Выберите [1-2, по умолчанию 2]: ");
+        let trimmed = ans.trim();
+        if trimmed == "1" || trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("д") || trimmed.eq_ignore_ascii_case("да") {
             crate::core::watcher::spawn_watcher_thread(std::time::Duration::from_secs(8));
-            println!("  \x1b[92m[✓]\x1b[0m Фоновый мониторинг запущен. При обновлениях Antigravity патчи восстановятся автоматически.");
+            println!("  \x1b[92m[✓]\x1b[0m Автоматический репатч включен.\n");
+        } else {
+            println!("  \x1b[90m[--] Автоматический репатч пропущен.\x1b[0m\n");
         }
     }
 }
@@ -49,6 +53,9 @@ pub fn handle_unlock_all() {
     banner();
     println!("\x1b[92m=== ПОЛНАЯ РАЗБЛОКИРОВКА ===\x1b[0m\n");
 
+    ask_enable_auto_watcher();
+
+    println!("\x1b[96mПрименение патчей файлов...\x1b[0m");
     let installs = find_installations();
     if installs.is_empty() {
         println!("\x1b[93m[!] Antigravity не найден в стандартных путях (используйте пункт 4 для ручного ввода).\x1b[0m");
@@ -64,8 +71,6 @@ pub fn handle_unlock_all() {
         Err(e) => println!("  \x1b[31m[✗]\x1b[0m Ошибка сети: {}", e),
     }
 
-    ask_enable_auto_watcher();
-
     println!("\n\x1b[92mГотово. Запустите Antigravity и войдите в аккаунт.\x1b[0m");
     pause();
 }
@@ -74,6 +79,8 @@ pub fn handle_patch_files_only() {
     clear_screen();
     banner();
     println!("\x1b[94m=== ТОЛЬКО ФАЙЛЫ (РАБОТА БЕЗ СМЕНЫ СТРАНЫ АККАУНТА) ===\x1b[0m\n");
+
+    ask_enable_auto_watcher();
 
     let installs = find_installations();
     if installs.is_empty() {
@@ -84,8 +91,6 @@ pub fn handle_patch_files_only() {
     }
     apply_files_side();
 
-    ask_enable_auto_watcher();
-
     println!("\n\x1b[92m[✓] Патчинг файлов завершен! Запустите Antigravity.\x1b[0m");
     pause();
 }
@@ -94,14 +99,15 @@ pub fn handle_dns_only() {
     clear_screen();
     banner();
     println!("\x1b[93m=== ТОЛЬКО СЕТЬ ===\x1b[0m\n");
+
+    ask_enable_auto_watcher();
+
     println!("Настройка сети...");
 
     match apply_dns_rules() {
         Ok(msg) => println!("\x1b[92m[✓] {}\x1b[0m", msg),
         Err(e) => println!("\x1b[31m[✗] Ошибка сети: {}\x1b[0m", e),
     }
-
-    ask_enable_auto_watcher();
 
     pause();
 }
