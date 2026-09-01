@@ -411,7 +411,8 @@ fn walk_targets(dir: &Path, depth: usize, max_depth: usize, targets: &mut Vec<Fo
                 }
             } else if file_name == "main.js" {
                 let path = entry.path();
-                if path.to_string_lossy().contains("electron-main")
+                let path_str = path.to_string_lossy();
+                if (path_str.contains("electron-main") || path_str.ends_with(r"out\main.js") || path_str.ends_with("out/main.js"))
                     && !targets.iter().any(|t| t.path == path)
                 {
                     targets.push(FoundTarget {
@@ -420,6 +421,25 @@ fn walk_targets(dir: &Path, depth: usize, max_depth: usize, targets: &mut Vec<Fo
                         name: "main.js (IDE)".to_string(),
                     });
                 }
+            }
+        }
+    }
+}
+
+fn update_component_state(current: &mut Option<BinaryState>, new_state: BinaryState) {
+    match current {
+        None => *current = Some(new_state),
+        Some(BinaryState::Patched) => {
+            // Highest priority state, keep Patched
+        }
+        Some(BinaryState::Stock) => {
+            if new_state == BinaryState::Patched {
+                *current = Some(BinaryState::Patched);
+            }
+        }
+        Some(BinaryState::Unknown) => {
+            if new_state != BinaryState::Unknown {
+                *current = Some(new_state);
             }
         }
     }
@@ -436,19 +456,13 @@ pub fn get_quick_status() -> SystemComponentsStatus {
             let state = check_binary_state(&t.path);
             match t.kind {
                 TargetKind::LanguageServer => {
-                    if status.core_status.is_none() || status.core_status == Some(BinaryState::Stock) {
-                        status.core_status = Some(state);
-                    }
+                    update_component_state(&mut status.core_status, state);
                 }
                 TargetKind::IdeMainJs | TargetKind::IdeAsar => {
-                    if status.ide_status.is_none() || status.ide_status == Some(BinaryState::Stock) {
-                        status.ide_status = Some(state);
-                    }
+                    update_component_state(&mut status.ide_status, state);
                 }
                 TargetKind::AgyCli => {
-                    if status.cli_status.is_none() || status.cli_status == Some(BinaryState::Stock) {
-                        status.cli_status = Some(state);
-                    }
+                    update_component_state(&mut status.cli_status, state);
                 }
             }
         }

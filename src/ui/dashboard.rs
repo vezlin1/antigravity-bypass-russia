@@ -57,7 +57,12 @@ pub fn print_dashboard() {
     let relay_str = if crate::system::service::is_running() {
         "\x1b[92m[✓] 127.0.0.53:53\x1b[0m"
     } else if crate::system::service::is_enabled() {
-        "\x1b[93m[!] Зарегистрирован, не запущен\x1b[0m"
+        let _ = crate::system::service::start();
+        if crate::system::service::is_running() {
+            "\x1b[92m[✓] 127.0.0.53:53\x1b[0m"
+        } else {
+            "\x1b[93m[!] Зарегистрирован, не запущен\x1b[0m"
+        }
     } else {
         "\x1b[90m[-- Выключен]\x1b[0m"
     };
