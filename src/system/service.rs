@@ -321,6 +321,39 @@ pub fn enable() -> Result<(), String> {
     Ok(())
 }
 
+pub fn start() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let out = no_window(&mut Command::new("schtasks"))
+            .args(["/Run", "/TN", TASK_NAME])
+            .output()
+            .map_err(|e| format!("Ошибка запуска службы: {}", e))?;
+        if out.status.success() {
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if is_running() {
+                    return Ok(());
+                }
+            }
+        }
+        Err("Служба не перешла в состояние выполнения".to_string())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = Command::new("launchctl")
+            .args(["start", LAUNCHD_LABEL])
+            .output()
+            .map_err(|e| format!("Ошибка launchctl: {}", e))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err("launchctl start failed".to_string())
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    Ok(())
+}
+
 pub fn disable() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
