@@ -461,21 +461,70 @@ EOF
     clear_caches >/dev/null
 }
 
-apply_hosts_entries() {
+rank_proxies_and_apply_hosts() {
     local hosts_file="/etc/hosts"
-    echo -e "${YELLOW}Настройка /etc/hosts для обхода гео-блокировки Google AI...${NC}"
+    echo -e "\n${CYAN}Замер задержки TLS и выбор быстрейшего узла Cloud Code (SmartDNS / SNI Proxy)...${NC}"
+
+    local leader_ip
+    leader_ip=$(python3 - <<'EOF'
+import socket, ssl, time, sys
+
+host = "daily-cloudcode-pa.googleapis.com"
+candidates = [
+    ("195.133.25.16",  "XboxDNS Relay #3"),
+    ("83.220.169.155", "XboxDNS Relay #2"),
+    ("212.109.195.93", "XboxDNS Relay #1"),
+    ("193.233.112.67", "Comss Anycast #1"),
+    ("193.233.112.68", "Comss Anycast #2"),
+    ("87.228.47.194",  "Hetzner Proxy #1"),
+    ("87.228.47.202",  "Hetzner Proxy #2"),
+    ("45.155.204.190", "Geohide SNI #1"),
+    ("37.230.192.51",  "Geohide SNI #2"),
+]
+
+results = []
+for ip, label in candidates:
+    t0 = time.perf_counter()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.7)
+        sock.connect((ip, 443))
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with ctx.wrap_socket(sock, server_hostname=host) as ss:
+            rtt = int((time.perf_counter() - t0) * 1000)
+            results.append((rtt, ip, label))
+            sys.stderr.write(f"  • {ip:<15} ({label:<16}) ➔ \033[92m{rtt} мс\033[0m\n")
+    except Exception:
+        sys.stderr.write(f"  • {ip:<15} ({label:<16}) ➔ \033[90mтаймаут / недоступен\033[0m\n")
+
+if results:
+    results.sort(key=lambda x: x[0])
+    best_rtt, best_ip, best_label = results[0]
+    sys.stderr.write(f"\n\033[92m  [✓] Выбран самый быстрый лидер: {best_ip} ({best_label}, {best_rtt} мс)\033[0m\n")
+    print(best_ip)
+else:
+    print("195.133.25.16")
+EOF
+)
+
+    if [[ -z "$leader_ip" ]]; then
+        leader_ip="195.133.25.16"
+    fi
+
     if grep -q "BEGIN ANTIGRAVITY-BYPASS-RUSSIA" "$hosts_file" 2>/dev/null; then
         sed -i '' '/# BEGIN ANTIGRAVITY-BYPASS-RUSSIA/,/# END ANTIGRAVITY-BYPASS-RUSSIA/d' "$hosts_file" 2>/dev/null || true
     fi
 
-    cat <<'EOF' >> "$hosts_file"
+    cat <<EOF >> "$hosts_file"
 # BEGIN ANTIGRAVITY-BYPASS-RUSSIA
-45.155.204.190 daily-cloudcode-pa.googleapis.com
-45.155.204.190 cloudcode-pa.googleapis.com
-45.155.204.190 generativelanguage.googleapis.com
+$leader_ip daily-cloudcode-pa.googleapis.com
+$leader_ip cloudcode-pa.googleapis.com
+$leader_ip generativelanguage.googleapis.com
 # END ANTIGRAVITY-BYPASS-RUSSIA
 EOF
-    echo -e "${GREEN}  [✓] /etc/hosts обновлен (SNI-прокси 45.155.204.190)${NC}"
+    echo -e "${GREEN}  [✓] /etc/hosts настроен (активный лидер: $leader_ip)${NC}"
 }
 
 apply_ide_settings() {
@@ -545,7 +594,7 @@ apply_dns_resolvers() {
     shift
     local servers=("$@")
 
-    apply_hosts_entries
+    rank_proxies_and_apply_hosts
     apply_ide_settings
 
     echo -e "${YELLOW}Применение селективной DNS-маршрутизации...${NC}"
@@ -627,8 +676,15 @@ remove_dns_resolvers() {
     echo -e "${GREEN}  [✓] Удалено ${#to_remove[@]} правил DNS, служба остановлена, hosts очищен, настройки IDE сброшены.${NC}"
 }
 
+WATCHER_PID_FILE="/tmp/antigravity_bypass_watcher.pid"
+
 # --- Status Dashboard ---
 show_dashboard() {
+    local hosts_configured=0
+    if grep -q "BEGIN ANTIGRAVITY-BYPASS-RUSSIA" "/etc/hosts" 2>/dev/null; then
+        hosts_configured=1
+    fi
+
     local rule_count=0
     if [[ -d "$RESOLVER_DIR" ]]; then
         rule_count=$(grep -l "$RESOLVER_TAG" "$RESOLVER_DIR"/* 2>/dev/null | wc -l | tr -d ' ' || echo 0)
@@ -636,28 +692,142 @@ show_dashboard() {
 
     echo -e "${GRAY}  ┌──────────────────── ТЕКУЩИЙ СТАТУС ────────────────────┐${NC}"
     echo -e "${GRAY}  • Права процесса:       ${GREEN}[✓] Администратор${NC}"
-    
-    if [[ "$rule_count" -gt 0 ]]; then
-        echo -e "${GRAY}  • Сеть и DNS:           ${GREEN}[✓] Настроено${NC}"
+
+    if [[ "$hosts_configured" -eq 1 && "$rule_count" -gt 0 ]]; then
+        echo -e "${GRAY}  • Сеть и DNS:           ${GREEN}[✓] Настроено (/etc/hosts + /etc/resolver)${NC}"
+    elif [[ "$hosts_configured" -eq 1 ]]; then
+        echo -e "${GRAY}  • Сеть и DNS:           ${GREEN}[✓] Настроено (/etc/hosts)${NC}"
+    elif [[ "$rule_count" -gt 0 ]]; then
+        echo -e "${GRAY}  • Сеть и DNS:           ${GREEN}[✓] Настроено (/etc/resolver)${NC}"
     else
         echo -e "${GRAY}  • Сеть и DNS:           ${GRAY}[Не настроено]${NC}"
+    fi
+
+    echo -e "${GRAY}  • DNS-релей:            ${GRAY}[-- Без фона (/etc/hosts + /etc/resolver)]${NC}"
+
+    local watcher_active=0
+    if [[ -f "$WATCHER_PID_FILE" ]]; then
+        local wpid
+        wpid=$(cat "$WATCHER_PID_FILE" 2>/dev/null || true)
+        if [[ -n "$wpid" ]] && kill -0 "$wpid" 2>/dev/null; then
+            watcher_active=1
+        fi
+    fi
+    if [[ "$watcher_active" -eq 1 ]]; then
+        echo -e "${GRAY}  • Авто-репатчер:        ${GREEN}[✓] Активен (авто-репатч)${NC}"
+    else
+        echo -e "${GRAY}  • Авто-репатчер:        ${GRAY}[-- Отключен]${NC}"
     fi
 
     local arch
     arch=$(uname -m)
     if [[ "$arch" == "arm64" ]]; then
-        echo -e "${GRAY}  • Архитектура CPU:      ${CYAN}[$arch] (Apple Silicon M1-M4 / Darwin)${NC}"
+        echo -e "${GRAY}  • Архитектура CPU:      ${CYAN}[$arch] (Apple Silicon M-Series)${NC}"
     else
-        echo -e "${GRAY}  • Архитектура CPU:      ${CYAN}[$arch] (Intel x86_64 / Darwin)${NC}"
+        echo -e "${GRAY}  • Архитектура CPU:      ${CYAN}[$arch] (Intel x86_64)${NC}"
     fi
 
-    local installs
-    installs=$(find_installations)
-    if [[ -n "$installs" ]]; then
-        echo -e "${GRAY}  • Установка Antigravity:${GREEN}[✓ Обнаружена]${NC}"
+    local comp_json
+    comp_json=$(python3 - <<'EOF'
+import os, glob, json
+
+def check_bin(path):
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+        if b"inexigible" in data or b"\x23\x00\x80\x52" in data or b"\xc6\x40\x08\x01\x90\x90" in data:
+            return "Patched"
+        if b"ineligible" in data:
+            return "Stock"
+        return "Unknown"
+    except Exception:
+        return "Unknown"
+
+def check_js(path):
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+        if b"true||" in data or b"inexigible" in data or b"isSupportedRegion" in data or b"return!0" in data:
+            return "Patched"
+        return "Stock"
+    except Exception:
+        return "Unknown"
+
+installs = [
+    "/Applications/Antigravity.app",
+    "/Applications/Antigravity IDE.app",
+    os.path.expanduser("~/Applications/Antigravity.app"),
+    os.path.expanduser("~/Applications/Antigravity IDE.app"),
+]
+
+core = None
+ide = None
+cli = None
+
+for inst in installs:
+    if not os.path.exists(inst):
+        continue
+    for p in glob.glob(f"{inst}/**/language_server_darwin_*", recursive=True):
+        if os.path.isfile(p):
+            st = check_bin(p)
+            if core is None or core == "Stock":
+                core = st
+            break
+    if core is None:
+        for p in glob.glob(f"{inst}/**/language_server", recursive=True):
+            if os.path.isfile(p):
+                st = check_bin(p)
+                if core is None or core == "Stock":
+                    core = st
+                break
+
+    for p in glob.glob(f"{inst}/**/main.js", recursive=True):
+        if os.path.isfile(p):
+            st = check_js(p)
+            if ide is None or ide == "Stock":
+                ide = st
+            break
+
+    for p in [f"{inst}/Contents/Resources/bin/agy", "/usr/local/bin/agy", "/opt/homebrew/bin/agy", os.path.expanduser("~/.local/bin/agy")]:
+        if os.path.isfile(p):
+            st = check_bin(p)
+            if cli is None or cli == "Stock":
+                cli = st
+            break
+
+print(json.dumps({"core": core, "ide": ide, "cli": cli}))
+EOF
+)
+
+    local core_val ide_val cli_val
+    core_val=$(echo "$comp_json" | grep -o '"core": "[^"]*"' | cut -d'"' -f4 || echo "")
+    ide_val=$(echo "$comp_json" | grep -o '"ide": "[^"]*"' | cut -d'"' -f4 || echo "")
+    cli_val=$(echo "$comp_json" | grep -o '"cli": "[^"]*"' | cut -d'"' -f4 || echo "")
+
+    if [[ "$core_val" == "Patched" ]]; then
+        echo -e "${GRAY}  • Antigravity 2.0 Core: ${GREEN}[✓] Пропатчен${NC}"
+    elif [[ "$core_val" == "Stock" ]]; then
+        echo -e "${GRAY}  • Antigravity 2.0 Core: ${YELLOW}[Исходный]${NC}"
     else
-        echo -e "${GRAY}  • Установка Antigravity:${YELLOW}[? Не найдена в /Applications]${NC}"
+        echo -e "${GRAY}  • Antigravity 2.0 Core: ${GRAY}[Не установлено]${NC}"
     fi
+
+    if [[ "$ide_val" == "Patched" ]]; then
+        echo -e "${GRAY}  • Antigravity IDE UI:   ${GREEN}[✓] Пропатчен${NC}"
+    elif [[ "$ide_val" == "Stock" ]]; then
+        echo -e "${GRAY}  • Antigravity IDE UI:   ${YELLOW}[Исходный]${NC}"
+    else
+        echo -e "${GRAY}  • Antigravity IDE UI:   ${GRAY}[Неизвестно]${NC}"
+    fi
+
+    if [[ "$cli_val" == "Patched" ]]; then
+        echo -e "${GRAY}  • Antigravity CLI:      ${GREEN}[✓] Пропатчен${NC}"
+    elif [[ "$cli_val" == "Stock" ]]; then
+        echo -e "${GRAY}  • Antigravity CLI:      ${YELLOW}[Исходный]${NC}"
+    else
+        echo -e "${GRAY}  • Antigravity CLI:      ${GRAY}[Не установлено]${NC}"
+    fi
+
     echo -e "${GRAY}  └────────────────────────────────────────────────────────┘\n${NC}"
 }
 
@@ -668,6 +838,13 @@ ask_enable_watcher() {
     echo "  2. Нет"
     read -rp "Выберите [1-2, по умолчанию 2]: " ans
     if [[ "$ans" == "1" || "$ans" =~ ^[YyДд] ]]; then
+        if [[ -f "$WATCHER_PID_FILE" ]]; then
+            local old_pid
+            old_pid=$(cat "$WATCHER_PID_FILE" 2>/dev/null || true)
+            if [[ -n "$old_pid" ]]; then
+                kill "$old_pid" 2>/dev/null || true
+            fi
+        fi
         (
             while true; do
                 sleep 10
@@ -686,7 +863,9 @@ ask_enable_watcher() {
                 done < <(find_installations 2>/dev/null)
             done
         ) >/dev/null 2>&1 &
-        echo -e "  ${GREEN}[✓] Автоматический репатч включен.${NC}\n"
+        local wpid=$!
+        echo "$wpid" > "$WATCHER_PID_FILE"
+        echo -e "  ${GREEN}[✓] Автоматический репатч включен (фоновый процесс, PID: $wpid).${NC}\n"
     else
         echo -e "  ${GRAY}[--] Автоматический репатч пропущен.${NC}\n"
     fi
@@ -835,19 +1014,107 @@ main_menu() {
                 read -rp "Нажмите Enter для продолжения..."
                 ;;
             5)
-                echo -e "\n${CYAN}--- Проверка связи с Google API ---${NC}"
-                if nc -z -G 3 cloudcode-pa.googleapis.com 443 2>/dev/null; then
-                    echo -e "  ${GREEN}[✓] Google API доступен (TCP 443 -> cloudcode-pa.googleapis.com)${NC}"
-                elif curl -Is --connect-timeout 3 https://cloudcode-pa.googleapis.com 2>/dev/null | head -n 1 | grep -q "HTTP"; then
-                    echo -e "  ${GREEN}[✓] Google API доступен (HTTPS -> cloudcode-pa.googleapis.com)${NC}"
-                else
-                    echo -e "  ${RED}[✗] Таймаут / ошибка соединения с Google API (cloudcode-pa.googleapis.com)${NC}"
+                safe_clear
+                echo -e "${CYAN}================ ДИАГНОСТИКА СИСТЕМЫ ================${NC}\n"
+
+                echo -e "  1. Права процесса:       ${GREEN}[✓] Администратор${NC}"
+
+                local hosts_configured=0
+                if grep -q "BEGIN ANTIGRAVITY-BYPASS-RUSSIA" "/etc/hosts" 2>/dev/null; then
+                    hosts_configured=1
                 fi
-                echo -e "\n${CYAN}--- Активные scoped резолверы (/etc/resolver) ---${NC}"
-                scutil --dns | grep -A 4 "resolver #" | head -n 25 || true
+                local rule_count=0
+                if [[ -d "$RESOLVER_DIR" ]]; then
+                    rule_count=$(grep -l "$RESOLVER_TAG" "$RESOLVER_DIR"/* 2>/dev/null | wc -l | tr -d ' ' || echo 0)
+                fi
+
+                if [[ "$hosts_configured" -eq 1 ]]; then
+                    echo -e "  2. Сеть и DNS:           ${GREEN}[✓] Настроено (/etc/hosts + /etc/resolver)${NC} (правил: $rule_count)"
+                else
+                    echo -e "  2. Сеть и DNS:           ${GRAY}[Не настроено]${NC}"
+                fi
+
+                echo -e "  3. Служба DNS-релея:     ${GRAY}[-- Без фона (/etc/hosts + /etc/resolver)]${NC}"
+
+                local arch
+                arch=$(uname -m)
+                if [[ "$arch" == "arm64" ]]; then
+                    echo -e "  4. Архитектура CPU:      ${CYAN}[$arch] Apple Silicon M-Series${NC}"
+                else
+                    echo -e "  4. Архитектура CPU:      ${CYAN}[$arch] Intel x86_64${NC}"
+                fi
+
+                echo -e "\n  5. Связь с Google API:"
+                python3 - <<'EOF'
+import socket, ssl, time, sys
+
+targets = [
+    ("cloudcode-pa.googleapis.com", 443),
+    ("generativelanguage.googleapis.com", 443),
+]
+
+for host, port in targets:
+    t0 = time.perf_counter()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(2.5)
+        sock.connect((host, port))
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with ctx.wrap_socket(sock, server_hostname=host) as ss:
+            rtt = int((time.perf_counter() - t0) * 1000)
+            peer_ip = sock.getpeername()[0]
+            print(f"     \033[92m[✓]\033[0m Доступен ({rtt} мс, IPv4) — {host} ({peer_ip})")
+    except Exception as e:
+        print(f"     \033[91m[✗]\033[0m Ошибка подключения к {host}: {e}")
+EOF
+
+                echo -e "\n  6. Тестирование скорости всех прокси и релеев:"
+                python3 - <<'EOF'
+import socket, ssl, time, sys
+
+host = "daily-cloudcode-pa.googleapis.com"
+candidates = [
+    ("195.133.25.16",  "XboxDNS Relay #3"),
+    ("83.220.169.155", "XboxDNS Relay #2"),
+    ("212.109.195.93", "XboxDNS Relay #1"),
+    ("193.233.112.67", "Comss Anycast #1"),
+    ("193.233.112.68", "Comss Anycast #2"),
+    ("87.228.47.194",  "Hetzner Proxy #1"),
+    ("87.228.47.202",  "Hetzner Proxy #2"),
+    ("45.155.204.190", "Geohide SNI #1"),
+    ("37.230.192.51",  "Geohide SNI #2"),
+]
+
+for ip, label in candidates:
+    t0 = time.perf_counter()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(0.7)
+        sock.connect((ip, 443))
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with ctx.wrap_socket(sock, server_hostname=host) as ss:
+            rtt = int((time.perf_counter() - t0) * 1000)
+            print(f"     • {ip:<15} ({label:<16}) ➔ \033[92m{rtt} мс\033[0m")
+    except Exception:
+        print(f"     • {ip:<15} ({label:<16}) ➔ \033[90mтаймаут\033[0m")
+EOF
+
+                echo ""
                 read -rp "Нажмите Enter для продолжения..."
                 ;;
             6)
+                if [[ -f "$WATCHER_PID_FILE" ]]; then
+                    local wpid
+                    wpid=$(cat "$WATCHER_PID_FILE" 2>/dev/null || true)
+                    if [[ -n "$wpid" ]]; then
+                        kill "$wpid" 2>/dev/null || true
+                    fi
+                    rm -f "$WATCHER_PID_FILE"
+                fi
                 kill_antigravity_processes
                 while IFS= read -r inst; do
                     [[ -z "$inst" ]] && continue
