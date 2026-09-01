@@ -533,6 +533,16 @@ fn pick_winner(hits: &[RaceResult], reference: &[IpAddr], if_index: u32) -> Opti
     Some(pool[rot % pool.len()])
 }
 
+fn cache_dns_packet(name: String, qtype: u16, reply: Vec<u8>, provider: &'static str, verdict: Verdict) {
+    if let Ok(mut cguard) = DNS_PACKET_CACHE.lock() {
+        let cmap = cguard.get_or_insert_with(HashMap::new);
+        if cmap.len() >= 64 {
+            cmap.retain(|_, (_, _, _, at)| at.elapsed() < DNS_PACKET_CACHE_TTL);
+        }
+        cmap.insert((name, qtype), (reply, provider, verdict, Instant::now()));
+    }
+}
+
 pub fn resolve_best(query: &[u8], if_index: u32) -> Option<ResolveHit> {
     let name = question_name(query).unwrap_or_else(|| "?".into());
     let qtype = question_type(query).unwrap_or(1);
@@ -568,10 +578,7 @@ pub fn resolve_best(query: &[u8], if_index: u32) -> Option<ResolveHit> {
                             if is_successful_response(&resp) && !answer_addrs(&resp).is_empty() {
                                 let reply = drop_dead(&resp);
                                 let provider = PROVIDERS[*idx].name;
-                                if let Ok(mut cguard) = DNS_PACKET_CACHE.lock() {
-                                    let cmap = cguard.get_or_insert_with(HashMap::new);
-                                    cmap.insert((name.clone(), qtype), (reply.clone(), provider, *verdict, Instant::now()));
-                                }
+                                cache_dns_packet(name.clone(), qtype, reply.clone(), provider, *verdict);
                                 return Some(ResolveHit {
                                     reply,
                                     provider,
@@ -596,10 +603,7 @@ pub fn resolve_best(query: &[u8], if_index: u32) -> Option<ResolveHit> {
 
         // Populate in-memory packet cache
         if is_successful_response(&final_reply) && !answer_addrs(&final_reply).is_empty() {
-            if let Ok(mut cguard) = DNS_PACKET_CACHE.lock() {
-                let cmap = cguard.get_or_insert_with(HashMap::new);
-                cmap.insert((name.clone(), qtype), (final_reply.clone(), provider, verdict, Instant::now()));
-            }
+            cache_dns_packet(name.clone(), qtype, final_reply.clone(), provider, verdict);
         }
 
         if verdict == Verdict::Substituted {
@@ -621,10 +625,7 @@ pub fn resolve_best(query: &[u8], if_index: u32) -> Option<ResolveHit> {
             if is_successful_response(&resp) && !answer_addrs(&resp).is_empty() {
                 let provider = "system";
                 let verdict = Verdict::Passthrough;
-                if let Ok(mut cguard) = DNS_PACKET_CACHE.lock() {
-                    let cmap = cguard.get_or_insert_with(HashMap::new);
-                    cmap.insert((name, qtype), (resp.clone(), provider, verdict, Instant::now()));
-                }
+                cache_dns_packet(name, qtype, resp.clone(), provider, verdict);
                 return Some(ResolveHit {
                     reply: resp,
                     provider,
