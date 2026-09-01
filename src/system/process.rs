@@ -110,34 +110,47 @@ pub fn stop_processes_by_names(names: &[&str]) -> usize {
 }
 
 pub fn kill_processes() {
-    let procs = [
-        "Antigravity.exe",
-        "Antigravity IDE.exe",
-        "language_server_windows_x64.exe",
-        "language_server_windows_arm64.exe",
-        "language_server.exe",
-        "agy.exe",
-        "ag_dns.exe",
-        "Antigravity",
-        "Antigravity IDE",
-        "language_server_darwin_arm64",
-        "language_server_darwin_x64",
-        "language_server",
-        "agy",
-        "ag_dns",
-    ];
-
     #[cfg(target_os = "windows")]
     {
+        let procs = [
+            "Antigravity.exe",
+            "Antigravity IDE.exe",
+            "language_server_windows_x64.exe",
+            "language_server_windows_arm64.exe",
+            "language_server.exe",
+            "agy.exe",
+            "ag_dns.exe",
+        ];
         stop_processes_by_names(&procs);
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let mut cmd = Command::new("killall");
-        cmd.arg("-9");
-        for p in procs {
-            cmd.arg(p);
+        let unix_proc_patterns = [
+            "Antigravity",
+            "Antigravity IDE",
+            "antigravity",
+            "antigravity-ide",
+            "Google Antigravity",
+            "language_server",
+            "language_server_darwin_arm64",
+            "language_server_darwin_x64",
+            "language_server_linux_x64",
+            "language_server_linux_arm64",
+            "agy",
+            "ag_dns",
+        ];
+
+        // Step 1: SIGTERM (graceful)
+        for p in &unix_proc_patterns {
+            let _ = Command::new("pkill").args(["-15", "-f", p]).output();
+            let _ = Command::new("killall").args(["-15", p]).output();
         }
-        let _ = cmd.output();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // Step 2: SIGKILL (ensure terminated)
+        for p in &unix_proc_patterns {
+            let _ = Command::new("pkill").args(["-9", "-f", p]).output();
+            let _ = Command::new("killall").args(["-9", p]).output();
+        }
     }
 }

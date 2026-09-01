@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "antigravity-bypass-russia"
-version = "1.0.1"
+version = "2.0.0"
 dependencies = [
  "libc",
  "memchr",

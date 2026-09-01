@@ -69,23 +69,3 @@ pub fn check_single_instance() -> bool {
     #[cfg(not(any(target_os = "windows", unix)))]
     true
 }
-
-pub fn release_single_instance() {
-    #[cfg(target_os = "windows")]
-    {
-        use std::sync::atomic::Ordering;
-        #[link(name = "kernel32")]
-        extern "system" {
-            fn ReleaseMutex(hMutex: *mut std::ffi::c_void) -> i32;
-            fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
-        }
-
-        let handle = MUTEX_HANDLE.swap(std::ptr::null_mut(), Ordering::SeqCst);
-        if !handle.is_null() {
-            unsafe {
-                ReleaseMutex(handle);
-                CloseHandle(handle);
-            }
-        }
-    }
-}

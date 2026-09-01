@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Antigravity Bypass Russia (v1.0.1) for macOS (Apple Silicon & Intel)
+# Antigravity Bypass Russia (v1.1.0) for macOS (Apple Silicon & Intel)
 # Supports: Antigravity 2.0+ (Core), IDE UI (main.js) & Antigravity CLI (agy)
 # Dual-level patching: ARM64 / x64 Opcodes + Strings + Mach-O Code Signing
 # Network: /etc/resolver Scoped Domain DNS Routing + VPN Bypass Support
@@ -35,22 +35,8 @@ INSTALL_DIR="/Library/Application Support/AntigravityBypassRussia"
 
 # --- Domains for Selective DNS Routing ---
 DOMAINS=(
-    "cloudcode-pa.googleapis.com"
     "daily-cloudcode-pa.googleapis.com"
-    "daily-cloudcode-pa.sandbox.googleapis.com"
-    "antigravity-pa.googleapis.com"
-    "antigravity.googleapis.com"
-    "antigravity.google"
-    "antigravity-unleash.goog"
-    "cloudaicompanion.googleapis.com"
-    "cloudaicompanion.sandbox.googleapis.com"
-    "optimizationguide-pa.googleapis.com"
-    "developerprofiles-pa.googleapis.com"
-    "aicode.googleapis.com"
-    "aida.googleapis.com"
-    "geller-pa.googleapis.com"
-    "proactivebackend-pa.googleapis.com"
-    "robinfrontend-pa.googleapis.com"
+    "cloudcode-pa.googleapis.com"
     "generativelanguage.googleapis.com"
     "gemini.google.com"
     "gemini.google"
@@ -66,44 +52,21 @@ DOMAINS=(
     "webchannel-alkalimakersuite-pa.clients6.google.com"
     "alkalimakersuite-pa.googleapis.com"
     "alkalimakersuiteapplets.pa.googleapis.com"
-    "people-pa.clients6.google.com"
     "notebooklm-pa.googleapis.com"
     "notebooklm.googleapis.com"
     "notebooklm.google"
     "notebooklm.google.com"
-    "notebook.google.com"
     "jules.google"
     "jules.google.com"
-    "opal.google"
-    "opal.google.com"
-    "labs.google"
-    "labs.google.com"
-    "flow.google"
     "aisandbox-pa.googleapis.com"
     "deepmind.com"
     "deepmind.google"
-    "stitch.withgoogle.com"
-    "iamcredentials.googleapis.com"
-    "cloudresourcemanager.googleapis.com"
-    "sts.googleapis.com"
     "aiplatform.googleapis.com"
     "s-aiplatform.googleapis.com"
-    "play.googleapis.com"
-    "oauth2.googleapis.com"
-    "apis.google.com"
-    "clients6.google.com"
-    "servicecontrol.googleapis.com"
-    "servicemanagement.googleapis.com"
-    "sheets.googleapis.com"
-    "docs.googleapis.com"
-    "drive.googleapis.com"
-    "script.google.com"
-    "script.googleusercontent.com"
-    "spreadsheets.google.com"
 )
 
 # --- DNS Upstream Providers ---
-XBOX_SERVERS=("111.88.96.50" "111.88.96.51")
+XBOX_SERVERS=("111.88.96.50" "111.88.96.51" "83.220.169.155" "212.109.195.93" "195.133.25.16" "45.155.204.190" "37.230.192.51")
 
 # --- Privilege Elevation & Real User Resolution ---
 if [[ -n "$SUDO_USER" && "$SUDO_USER" != "root" ]]; then
@@ -130,9 +93,11 @@ ensure_admin() {
 # --- Process Killer (Batched single call) ---
 kill_antigravity_processes() {
     echo -e "${GRAY}Завершение запущенных процессов Antigravity...${NC}"
+    pkill -15 -f "Antigravity|language_server|agy|ag_dns" 2>/dev/null || true
     killall "Antigravity" "Antigravity IDE" "agy" "language_server_darwin_arm64" \
             "language_server_darwin_x64" "language_server" "ag_dns" 2>/dev/null || true
-    sleep 0.1
+    sleep 0.2
+    pkill -9 -f "Antigravity|language_server|agy|ag_dns" 2>/dev/null || true
 }
 
 # --- Cache Cleaner ---
@@ -340,8 +305,7 @@ restore_binary_py() {
     if [[ -f "$bak_path" && -s "$bak_path" ]]; then
         cp "$bak_path" "$file_path"
         rm -f "$bak_path"
-        codesign --force --sign - --preserve-metadata=entitlements,requirements,flags "$file_path" 2>/dev/null || true
-        echo "восстановлен из резервной копии (.bak)"
+        echo "восстановлен из резервной копии (.bak, оригинальная подпись сохранена)"
         return
     fi
 
@@ -489,8 +453,17 @@ apply_dns_resolvers() {
     shift
     local servers=("$@")
 
-    echo -e "${YELLOW}Применение селективной DNS-маршрутизации через ${label}...${NC}"
+    echo -e "${YELLOW}Применение селективной DNS-маршрутизации...${NC}"
     mkdir -p "$RESOLVER_DIR"
+
+    # If an older build left a LaunchDaemon, stop it: Mac should not keep
+    # a process running while the lid is closed.
+    if [[ -f "$LAUNCHD_PLIST" ]]; then
+        launchctl bootout system/com.antigravity.bypass.russia 2>/dev/null || \
+        launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
+        rm -f "$LAUNCHD_PLIST"
+    fi
+    pkill -f "ag_dns --dns-forwarder" 2>/dev/null || true
 
     local old_umask
     old_umask=$(umask)
@@ -514,7 +487,7 @@ apply_dns_resolvers() {
     # Flush macOS DNS cache
     dscacheutil -flushcache
     killall -HUP mDNSResponder 2>/dev/null || true
-    echo -e "${GREEN}  [✓] Создано ${#DOMAINS[@]} правил в /etc/resolver/ (${label})${NC}"
+    echo -e "${GREEN}  [✓] Создано ${#DOMAINS[@]} правил в /etc/resolver/${NC}"
 }
 
 remove_dns_resolvers() {
@@ -568,9 +541,9 @@ show_dashboard() {
     echo -e "${GRAY}  • Права процесса:       ${GREEN}[✓] Администратор${NC}"
     
     if [[ "$rule_count" -gt 0 ]]; then
-        echo -e "${GRAY}  • Сеть и DNS (NRPT):    ${GREEN}[✓] (Xbox-DNS.ru)${NC}"
+        echo -e "${GRAY}  • Сеть и DNS:           ${GREEN}[✓] Настроено${NC}"
     else
-        echo -e "${GRAY}  • Сеть и DNS (NRPT):    ${GRAY}[Не настроено]${NC}"
+        echo -e "${GRAY}  • Сеть и DNS:           ${GRAY}[Не настроено]${NC}"
     fi
 
     local arch
@@ -591,40 +564,18 @@ show_dashboard() {
     echo -e "${GRAY}  └────────────────────────────────────────────────────────┘\n${NC}"
 }
 
-select_dns() {
-    echo -e "\n${CYAN}Выберите DNS-провайдер для маршрутизации:${NC}"
-    echo -e "  ${YELLOW}1. Xbox-DNS.ru (111.88.96.50, 111.88.96.51)${NC}"
-    echo -e "  ${GREEN}2. Ввести свой DNS / IP адрес личного VPS${NC}"
-    read -rp "Ваш выбор [1-2] (Enter - Xbox-DNS): " dns_choice
-
-    case "$dns_choice" in
-        2)
-            read -rp "Введите IP адрес(а) DNS через запятую или пробел: " custom_ip
-            if [[ -z "$custom_ip" ]]; then
-                DNS_LABEL="Xbox-DNS.ru"
-                DNS_SERVERS=("${XBOX_SERVERS[@]}")
-            else
-                DNS_LABEL="Пользовательский DNS"
-                custom_ip="${custom_ip//,/ }"
-                read -r -a DNS_SERVERS <<< "$custom_ip"
-            fi
-            ;;
-        *) DNS_LABEL="Xbox-DNS.ru"; DNS_SERVERS=("${XBOX_SERVERS[@]}") ;;
-    esac
-}
-
 # --- Main Menu Loop ---
 main_menu() {
     while true; do
         safe_clear
         echo -e "${CYAN}=====================================================${NC}"
-        echo -e "${CYAN}    ANTIGRAVITY-BYPASS-RUSSIA (v1.0.1) FOR macOS     ${NC}"
+        echo -e "${CYAN}          ANTIGRAVITY-BYPASS-RUSSIA (v1.1.0)         ${NC}"
         echo -e "${CYAN}=====================================================${NC}"
         echo -e "Утилита обхода региональных ограничений и чистый откат\n"
 
         show_dashboard
 
-        echo -e "${GREEN}1. Полная разблокировка (Файлы Core 2.0/IDE/CLI + /etc/resolver DNS)${NC}"
+        echo -e "${GREEN}1. Полная разблокировка${NC}"
         echo -e "${CYAN}2. Только файлы (Работа без смены страны аккаунта)${NC}"
         echo -e "${YELLOW}3. Только DNS и сеть (Работа без VPN)${NC}"
         echo -e "4. Указать путь к Antigravity вручную"
@@ -636,7 +587,8 @@ main_menu() {
 
         case "$action" in
             1)
-                select_dns
+                DNS_LABEL="SmartDNS"
+                DNS_SERVERS=("${XBOX_SERVERS[@]}")
                 kill_antigravity_processes
                 while IFS= read -r inst; do
                     [[ -z "$inst" ]] && continue
@@ -661,7 +613,7 @@ main_menu() {
                         fi
                     done < <(find_targets "$inst")
                     if [[ "$inst" == *".app"* ]]; then
-                        codesign --force --deep --sign - --preserve-metadata=entitlements,requirements,flags "$inst" 2>/dev/null || true
+                        xattr -cr "$inst" 2>/dev/null || true
                     fi
                 done < <(find_installations)
 
@@ -694,13 +646,14 @@ main_menu() {
                         fi
                     done < <(find_targets "$inst")
                     if [[ "$inst" == *".app"* ]]; then
-                        codesign --force --deep --sign - --preserve-metadata=entitlements,requirements,flags "$inst" 2>/dev/null || true
+                        xattr -cr "$inst" 2>/dev/null || true
                     fi
                 done < <(find_installations)
                 read -rp "Нажмите Enter для продолжения..."
                 ;;
             3)
-                select_dns
+                DNS_LABEL="SmartDNS"
+                DNS_SERVERS=("${XBOX_SERVERS[@]}")
                 apply_dns_resolvers "$DNS_LABEL" "${DNS_SERVERS[@]}"
                 read -rp "Нажмите Enter для продолжения..."
                 ;;
@@ -742,7 +695,7 @@ main_menu() {
                             fi
                         done < <(find_targets "$custom_path")
                         if [[ "$custom_path" == *".app"* ]]; then
-                            codesign --force --deep --sign - --preserve-metadata=entitlements,requirements,flags "$custom_path" 2>/dev/null || true
+                            xattr -cr "$custom_path" 2>/dev/null || true
                         fi
                     fi
                 else

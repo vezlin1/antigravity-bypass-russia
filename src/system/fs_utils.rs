@@ -93,11 +93,11 @@ pub fn robust_write_file(path: &Path, data: &[u8]) -> Result<(), String> {
 pub fn post_write_hook(path: &Path) {
     #[cfg(target_os = "macos")]
     {
-        let is_binary = path
+        let is_macho_target = path
             .extension()
-            .map_or(true, |ext| ext != "js" && ext != "json");
+            .map_or(true, |ext| ext != "js" && ext != "json" && ext != "asar" && ext != "bak");
         let path_str = path.to_str().unwrap_or_default();
-        if is_binary {
+        if is_macho_target {
             let res = Command::new("codesign")
                 .args([
                     "--force",
@@ -117,27 +117,12 @@ pub fn post_write_hook(path: &Path) {
             .args(["-d", "com.apple.quarantine", path_str])
             .output();
 
-        // Recursively clear quarantine and deep re-sign the containing .app bundle to satisfy Gatekeeper
+        // Clear quarantine recursively without re-signing the entire .app with --deep
         let mut curr = path.parent();
         while let Some(p) = curr {
             if p.extension().and_then(|e| e.to_str()) == Some("app") {
                 let app_str = p.to_str().unwrap_or_default();
                 let _ = Command::new("xattr").args(["-cr", app_str]).output();
-                let res = Command::new("codesign")
-                    .args([
-                        "--force",
-                        "--deep",
-                        "--sign",
-                        "-",
-                        "--preserve-metadata=entitlements,requirements,flags",
-                        app_str,
-                    ])
-                    .output();
-                if res.map(|o| !o.status.success()).unwrap_or(true) {
-                    let _ = Command::new("codesign")
-                        .args(["--force", "--deep", "--sign", "-", app_str])
-                        .output();
-                }
                 break;
             }
             curr = p.parent();

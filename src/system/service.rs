@@ -275,8 +275,14 @@ pub fn enable() -> Result<(), String> {
         <key>Crashed</key>
         <true/>
     </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>LowPriorityIO</key>
+    <true/>
     <key>ThrottleInterval</key>
-    <integer>5</integer>
+    <integer>30</integer>
     <key>StandardErrorPath</key>
     <string>{}</string>
     <key>StandardOutPath</key>
@@ -312,30 +318,6 @@ pub fn enable() -> Result<(), String> {
         }
     }
 
-    Ok(())
-}
-
-pub fn ensure_running() -> Result<(), String> {
-    if !is_enabled() {
-        return enable();
-    }
-    if !is_running() {
-        #[cfg(target_os = "windows")]
-        {
-            let _ = no_window(&mut Command::new("schtasks"))
-                .args(["/Run", "/TN", TASK_NAME])
-                .output();
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let res = Command::new("launchctl")
-                .args(["kickstart", "-k", &format!("system/{}", LAUNCHD_LABEL)])
-                .output();
-            if res.map(|o| !o.status.success()).unwrap_or(true) {
-                let _ = Command::new("launchctl").args(["load", "-w", LAUNCHD_PLIST]).output();
-            }
-        }
-    }
     Ok(())
 }
 

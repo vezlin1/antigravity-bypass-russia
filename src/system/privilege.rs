@@ -190,3 +190,66 @@ pub fn ensure_admin() {
         std::process::exit(1);
     }
 }
+
+pub fn clean_legacy_certificates() {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        #[link(name = "crypt32")]
+        extern "system" {
+            fn CertOpenSystemStoreW(hprov: *mut std::ffi::c_void, szSubsystemProtocol: *const u16) -> *mut std::ffi::c_void;
+            fn CertEnumCertificatesInStore(hCertStore: *mut std::ffi::c_void, pPrevCertContext: *const std::ffi::c_void) -> *const std::ffi::c_void;
+            fn CertGetNameStringW(pCertContext: *const std::ffi::c_void, dwType: u32, dwFlags: u32, pvTypePara: *const std::ffi::c_void, pszNameString: *mut u16, cchNameString: u32) -> u32;
+            fn CertDeleteCertificateFromStore(pCertContext: *const std::ffi::c_void) -> i32;
+            fn CertCloseStore(hCertStore: *mut std::ffi::c_void, dwFlags: u32) -> i32;
+        }
+
+        const CERT_NAME_SIMPLE_DISPLAY_TYPE: u32 = 4;
+
+        for store_name in ["Root", "MY", "CA"] {
+            let wide: Vec<u16> = OsStr::new(store_name).encode_wide().chain(std::iter::once(0)).collect();
+            let h_store = unsafe { CertOpenSystemStoreW(std::ptr::null_mut(), wide.as_ptr()) };
+            if !h_store.is_null() {
+                let mut prev: *const std::ffi::c_void = std::ptr::null();
+                loop {
+                    let cert = unsafe { CertEnumCertificatesInStore(h_store, prev) };
+                    if cert.is_null() {
+                        break;
+                    }
+                    let mut name_buf = [0u16; 256];
+                    let len = unsafe {
+                        CertGetNameStringW(
+                            cert,
+                            CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                            0,
+                            std::ptr::null(),
+                            name_buf.as_mut_ptr(),
+                            name_buf.len() as u32,
+                        )
+                    };
+                    if len > 1 {
+                        let name = String::from_utf16_lossy(&name_buf[..len as usize - 1]);
+                        if name.contains("Antigravity") || name.contains("AGUnlocker") || name.contains("AG_Relay") {
+                            unsafe {
+                                CertDeleteCertificateFromStore(cert);
+                            }
+                            prev = std::ptr::null();
+                            continue;
+                        }
+                    }
+                    prev = cert;
+                }
+                unsafe { CertCloseStore(h_store, 0) };
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("security").args(["delete-certificate", "-c", "Antigravity"]).output();
+        let _ = Command::new("security").args(["delete-certificate", "-c", "AGUnlocker"]).output();
+    }
+}
+

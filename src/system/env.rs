@@ -37,14 +37,15 @@ pub fn expand_env_vars(input: &str) -> PathBuf {
 
     #[cfg(not(target_os = "windows"))]
     {
-        if input.starts_with("~/") {
+        if input.starts_with("~/") || input == "~" {
+            let subpath = if input.len() > 2 { &input[2..] } else { "" };
             #[cfg(target_os = "macos")]
             {
                 if let Ok(sudo_user) = std::env::var("SUDO_USER") {
                     if !sudo_user.is_empty() && sudo_user != "root" {
                         let user_home = PathBuf::from(format!("/Users/{}", sudo_user));
                         if user_home.exists() {
-                            return user_home.join(&input[2..]);
+                            return user_home.join(subpath);
                         }
                     }
                 }
@@ -54,13 +55,24 @@ pub fn expand_env_vars(input: &str) -> PathBuf {
                     if !user.is_empty() && user != "root" {
                         let user_home = PathBuf::from(format!("/Users/{}", user));
                         if user_home.exists() {
-                            return user_home.join(&input[2..]);
+                            return user_home.join(subpath);
+                        }
+                    }
+                }
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+                    if !sudo_user.is_empty() && sudo_user != "root" {
+                        let user_home = PathBuf::from(format!("/home/{}", sudo_user));
+                        if user_home.exists() {
+                            return user_home.join(subpath);
                         }
                     }
                 }
             }
             if let Ok(home) = std::env::var("HOME") {
-                return PathBuf::from(home).join(&input[2..]);
+                return PathBuf::from(home).join(subpath);
             }
         }
     }
