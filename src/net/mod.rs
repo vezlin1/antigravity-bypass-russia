@@ -179,12 +179,9 @@ pub fn apply_dns_rules() -> Result<String, String> {
     }
 
     step("ранжирование прокси Cloud Code (быстрый первый, остальные запас)");
-    #[cfg(target_os = "windows")]
-    {
-        let ranked = crate::net::rank::rescan_agent(if_index);
-        for note in crate::net::rank::format_notes(&ranked) {
-            sub_notes.push(note);
-        }
+    let ranked = crate::net::rank::rescan_agent(if_index);
+    for note in crate::net::rank::format_notes(&ranked) {
+        sub_notes.push(note);
     }
 
     let mut msg = if relay_ok {
