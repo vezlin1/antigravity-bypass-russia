@@ -130,22 +130,37 @@ pub fn log_path() -> PathBuf {
 }
 
 pub(crate) fn log_line(msg: &str) {
+    #[cfg(debug_assertions)]
+    {
+        let p = log_path();
+        let _ = fs::create_dir_all(log_dir());
+        if fs::metadata(&p).map(|m| m.len() > 64 * 1024).unwrap_or(false) {
+            let _ = fs::remove_file(&p);
+        }
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(p) {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = writeln!(f, "[{}] {}", ts, msg);
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = msg;
+    }
+}
+
+pub fn log_fatal(msg: &str) {
     let p = log_path();
     let _ = fs::create_dir_all(log_dir());
-    if fs::metadata(&p).map(|m| m.len() > 64 * 1024).unwrap_or(false) {
-        let _ = fs::remove_file(&p);
-    }
     if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(p) {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let _ = writeln!(f, "[{}] {}", ts, msg);
+        let _ = writeln!(f, "[{}] FATAL: {}", ts, msg);
     }
-}
-
-pub fn log_fatal(msg: &str) {
-    log_line(&format!("FATAL: {}", msg));
 }
 
 pub fn run() -> Result<(), String> {

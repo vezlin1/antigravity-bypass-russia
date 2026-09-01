@@ -169,7 +169,7 @@ pub fn connect_with_racing(candidates: &[String], port: u16) -> io::Result<(TcpS
                 if let Ok(ip) = winning_ip.parse::<Ipv4Addr>() {
                     let sock_addr = SocketAddr::new(IpAddr::V4(ip), port);
                     if let Ok(stream) = TcpStream::connect_timeout(&sock_addr, Duration::from_millis(800)) {
-                        let _ = stream.set_nodelay(true);
+                        let _ = crate::net::socket::configure_tcp_stream(&stream);
                         return Ok((stream, winning_ip.clone()));
                     }
                 }
@@ -181,7 +181,7 @@ pub fn connect_with_racing(candidates: &[String], port: u16) -> io::Result<(TcpS
         let ip: Ipv4Addr = candidates[0].parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let socket_addr = SocketAddr::new(IpAddr::V4(ip), port);
         let s = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(3))?;
-        let _ = s.set_nodelay(true);
+        let _ = crate::net::socket::configure_tcp_stream(&s);
         return Ok((s, candidates[0].clone()));
     }
 
@@ -209,7 +209,7 @@ pub fn connect_with_racing(candidates: &[String], port: u16) -> io::Result<(TcpS
             if let Ok(ip) = cand_clone.parse::<Ipv4Addr>() {
                 let sock_addr = SocketAddr::new(IpAddr::V4(ip), port);
                 if let Ok(stream) = TcpStream::connect_timeout(&sock_addr, FAST_RACING_TIMEOUT) {
-                    let _ = stream.set_nodelay(true);
+                    let _ = crate::net::socket::configure_tcp_stream(&stream);
                     if !stop_clone.swap(true, Ordering::SeqCst) {
                         let _ = tx_clone.send((stream, cand_clone));
                     }
@@ -226,7 +226,7 @@ pub fn connect_with_racing(candidates: &[String], port: u16) -> io::Result<(TcpS
             let ip: Ipv4Addr = candidates[0].parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
             let socket_addr = SocketAddr::new(IpAddr::V4(ip), port);
             let s = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(3))?;
-            let _ = s.set_nodelay(true);
+            let _ = crate::net::socket::configure_tcp_stream(&s);
             (s, candidates[0].clone())
         }
     };
@@ -250,7 +250,7 @@ pub fn establish_upstream_connection(host: &str, port: u16) -> io::Result<(TcpSt
                 .next()
                 .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "Custom upstream not resolved"))?;
             let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(4))?;
-            let _ = stream.set_nodelay(true);
+            let _ = crate::net::socket::configure_tcp_stream(&stream);
 
             // Send CONNECT request to the custom upstream proxy
             let auth_line = if let Some(auth) = &custom.auth_header {
@@ -297,7 +297,7 @@ pub fn establish_upstream_connection(host: &str, port: u16) -> io::Result<(TcpSt
         let ip: Ipv4Addr = fallback_ip.parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let socket_addr = SocketAddr::new(IpAddr::V4(ip), port);
         let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(3))?;
-        let _ = stream.set_nodelay(true);
+        let _ = crate::net::socket::configure_tcp_stream(&stream);
         return Ok((stream, format!("{} (fallback)", fallback_ip)));
     }
 
@@ -308,7 +308,7 @@ pub fn establish_upstream_connection(host: &str, port: u16) -> io::Result<(TcpSt
         .next()
         .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "Direct unresolved"))?;
     let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(5))?;
-    let _ = stream.set_nodelay(true);
+    let _ = crate::net::socket::configure_tcp_stream(&stream);
     Ok((stream, "direct".to_string()))
 }
 
@@ -378,9 +378,9 @@ fn pipe_streams_with_accounting(
         .unwrap_or_default()
         .as_secs();
 
-    // Critical for instant token streaming (Nagle algorithm disabled)
-    let _ = client.set_nodelay(true);
-    let _ = upstream.set_nodelay(true);
+    // Critical for instant token streaming (Nagle algorithm disabled, 512KB buffers)
+    let _ = crate::net::socket::configure_tcp_stream(&client);
+    let _ = crate::net::socket::configure_tcp_stream(&upstream);
 
     // Set 10-minute thinking timeout on read
     let _ = client.set_read_timeout(Some(THINKING_PHASE_TIMEOUT));
@@ -458,7 +458,7 @@ fn pipe_streams_with_accounting(
 
 /// Handles incoming HTTP CONNECT, PAC or Stats query.
 fn handle_http_client(mut stream: TcpStream, http_port: u16, socks5_port: u16) -> io::Result<()> {
-    let _ = stream.set_nodelay(true);
+    let _ = crate::net::socket::configure_tcp_stream(&stream);
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     let mut buffer = [0u8; 8192];
     let n = stream.read(&mut buffer)?;
@@ -517,7 +517,7 @@ fn handle_http_client(mut stream: TcpStream, http_port: u16, socks5_port: u16) -
 
         match establish_upstream_connection(host, port) {
             Ok((upstream, upstream_desc)) => {
-                let _ = upstream.set_nodelay(true);
+                let _ = crate::net::socket::configure_tcp_stream(&upstream);
                 // Send 200 Connection Established
                 stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
                 pipe_streams_with_accounting(stream, upstream, target_str, &upstream_desc);
@@ -537,7 +537,7 @@ fn handle_http_client(mut stream: TcpStream, http_port: u16, socks5_port: u16) -
 
 /// Handles SOCKS5 client connection (RFC 1928).
 fn handle_socks5_client(mut stream: TcpStream) -> io::Result<()> {
-    let _ = stream.set_nodelay(true);
+    let _ = crate::net::socket::configure_tcp_stream(&stream);
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
 
     // 1. Version & Method negotiation
@@ -600,7 +600,7 @@ fn handle_socks5_client(mut stream: TcpStream) -> io::Result<()> {
     let target_name = format!("{}:{}", host, port);
     match establish_upstream_connection(&host, port) {
         Ok((upstream, upstream_desc)) => {
-            let _ = upstream.set_nodelay(true);
+            let _ = crate::net::socket::configure_tcp_stream(&upstream);
             // Respond Success: [VER, REP(0), RSV, ATYP(1), BND.ADDR(0), BND.PORT(0)]
             stream.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])?;
             pipe_streams_with_accounting(stream, upstream, &target_name, &upstream_desc);
@@ -617,10 +617,11 @@ fn handle_socks5_client(mut stream: TcpStream) -> io::Result<()> {
 /// Spawns the HTTP CONNECT proxy server on the specified port.
 pub fn spawn_http_proxy(port: u16, socks5_port: u16) -> io::Result<()> {
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port))?;
+    let _ = crate::net::socket::configure_tcp_listener(&listener);
     thread::spawn(move || {
         for stream in listener.incoming() {
             if let Ok(s) = stream {
-                let _ = s.set_nodelay(true);
+                let _ = crate::net::socket::configure_tcp_stream(&s);
                 thread::spawn(move || {
                     let _ = handle_http_client(s, port, socks5_port);
                 });
@@ -633,10 +634,11 @@ pub fn spawn_http_proxy(port: u16, socks5_port: u16) -> io::Result<()> {
 /// Spawns the SOCKS5 proxy server on the specified port.
 pub fn spawn_socks5_proxy(port: u16) -> io::Result<()> {
     let listener = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port))?;
+    let _ = crate::net::socket::configure_tcp_listener(&listener);
     thread::spawn(move || {
         for stream in listener.incoming() {
             if let Ok(s) = stream {
-                let _ = s.set_nodelay(true);
+                let _ = crate::net::socket::configure_tcp_stream(&s);
                 thread::spawn(move || {
                     let _ = handle_socks5_client(s);
                 });

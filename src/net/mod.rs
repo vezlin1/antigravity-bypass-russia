@@ -53,6 +53,9 @@ pub fn apply_dns_rules() -> Result<String, String> {
     let _ = nrpt::take_over_conflicting_rules(&names);
     crate::net::doh::disable_system_doh();
 
+    step("оптимизация TCP-стека (TCP Auto-Tuning normal, 512KB buffers)");
+    let _ = crate::net::socket::tune_os_network_stack();
+
     step("поиск физического адаптера (не VPN)");
     let egress = crate::net::egress::detect();
     let if_index = egress.as_ref().map(|e| e.if_index).unwrap_or(0);
@@ -205,6 +208,7 @@ pub fn remove_dns_rules() {
     crate::net::egress::remove_legacy_routes();
     let _ = crate::net::hosts::remove_entries();
     crate::net::doh::restore_system_doh();
+    let _ = crate::net::socket::restore_os_network_stack();
 
     #[cfg(target_os = "windows")]
     {

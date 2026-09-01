@@ -345,31 +345,6 @@ pub fn handle_diagnostics() {
         }
     }
 
-    println!("\n\x1b[96m--- Спидтест и замер задержки серверов (Speedtest / Benchmark) ---\x1b[0m");
-    let bench = crate::net::health::benchmark_all_relays();
-    if bench.is_empty() {
-        println!("  \x1b[90m[-- Серверы не отвечают --]\x1b[0m");
-    } else {
-        println!("  {:<36} {:<18} {:<10} {:<10} {}", "Провайдер / Узел", "IP-адрес", "Пинг", "TTFT", "Статус");
-        for b in bench {
-            let status_col = if b.status == "Отлично" {
-                "\x1b[92m[✓ Отлично]\x1b[0m"
-            } else if b.handshake_ms > 0 {
-                "\x1b[93m[~ Доступен]\x1b[0m"
-            } else {
-                "\x1b[31m[✗ Таймаут]\x1b[0m"
-            };
-            println!(
-                "  {:<36} {:<18} {:<10} {:<10} {}",
-                b.name,
-                b.ip,
-                if b.handshake_ms > 0 { format!("{} мс", b.handshake_ms) } else { "--".to_string() },
-                if b.ttft_ms > 0 { format!("{} мс", b.ttft_ms) } else { "--".to_string() },
-                status_col
-            );
-        }
-    }
-
     println!("\n\x1b[96m--- Статистика прокси и сокетов (Telemetry) ---\x1b[0m");
     let sessions = crate::net::proxy::get_recent_sessions();
     if sessions.is_empty() {

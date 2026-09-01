@@ -146,11 +146,15 @@ fn leader_tcp_dead() -> bool {
 }
 
 fn tcp443_fresh(ip: Ipv4Addr) -> bool {
-    TcpStream::connect_timeout(
+    if let Ok(stream) = TcpStream::connect_timeout(
         &SocketAddr::new(IpAddr::V4(ip), 443),
         LEADER_TCP_BUDGET,
-    )
-    .is_ok()
+    ) {
+        let _ = crate::net::socket::configure_tcp_stream(&stream);
+        true
+    } else {
+        false
+    }
 }
 
 fn ranked_ips(ranked: &[RankedHost]) -> Vec<Ipv4Addr> {
@@ -175,8 +179,11 @@ fn refresh_routes_from_disk() {
 fn apply_hosts(ranked: &[RankedHost]) {
     let mut entries: Vec<(String, Ipv4Addr)> = Vec::new();
     for h in ranked {
-        for (ip, _) in &h.ips {
-            entries.push((h.host.clone(), *ip));
+        // Pin ONLY the single fastest leader IP for each host into hosts file.
+        // This prevents Windows getaddrinfo and Electron Happy Eyeballs from attempting
+        // slower fallback IPs and causing 1-3s connection stalling.
+        if let Some((best_ip, _)) = h.ips.first() {
+            entries.push((h.host.clone(), *best_ip));
         }
     }
     if !entries.is_empty() {

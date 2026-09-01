@@ -16,6 +16,7 @@ fn print_help() {
           patch-files   Только бинарники и ASAR (без смены страны аккаунта)\n\
           dns           Настройка SmartDNS / NRPT обхода\n\
           proxy         Запуск локального HTTP CONNECT (8989) & SOCKS5 (10808) прокси\n\
+          tune          Оптимизация сетевого стека TCP (Window Auto-Tuning, 512KB)\n\
           watch         Фоновый мониторинг обновлений Antigravity и авто-репатчер\n\
           diagnostics   Диагностика связи и проверка Google Cloud Code API\n\
           rollback      Полный откат: восстановление исходных файлов и сброс DNS\n\
@@ -53,6 +54,7 @@ fn main() {
         }
         "proxy" | "--proxy" => {
             ui::init_terminal();
+            let _ = net::socket::tune_os_network_stack();
             let http_port = net::proxy::DEFAULT_HTTP_PROXY_PORT;
             let socks5_port = net::proxy::DEFAULT_SOCKS5_PROXY_PORT;
             println!("\x1b[96m=== ANTIGRAVITY EMBEDDED PROXY ===\x1b[0m");
@@ -71,6 +73,21 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        "tune" | "--tune" => {
+            ui::init_terminal();
+            system::ensure_admin();
+            println!("\x1b[96m=== ОПТИМИЗАЦИЯ СЕТЕВОГО СТЕКА TCP ===\x1b[0m\n");
+            match net::socket::tune_os_network_stack() {
+                Ok(logs) => {
+                    for log in logs {
+                        println!("  \x1b[92m[✓]\x1b[0m {}", log);
+                    }
+                    println!("\nТекущий статус:\n{}", net::socket::get_os_network_status());
+                }
+                Err(e) => eprintln!("  \x1b[31m[✗]\x1b[0m {}", e),
+            }
+            return;
         }
         "watch" | "--watch" => {
             ui::init_terminal();

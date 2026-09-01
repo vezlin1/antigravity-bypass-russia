@@ -57,6 +57,8 @@ const LIVENESS_TTL_DEAD: Duration = Duration::from_secs(60);
 static PROXY_SET: Mutex<Option<(HashMap<usize, Vec<IpAddr>>, Instant)>> = Mutex::new(None);
 static LIVENESS: Mutex<Option<HashMap<IpAddr, (bool, Instant)>>> = Mutex::new(None);
 static CHOICE: Mutex<Option<HashMap<(String, u16), (usize, Verdict, Instant)>>> = Mutex::new(None);
+const DNS_PACKET_CACHE_TTL: Duration = Duration::from_secs(300);
+static DNS_PACKET_CACHE: Mutex<Option<HashMap<(String, u16), (Vec<u8>, &'static str, Verdict, Instant)>>> = Mutex::new(None);
 static ROTATION: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,7 +260,7 @@ fn tls_handshake_ms(addr: IpAddr, sni: &str) -> Option<u128> {
     if left.is_zero() {
         return None;
     }
-    stream.set_nodelay(true).ok()?;
+    crate::net::socket::configure_tcp_stream(&stream).ok()?;
     stream.set_read_timeout(Some(left)).ok()?;
     stream.set_write_timeout(Some(left)).ok()?;
     stream.write_all(&tls_client_hello(sni)).ok()?;
@@ -535,6 +537,27 @@ pub fn resolve_best(query: &[u8], if_index: u32) -> Option<ResolveHit> {
     let name = question_name(query).unwrap_or_else(|| "?".into());
     let qtype = question_type(query).unwrap_or(1);
 
+    // 1. High-speed in-memory DNS packet cache (0.01ms response from RAM)
+    if let Ok(guard) = DNS_PACKET_CACHE.lock() {
+        if let Some(map) = guard.as_ref() {
+            if let Some((cached_reply, provider, verdict, at)) = map.get(&(name.clone(), qtype)) {
+                if at.elapsed() < DNS_PACKET_CACHE_TTL {
+                    let mut fast_reply = cached_reply.clone();
+                    if query.len() >= 2 && fast_reply.len() >= 2 {
+                        // Stamp incoming query's Transaction ID
+                        fast_reply[0] = query[0];
+                        fast_reply[1] = query[1];
+                    }
+                    return Some(ResolveHit {
+                        reply: fast_reply,
+                        provider,
+                        verdict: *verdict,
+                    });
+                }
+            }
+        }
+    }
+
     if let Ok(guard) = CHOICE.lock() {
         if let Some(map) = guard.as_ref() {
             if let Some((idx, verdict, at)) = map.get(&(name.clone(), qtype)) {
@@ -543,9 +566,15 @@ pub fn resolve_best(query: &[u8], if_index: u32) -> Option<ResolveHit> {
                         let Some(ip) = parse_v4(s) else { continue };
                         if let Ok(resp) = query_raw_via(query, ip, if_index, QUERY_TIMEOUT) {
                             if is_successful_response(&resp) && !answer_addrs(&resp).is_empty() {
+                                let reply = drop_dead(&resp);
+                                let provider = PROVIDERS[*idx].name;
+                                if let Ok(mut cguard) = DNS_PACKET_CACHE.lock() {
+                                    let cmap = cguard.get_or_insert_with(HashMap::new);
+                                    cmap.insert((name.clone(), qtype), (reply.clone(), provider, *verdict, Instant::now()));
+                                }
                                 return Some(ResolveHit {
-                                    reply: drop_dead(&resp),
-                                    provider: PROVIDERS[*idx].name,
+                                    reply,
+                                    provider,
                                     verdict: *verdict,
                                 });
                             }
@@ -562,6 +591,17 @@ pub fn resolve_best(query: &[u8], if_index: u32) -> Option<ResolveHit> {
         let proxy = cached_proxy();
         let proxy_addrs = proxy.get(&hit.idx).cloned().unwrap_or_default();
         let verdict = classify(&hit.addrs, &reference, &proxy_addrs);
+        let final_reply = drop_dead(&hit.reply);
+        let provider = PROVIDERS[hit.idx].name;
+
+        // Populate in-memory packet cache
+        if is_successful_response(&final_reply) && !answer_addrs(&final_reply).is_empty() {
+            if let Ok(mut cguard) = DNS_PACKET_CACHE.lock() {
+                let cmap = cguard.get_or_insert_with(HashMap::new);
+                cmap.insert((name.clone(), qtype), (final_reply.clone(), provider, verdict, Instant::now()));
+            }
+        }
+
         if verdict == Verdict::Substituted {
             if let Ok(mut guard) = CHOICE.lock() {
                 let map = guard.get_or_insert_with(HashMap::new);
@@ -569,8 +609,8 @@ pub fn resolve_best(query: &[u8], if_index: u32) -> Option<ResolveHit> {
             }
         }
         return Some(ResolveHit {
-            reply: drop_dead(&hit.reply),
-            provider: PROVIDERS[hit.idx].name,
+            reply: final_reply,
+            provider,
             verdict,
         });
     }
@@ -579,10 +619,16 @@ pub fn resolve_best(query: &[u8], if_index: u32) -> Option<ResolveHit> {
         let Ok(ip) = ns.parse::<Ipv4Addr>() else { continue };
         if let Ok(resp) = query_raw_via(query, ip, 0, QUERY_TIMEOUT) {
             if is_successful_response(&resp) && !answer_addrs(&resp).is_empty() {
+                let provider = "system";
+                let verdict = Verdict::Passthrough;
+                if let Ok(mut cguard) = DNS_PACKET_CACHE.lock() {
+                    let cmap = cguard.get_or_insert_with(HashMap::new);
+                    cmap.insert((name, qtype), (resp.clone(), provider, verdict, Instant::now()));
+                }
                 return Some(ResolveHit {
                     reply: resp,
-                    provider: "system",
-                    verdict: Verdict::Passthrough,
+                    provider,
+                    verdict,
                 });
             }
         }

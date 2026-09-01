@@ -58,16 +58,9 @@ pub const NRPT_AGENT: &[&str] = &[
     "generativelanguage.googleapis.com",
 ];
 
-/// High-Speed Multi-Provider SNI frontends (Comss 10G, Xbox-DNS Anycast, Geohide).
-pub const GEOHIDE_PROXY_V4: &[&str] = &[
-    "83.220.169.155", // Comss.one Frankfurt High-Speed Anycast
-    "111.88.96.50",   // Xbox-DNS Primary Anycast
-    "212.109.195.93", // Comss.one Amsterdam High-Bandwidth
-    "111.88.96.51",   // Xbox-DNS Secondary Anycast
-    "195.133.25.16",  // Comss.one Helsinki Low-Latency
-    "45.155.204.190", // Geohide Cloud Edge
-    "37.230.192.51",  // Geohide Secondary
-];
+/// Geohide HTTP/SNI frontends. Used when VPN makes SmartDNS skip substitution:
+/// we still TLS-probe these with Cloud Code SNI and pin whoever answers.
+pub const GEOHIDE_PROXY_V4: &[&str] = &["37.230.192.51", "45.155.204.190"];
 
 pub fn nrpt_domains() -> Vec<&'static str> {
     let mut out = Vec::with_capacity(NRPT_AGENT.len() + NRPT_STUDIO.len());
