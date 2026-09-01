@@ -32,6 +32,18 @@ fn apply_files_side() {
     }
 }
 
+fn ask_enable_auto_watcher() {
+    if !crate::core::watcher::is_watcher_running() {
+        println!("\n\x1b[95m[?] Включить автоматический репатч при обновлениях Antigravity (Watcher)? [y/N]:\x1b[0m ");
+        let ans = prompt("> ");
+        let lower = ans.trim().to_lowercase();
+        if lower == "y" || lower == "yes" || lower == "д" || lower == "да" {
+            crate::core::watcher::spawn_watcher_thread(std::time::Duration::from_secs(8));
+            println!("  \x1b[92m[✓]\x1b[0m Фоновый мониторинг запущен. При обновлениях Antigravity патчи восстановятся автоматически.");
+        }
+    }
+}
+
 pub fn handle_unlock_all() {
     clear_screen();
     banner();
@@ -52,6 +64,8 @@ pub fn handle_unlock_all() {
         Err(e) => println!("  \x1b[31m[✗]\x1b[0m Ошибка сети: {}", e),
     }
 
+    ask_enable_auto_watcher();
+
     println!("\n\x1b[92mГотово. Запустите Antigravity и войдите в аккаунт.\x1b[0m");
     pause();
 }
@@ -69,6 +83,9 @@ pub fn handle_patch_files_only() {
         patch_root(inst);
     }
     apply_files_side();
+
+    ask_enable_auto_watcher();
+
     println!("\n\x1b[92m[✓] Патчинг файлов завершен! Запустите Antigravity.\x1b[0m");
     pause();
 }
@@ -83,6 +100,9 @@ pub fn handle_dns_only() {
         Ok(msg) => println!("\x1b[92m[✓] {}\x1b[0m", msg),
         Err(e) => println!("\x1b[31m[✗] Ошибка сети: {}\x1b[0m", e),
     }
+
+    ask_enable_auto_watcher();
+
     pause();
 }
 
@@ -491,11 +511,9 @@ pub fn run_app() {
         println!("4. \x1b[95mУказать путь вручную\x1b[0m (к папке или файлу Antigravity)");
         println!("5. \x1b[96mДиагностика и проверка связи\x1b[0m");
         println!("6. \x1b[91mПОЛНЫЙ ОТКАТ\x1b[0m (вернуть всё в исходное состояние)");
-        println!("7. \x1b[96mЛокальный HTTP/SOCKS5 прокси и PAC\x1b[0m (без смены системных DNS)");
-        println!("8. \x1b[95mФоновый репатчер обновлений (Watcher)\x1b[0m");
         println!("0. Выход\n");
 
-        match prompt("Выберите действие [0-8]: ").as_str() {
+        match prompt("Выберите действие [0-6]: ").as_str() {
             "1" => handle_unlock_all(),
             "2" => handle_patch_files_only(),
             "3" => handle_dns_only(),

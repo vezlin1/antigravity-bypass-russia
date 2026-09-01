@@ -62,6 +62,12 @@ pub fn print_dashboard() {
         "\x1b[90m[-- Выключен]\x1b[0m"
     };
     println!("  • DNS-релей:            {}", relay_str);
+    let watcher_str = if crate::core::watcher::is_watcher_running() {
+        "\x1b[92m[✓] Активен (авто-репатч)\x1b[0m"
+    } else {
+        "\x1b[90m[-- Отключен]\x1b[0m"
+    };
+    println!("  • Авто-репатчер:        {}", watcher_str);
     println!("  • Antigravity 2.0 Core: {}", core_str);
     println!("  • Antigravity IDE UI:   {}", ide_str);
     println!("  • Antigravity CLI:      {}", cli_str);
