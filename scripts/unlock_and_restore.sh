@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Antigravity Bypass Russia (v1.1.0) for macOS (Apple Silicon & Intel)
+# Antigravity Bypass Russia (v2.0.0) for macOS (Apple Silicon & Intel)
 # Supports: Antigravity 2.0+ (Core), IDE UI (main.js) & Antigravity CLI (agy)
 # Dual-level patching: ARM64 / x64 Opcodes + Strings + Mach-O Code Signing
 # Network: /etc/resolver Scoped Domain DNS Routing + VPN Bypass Support
@@ -565,11 +565,41 @@ show_dashboard() {
 }
 
 # --- Main Menu Loop ---
+ask_enable_watcher() {
+    echo -e "\n${MAGENTA}[?] Включить автоматический репатч при обновлениях Antigravity ?${NC}"
+    echo "  1. Да"
+    echo "  2. Нет"
+    read -rp "Выберите [1-2, по умолчанию 2]: " ans
+    if [[ "$ans" == "1" || "$ans" =~ ^[YyДд] ]]; then
+        (
+            while true; do
+                sleep 10
+                while IFS= read -r inst; do
+                    [[ -z "$inst" ]] && continue
+                    while IFS= read -r item; do
+                        [[ -z "$item" ]] && continue
+                        local type="${item%%:*}"
+                        local path="${item#*:}"
+                        if [[ "$type" == "JS" ]]; then
+                            patch_main_js "$path" >/dev/null 2>&1 || true
+                        else
+                            patch_binary_py "$path" >/dev/null 2>&1 || true
+                        fi
+                    done < <(find_targets "$inst" 2>/dev/null)
+                done < <(find_installations 2>/dev/null)
+            done
+        ) >/dev/null 2>&1 &
+        echo -e "  ${GREEN}[✓] Автоматический репатч включен.${NC}\n"
+    else
+        echo -e "  ${GRAY}[--] Автоматический репатч пропущен.${NC}\n"
+    fi
+}
+
 main_menu() {
     while true; do
         safe_clear
         echo -e "${CYAN}=====================================================${NC}"
-        echo -e "${CYAN}          ANTIGRAVITY-BYPASS-RUSSIA (v1.1.0)         ${NC}"
+        echo -e "${CYAN}          ANTIGRAVITY-BYPASS-RUSSIA (v2.0.0)         ${NC}"
         echo -e "${CYAN}=====================================================${NC}"
         echo -e "Утилита обхода региональных ограничений и чистый откат\n"
 
@@ -587,6 +617,7 @@ main_menu() {
 
         case "$action" in
             1)
+                ask_enable_watcher
                 DNS_LABEL="SmartDNS"
                 DNS_SERVERS=("${XBOX_SERVERS[@]}")
                 kill_antigravity_processes
@@ -622,6 +653,7 @@ main_menu() {
                 read -rp "Нажмите Enter для продолжения..."
                 ;;
             2)
+                ask_enable_watcher
                 kill_antigravity_processes
                 while IFS= read -r inst; do
                     [[ -z "$inst" ]] && continue
@@ -652,6 +684,7 @@ main_menu() {
                 read -rp "Нажмите Enter для продолжения..."
                 ;;
             3)
+                ask_enable_watcher
                 DNS_LABEL="SmartDNS"
                 DNS_SERVERS=("${XBOX_SERVERS[@]}")
                 apply_dns_resolvers "$DNS_LABEL" "${DNS_SERVERS[@]}"

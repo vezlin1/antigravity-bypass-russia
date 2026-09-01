@@ -1,4 +1,4 @@
-# ANTIGRAVITY-BYPASS-RUSSIA (v1.1.0) - PowerShell Bypass & Rollback Tool
+# ANTIGRAVITY-BYPASS-RUSSIA (v2.0.0) - PowerShell Bypass & Rollback Tool
 # Поддержка: Antigravity 2.0+ (Core), IDE UI (main.js) & Antigravity CLI (agy)
 # Двухуровневый патчинг (Опкоды x64/ARM64 + Строки) + Высокоскоростной C# движок + Обход VPN
 
@@ -830,7 +830,7 @@ function Show-Diagnostics {
 function Show-Menu {
     Clear-Host
     Write-Host "=====================================================" -ForegroundColor Cyan
-    Write-Host "          ANTIGRAVITY-BYPASS-RUSSIA (v1.1.0)         " -ForegroundColor Cyan
+    Write-Host "          ANTIGRAVITY-BYPASS-RUSSIA (v2.0.0)         " -ForegroundColor Cyan
     Write-Host "=====================================================" -ForegroundColor Cyan
     Write-Host "Открытая утилита обхода блокировок и чистого отката`n"
 
