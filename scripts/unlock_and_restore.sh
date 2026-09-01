@@ -66,7 +66,7 @@ DOMAINS=(
 )
 
 # --- DNS Upstream Providers ---
-XBOX_SERVERS=("111.88.96.50" "111.88.96.51" "83.220.169.155" "212.109.195.93" "195.133.25.16" "45.155.204.190" "37.230.192.51")
+XBOX_SERVERS=("111.88.96.50" "111.88.96.51" "83.220.169.155" "212.109.195.93" "195.133.25.16")
 
 # --- Privilege Elevation & Real User Resolution ---
 if [[ -n "$SUDO_USER" && "$SUDO_USER" != "root" ]]; then
@@ -170,6 +170,11 @@ find_targets() {
 
     # Mach-O Language Server Binaries (Core 2.0)
     local ls_candidates=(
+        "$root/Contents/Resources/app.asar.unpacked/extensions/antigravity/bin/language_server_darwin_arm64"
+        "$root/Contents/Resources/app.asar.unpacked/extensions/antigravity/bin/language_server_darwin_x64"
+        "$root/Contents/Resources/app.asar.unpacked/bin/language_server_darwin_arm64"
+        "$root/Contents/Resources/app.asar.unpacked/bin/language_server_darwin_x64"
+        "$root/Contents/Resources/app.asar.unpacked/bin/language_server"
         "$root/Contents/Resources/app/extensions/antigravity/bin/language_server_darwin_arm64"
         "$root/Contents/Resources/app/extensions/antigravity/bin/language_server_darwin_x64"
         "$root/Contents/Resources/app/extensions/antigravity/bin/language_server"
@@ -187,6 +192,15 @@ find_targets() {
             targets+=("BIN:$ls")
         fi
     done
+
+    # Dynamic fallback search for any Mach-O binaries if not found above
+    if [[ ${#targets[@]} -eq 0 && -d "$root" ]]; then
+        while IFS= read -r f; do
+            if [[ -f "$f" ]]; then
+                targets+=("BIN:$f")
+            fi
+        done < <(find "$root" -type f \( -name "language_server_darwin_*" -o -name "language_server" \) 2>/dev/null)
+    fi
 
     # CLI Binary (agy)
     local cli_candidates=(
@@ -447,11 +461,92 @@ EOF
     clear_caches >/dev/null
 }
 
+apply_hosts_entries() {
+    local hosts_file="/etc/hosts"
+    echo -e "${YELLOW}Настройка /etc/hosts для обхода гео-блокировки Google AI...${NC}"
+    if grep -q "BEGIN ANTIGRAVITY-BYPASS-RUSSIA" "$hosts_file" 2>/dev/null; then
+        sed -i '' '/# BEGIN ANTIGRAVITY-BYPASS-RUSSIA/,/# END ANTIGRAVITY-BYPASS-RUSSIA/d' "$hosts_file" 2>/dev/null || true
+    fi
+
+    cat <<'EOF' >> "$hosts_file"
+# BEGIN ANTIGRAVITY-BYPASS-RUSSIA
+45.155.204.190 daily-cloudcode-pa.googleapis.com
+45.155.204.190 cloudcode-pa.googleapis.com
+45.155.204.190 generativelanguage.googleapis.com
+# END ANTIGRAVITY-BYPASS-RUSSIA
+EOF
+    echo -e "${GREEN}  [✓] /etc/hosts обновлен (SNI-прокси 45.155.204.190)${NC}"
+}
+
+apply_ide_settings() {
+    local settings_dirs=(
+        "$REAL_HOME/Library/Application Support/Antigravity/User"
+        "$REAL_HOME/Library/Application Support/Antigravity IDE/User"
+        "$REAL_HOME/Library/Application Support/Google Antigravity/User"
+    )
+    for sdir in "${settings_dirs[@]}"; do
+        mkdir -p "$sdir" 2>/dev/null || true
+        local sfile="$sdir/settings.json"
+        if [[ ! -f "$sfile" ]]; then
+            echo '{}' > "$sfile"
+        fi
+        python3 - "$sfile" <<'EOF'
+import sys, json
+
+path = sys.argv[1]
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+except Exception:
+    data = {}
+
+data["jetski.cloudCodeUrl"] = "https://daily-cloudcode-pa.googleapis.com"
+
+with open(path, 'w', encoding='utf-8') as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+EOF
+        if [[ -n "$SUDO_USER" && "$SUDO_USER" != "root" ]]; then
+            chown "$SUDO_USER" "$sfile" 2>/dev/null || true
+        fi
+        echo -e "${GREEN}  [✓] Настройки IDE обновлены: $sfile${NC}"
+    done
+}
+
+remove_ide_settings() {
+    local settings_dirs=(
+        "$REAL_HOME/Library/Application Support/Antigravity/User"
+        "$REAL_HOME/Library/Application Support/Antigravity IDE/User"
+        "$REAL_HOME/Library/Application Support/Google Antigravity/User"
+    )
+    for sdir in "${settings_dirs[@]}"; do
+        local sfile="$sdir/settings.json"
+        if [[ -f "$sfile" ]]; then
+            python3 - "$sfile" <<'EOF'
+import sys, json
+
+path = sys.argv[1]
+try:
+    with open(path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    if "jetski.cloudCodeUrl" in data:
+        del data["jetski.cloudCodeUrl"]
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+except Exception:
+    pass
+EOF
+        fi
+    done
+}
+
 # --- DNS & Scoped Resolver Management (Subshell-free file generation) ---
 apply_dns_resolvers() {
     local label="$1"
     shift
     local servers=("$@")
+
+    apply_hosts_entries
+    apply_ide_settings
 
     echo -e "${YELLOW}Применение селективной DNS-маршрутизации...${NC}"
     mkdir -p "$RESOLVER_DIR"
@@ -525,9 +620,11 @@ remove_dns_resolvers() {
         fi
     fi
 
+    remove_ide_settings
+
     dscacheutil -flushcache
     killall -HUP mDNSResponder 2>/dev/null || true
-    echo -e "${GREEN}  [✓] Удалено ${#to_remove[@]} правил DNS, служба остановлена, hosts очищен.${NC}"
+    echo -e "${GREEN}  [✓] Удалено ${#to_remove[@]} правил DNS, служба остановлена, hosts очищен, настройки IDE сброшены.${NC}"
 }
 
 # --- Status Dashboard ---
@@ -681,6 +778,7 @@ main_menu() {
                         xattr -cr "$inst" 2>/dev/null || true
                     fi
                 done < <(find_installations)
+                apply_ide_settings
                 read -rp "Нажмите Enter для продолжения..."
                 ;;
             3)
