@@ -265,7 +265,7 @@ for m in x64_orig.finditer(data):
     applied.append("hasValidAuth(x64)")
 
 # Core 2.0 Auth Gate (ARM64 Apple Silicon M1-M4)
-arm_orig = re.compile(rb'\x03\x20\x40\x39\x04\x00\x00\x14\x62\x03\x00\xaa', re.DOTALL)
+arm_orig = re.compile(rb'\x03\x20\x40\x39[\x03\x23\x43\x63\x83\xa3\xc3\xe3]..\x36(?:....){1,2}\x03\x10\x06\xa9', re.DOTALL)
 arm_fix = b'\x23\x00\x80\x52\x03\x20\x00\x39'
 for m in arm_orig.finditer(data):
     data[m.start():m.start()+len(arm_fix)] = arm_fix
@@ -594,7 +594,11 @@ apply_dns_resolvers() {
     shift
     local servers=("$@")
 
-    rank_proxies_and_apply_hosts
+    # Очистка устаревших/ошибочных записей в /etc/hosts от предыдущих версий
+    if [[ -f "/etc/hosts" ]] && grep -q "BEGIN ANTIGRAVITY-BYPASS-RUSSIA" "/etc/hosts" 2>/dev/null; then
+        sed -i '' '/# BEGIN ANTIGRAVITY-BYPASS-RUSSIA/,/# END ANTIGRAVITY-BYPASS-RUSSIA/d' "/etc/hosts" 2>/dev/null || true
+    fi
+
     apply_ide_settings
 
     echo -e "${YELLOW}Применение селективной DNS-маршрутизации...${NC}"
