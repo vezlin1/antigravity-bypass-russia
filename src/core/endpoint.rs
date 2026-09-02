@@ -82,9 +82,10 @@ fn ide_settings_path(install: &Path) -> Option<PathBuf> {
         install.join("Contents").join("Resources").join("app").join("product.json"),
         install.join("product.json"),
     ];
+    let re = Regex::new(r#""nameShort"[ \t\r\n]*:[ \t\r\n]*"([^"]+)""#).ok();
     for product in product_candidates {
         if let Ok(text) = fs::read_to_string(&product) {
-            if let Ok(re) = Regex::new(r#""nameShort"[ \t\r\n]*:[ \t\r\n]*"([^"]+)""#) {
+            if let Some(ref re) = re {
                 if let Some(cap) = re.captures(&text) {
                     let name = cap.get(1)?.as_str();
                     return appdata_settings(name);

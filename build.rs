@@ -13,7 +13,7 @@ fn main() {
             res.set("ProductName", "ANTIGRAVITY-BYPASS-RUSSIA");
             res.set("OriginalFilename", "antigravity-bypass-russia.exe");
             res.set("LegalCopyright", "Copyright (c) 2026 Antigravity Contributors");
-            let ver = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "1.1.0".into());
+            let ver = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "2.0.0".into());
             res.set("FileVersion", &ver);
             res.set("ProductVersion", &ver);
             
