@@ -263,8 +263,6 @@ $NRPT_DOMAINS = @(
     "cloudcode-pa.googleapis.com",
     ".generativelanguage.googleapis.com",
     "generativelanguage.googleapis.com",
-    ".generativelanguage.googleapis.com",
-    "generativelanguage.googleapis.com",
     ".gemini.google.com",
     "gemini.google.com",
     ".gemini.google",

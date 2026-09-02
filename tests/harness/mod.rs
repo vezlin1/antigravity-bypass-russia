@@ -83,6 +83,9 @@ impl MockTlsServer {
                             resp.resize(4096, 0xaa);
                             let _ = stream.write_all(&resp);
                             let _ = stream.flush();
+                            let _ = stream.shutdown(std::net::Shutdown::Write);
+                            let mut drain = [0u8; 256];
+                            let _ = stream.read(&mut drain);
                         }
                     }
                 }
@@ -127,6 +130,9 @@ impl MockTlsServer {
                     }
                     let _ = stream.write_all(b"0\r\n\r\n");
                     let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                    let mut drain = [0u8; 256];
+                    let _ = stream.read(&mut drain);
                 }
                 thread::sleep(Duration::from_millis(5));
             }
