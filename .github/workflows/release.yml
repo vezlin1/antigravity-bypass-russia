@@ -77,7 +77,6 @@ jobs:
           ls -la dist/
           cp scripts/unlock_and_restore.ps1 dist/
           cp scripts/unlock_and_restore.sh dist/
-          cp configs/xray_routing_rules.json dist/
           chmod +x dist/antigravity-bypass-russia-* dist/*.sh 2>/dev/null || true
 
       - name: Create Release
