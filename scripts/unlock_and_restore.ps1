@@ -59,6 +59,7 @@ public static class AgFastEngine {
     private static readonly byte[] MgrX64Restore  = new byte[] { 0x80, 0x78, 0x08, 0x00, 0x74, 0x18 };
     private static readonly byte[] MgrX64PatHead  = new byte[] { 0xC6, 0x40, 0x08, 0x01, 0x90, 0x90, 0x48, 0x8B };
 
+    private static readonly byte[] MgrArm64Head   = new byte[] { 0x03, 0x20, 0x40, 0x39 };
     private static readonly byte[] MgrArm64Orig    = new byte[] { 0x03, 0x20, 0x40, 0x39, 0x04, 0x00, 0x00, 0x14, 0x62, 0x03, 0x00, 0xAA };
     private static readonly byte[] MgrArm64Fix     = new byte[] { 0x23, 0x00, 0x80, 0x52, 0x03, 0x20, 0x00, 0x39 };
     private static readonly byte[] MgrArm64Restore = new byte[] { 0x03, 0x20, 0x40, 0x39, 0x04, 0x00, 0x00, 0x14 };
@@ -133,6 +134,30 @@ public static class AgFastEngine {
         return matches;
     }
 
+    public static List<int> FindMgrArm64Orig(byte[] data) {
+        var matches = new List<int>();
+        int idx = 0;
+        while ((idx = IndexOfSequence(data, MgrArm64Head, idx)) != -1) {
+            if (idx + 12 <= data.Length &&
+                data[idx + 4] == 0x04 && data[idx + 5] == 0x00 && data[idx + 6] == 0x00 && data[idx + 7] == 0x14 &&
+                data[idx + 8] == 0x62 && data[idx + 9] == 0x03 && data[idx + 10] == 0x00 && data[idx + 11] == 0xAA) {
+                matches.Add(idx);
+            } else if (idx + 16 <= data.Length && (data[idx + 4] & 0x1F) == 0x03 && data[idx + 7] == 0x36) {
+                if (idx + 12 <= data.Length &&
+                    data[idx + 8] == 0x03 && data[idx + 9] == 0x10 &&
+                    data[idx + 10] == 0x06 && data[idx + 11] == 0xA9) {
+                    matches.Add(idx);
+                } else if (idx + 16 <= data.Length &&
+                    data[idx + 12] == 0x03 && data[idx + 13] == 0x10 &&
+                    data[idx + 14] == 0x06 && data[idx + 15] == 0xA9) {
+                    matches.Add(idx);
+                }
+            }
+            idx++;
+        }
+        return matches;
+    }
+
     public static List<int> FindCliX64Orig(byte[] data) {
         var matches = new List<int>();
         int idx = 0;
@@ -166,12 +191,14 @@ public static class AgFastEngine {
             byte[] data = File.ReadAllBytes(path);
             if (IndexOfSequence(data, MgrX64PatHead) != -1 ||
                 IndexOfSequence(data, MgrArm64Patched) != -1 ||
+                IndexOfSequence(data, MgrArm64Fix) != -1 ||
                 IndexOfSequence(data, CliX64Fix) != -1 ||
                 IndexOfSequence(data, CliX64LongFix) != -1 ||
                 IndexOfSequence(data, StringTo) != -1) {
                 return "patched";
             }
             if (FindMgrX64Orig(data).Count > 0 ||
+                FindMgrArm64Orig(data).Count > 0 ||
                 IndexOfSequence(data, MgrArm64Orig) != -1 ||
                 FindCliX64Orig(data).Count > 0 ||
                 FindCliX64LongOrig(data).Count > 0 ||
@@ -201,11 +228,12 @@ public static class AgFastEngine {
             }
             if (matchedX64) details.Add("hasValidAuth(x64)");
 
-            int armIdx = 0;
-            while ((armIdx = IndexOfSequence(data, MgrArm64Orig, armIdx)) != -1) {
-                Buffer.BlockCopy(MgrArm64Fix, 0, data, armIdx, MgrArm64Fix.Length);
-                matchedArm = true;
-                armIdx += MgrArm64Orig.Length;
+            var armHits = FindMgrArm64Orig(data);
+            foreach (int idx in armHits) {
+                if (idx + MgrArm64Fix.Length <= data.Length) {
+                    Buffer.BlockCopy(MgrArm64Fix, 0, data, idx, MgrArm64Fix.Length);
+                    matchedArm = true;
+                }
             }
             if (matchedArm) details.Add("hasValidAuth(ARM64)");
         }
@@ -643,10 +671,69 @@ function Restore-SystemDoh {
     }
 }
 
+function Apply-IdeSettings {
+    $settingsFolders = @(
+        "$env:APPDATA\Antigravity\User",
+        "$env:APPDATA\Antigravity IDE\User",
+        "$env:APPDATA\Google Antigravity\User"
+    )
+    foreach ($folder in $settingsFolders) {
+        try {
+            if (-not (Test-Path -LiteralPath $folder)) {
+                New-Item -ItemType Directory -Path $folder -Force | Out-Null
+            }
+            $file = Join-Path $folder "settings.json"
+            $jsonObj = @{}
+            if (Test-Path -LiteralPath $file) {
+                try {
+                    $raw = [System.IO.File]::ReadAllText($file, [System.Text.Encoding]::UTF8)
+                    if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                        $jsonObj = $raw | ConvertFrom-Json -AsHashtable
+                    }
+                } catch {
+                    $jsonObj = @{}
+                }
+            }
+            $jsonObj["jetski.cloudCodeUrl"] = "https://daily-cloudcode-pa.googleapis.com"
+            $newJson = $jsonObj | ConvertTo-Json -Depth 10
+            [System.IO.File]::WriteAllText($file, $newJson, [System.Text.Encoding]::UTF8)
+            Write-Host "  [✓] Настройки IDE обновлены: $file" -ForegroundColor Green
+        } catch {}
+    }
+    [Environment]::SetEnvironmentVariable('CLOUD_CODE_URL', 'https://daily-cloudcode-pa.googleapis.com', 'User')
+}
+
+function Remove-IdeSettings {
+    $settingsFolders = @(
+        "$env:APPDATA\Antigravity\User",
+        "$env:APPDATA\Antigravity IDE\User",
+        "$env:APPDATA\Google Antigravity\User"
+    )
+    foreach ($folder in $settingsFolders) {
+        $file = Join-Path $folder "settings.json"
+        if (Test-Path -LiteralPath $file) {
+            try {
+                $raw = [System.IO.File]::ReadAllText($file, [System.Text.Encoding]::UTF8)
+                if ($raw.Contains("jetski.cloudCodeUrl")) {
+                    $jsonObj = $raw | ConvertFrom-Json -AsHashtable
+                    if ($jsonObj.ContainsKey("jetski.cloudCodeUrl")) {
+                        $jsonObj.Remove("jetski.cloudCodeUrl")
+                        $newJson = $jsonObj | ConvertTo-Json -Depth 10
+                        [System.IO.File]::WriteAllText($file, $newJson, [System.Text.Encoding]::UTF8)
+                        Write-Host "  [✓] jetski.cloudCodeUrl удален: $file" -ForegroundColor Green
+                    }
+                }
+            } catch {}
+        }
+    }
+    [Environment]::SetEnvironmentVariable('CLOUD_CODE_URL', $null, 'User')
+}
+
 function Apply-DnsSettings($servers, $label) {
     Remove-DnsSettings
     Take-OverConflictingRules
     Disable-SystemDoh
+    Apply-IdeSettings
     
     $pool = [runspacefactory]::CreateRunspacePool(1, [System.Math]::Min(16, [Environment]::ProcessorCount * 2))
     $pool.Open()
@@ -677,6 +764,7 @@ function Remove-DnsSettings {
     Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Comment -eq $NRPT_TAG } | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue
     Remove-DirectDnsRoutes
     Restore-SystemDoh
+    Remove-IdeSettings
     [AgFastEngine]::DnsFlushResolverCache() | Out-Null
     netsh interface ipv6 set prefixpolicy ::ffff:0:0/96 35 4 | Out-Null
 
