@@ -18,6 +18,11 @@ pub struct FoundTarget {
     pub name: String,
 }
 
+pub(crate) fn is_agy_cli_name(name: &str) -> bool {
+    matches!(name, "agy" | "agy.exe" | "antigravity" | "antigravity.exe")
+        || (name.starts_with("agy-") && !name.ends_with(".bak") && !name.ends_with(".js"))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SystemComponentsStatus {
     pub core_status: Option<BinaryState>,
@@ -288,7 +293,7 @@ pub fn find_targets_in_path(root: &Path) -> Vec<FoundTarget> {
             TargetKind::IdeAsar
         } else if name.ends_with(".js") {
             TargetKind::IdeMainJs
-        } else if name.contains("agy") {
+        } else if is_agy_cli_name(&name) {
             TargetKind::AgyCli
         } else {
             TargetKind::LanguageServer
@@ -575,6 +580,18 @@ mod detection_tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].kind, TargetKind::AgyCli);
         assert_eq!(targets[0].name, "agy-x64.exe");
+    }
+
+    #[test]
+    fn extracted_official_cli_file_is_not_classified_as_language_server() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["antigravity", "antigravity.exe"] {
+            let path = root.path().join(name);
+            std::fs::write(&path, b"\x7fELF").unwrap();
+            let targets = find_targets_in_path(&path);
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].kind, TargetKind::AgyCli);
+        }
     }
 }
 
