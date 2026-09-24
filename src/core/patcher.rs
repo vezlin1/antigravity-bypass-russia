@@ -1,5 +1,5 @@
 use crate::core::{
-    detector::{FoundTarget, TargetKind},
+    detector::{is_agy_cli_name, FoundTarget, TargetKind},
     opcodes::*,
 };
 use crate::system::journal;
@@ -106,6 +106,15 @@ fn apply_pattern(
     Ok((offsets.len(), existing))
 }
 
+fn cli_x64_branches_share_target(bytes: &[u8]) -> bool {
+    if bytes.len() != 19 {
+        return false;
+    }
+    let je = i32::from_le_bytes(bytes[5..9].try_into().unwrap());
+    let jne = i32::from_le_bytes(bytes[15..19].try_into().unwrap());
+    i64::from(je) == i64::from(jne) + 10
+}
+
 fn plan_binary(data: &[u8], kind: TargetKind) -> Result<Plan, String> {
     plan_binary_with_cli_profile(data, kind, false)
 }
@@ -173,6 +182,16 @@ fn plan_binary_with_cli_profile(
         let section_bytes = output
             .get_mut(start..end)
             .ok_or("Секция за пределами файла")?;
+        if kind == TargetKind::AgyCli
+            && file.architecture() == Architecture::X86_64
+            && !legacy_cli
+            && original
+                .find_iter(section_bytes)
+                .chain(patched.find_iter(section_bytes))
+                .any(|m| !cli_x64_branches_share_target(m.as_bytes()))
+        {
+            return Err("Переходы agy x64 ведут в разные адреса; файл не изменён".into());
+        }
         let (c, p) = apply_pattern(section_bytes, original, patched, fix, fix_at, max_matches)?;
         changes += c;
         existing += p;
@@ -206,7 +225,7 @@ fn inferred_kind(path: &Path) -> TargetKind {
         TargetKind::IdeAsar
     } else if name.ends_with(".js") {
         TargetKind::IdeMainJs
-    } else if name == "agy" || name == "agy.exe" {
+    } else if is_agy_cli_name(&name) {
         TargetKind::AgyCli
     } else {
         TargetKind::LanguageServer
@@ -242,6 +261,17 @@ fn ensure_file_closed(path: &Path) -> Result<(), String> {
         }
     }
     let _ = path;
+    Ok(())
+}
+
+fn ensure_not_symlink(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "{} — символическая ссылка; укажите путь к исполняемому файлу, чтобы сохранить связь с обновлениями",
+            path.display()
+        ));
+    }
     Ok(())
 }
 
@@ -322,6 +352,7 @@ fn verified_legacy_cli_backup(path: &Path, current: &[u8]) -> Option<Vec<u8>> {
 
 pub fn patch_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     let _guard = operation_guard();
+    ensure_not_symlink(&target.path)?;
     let mut before = fs::read(&target.path).map_err(|e| e.to_string())?;
     if target.kind == TargetKind::AgyCli && is_legacy_x64_cli(&before) {
         ensure_file_closed(&target.path)?;
@@ -358,6 +389,7 @@ pub fn patch_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
 
 pub fn restore_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     let _guard = operation_guard();
+    ensure_not_symlink(&target.path)?;
     ensure_file_closed(&target.path)?;
     if journal::restore(&target.path)? {
         return Ok(PatchOutcome::Restored);
@@ -393,6 +425,28 @@ pub fn restore_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn symlink_target_is_not_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.js");
+        let link = dir.path().join("main.js");
+        let original = b"x.resetIsTierGCPTos(),x.isGoogleInternal;";
+        fs::write(&real, original).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let target = FoundTarget {
+            path: link.clone(),
+            kind: TargetKind::IdeMainJs,
+            name: "main.js".into(),
+        };
+        assert!(patch_target(&target).is_err());
+        assert!(restore_target(&target).is_err());
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&real).unwrap(), original);
+    }
     #[test]
     fn unrelated_valid_asar_is_skipped_but_damaged_archive_is_not_called_restored() {
         let dir = tempfile::tempdir().unwrap();
@@ -462,7 +516,7 @@ mod tests {
             assert_eq!(repeated.data, patched.data);
         }
         assert!(plan_binary(&macho_fixture(x64, 0x01000007), TargetKind::AgyCli).is_err());
-        let cli = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85";
+        let cli = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x00\x00\x00\x00";
         let patched = plan_binary(&macho_fixture(cli, 0x01000007), TargetKind::AgyCli).unwrap();
         assert_eq!((patched.changes, patched.existing), (1, 0));
         assert_eq!(&patched.data[512 + 9..512 + 13], b"\x90\x90\x90\x90");
@@ -473,15 +527,17 @@ mod tests {
 
     #[test]
     fn x64_cli_patches_every_copy_of_the_same_gate() {
-        let gate = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x11\x22";
-        let other = b"\x48\x85\xc0\x0f\x84\x22\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x33\x44";
+        let gate =
+            b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x00\x00\x00\x00\x11\x22";
+        let other =
+            b"\x48\x85\xc0\x0f\x84\x22\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x18\x00\x00\x00\x33\x44";
         let original = macho_fixture(&[gate.as_slice(), other.as_slice()].concat(), 0x01000007);
         let patched = plan_binary(&original, TargetKind::AgyCli).unwrap();
         assert_eq!(patched.profile, "agy-x64-long-v2");
         assert_eq!((patched.changes, patched.existing), (2, 0));
         assert_eq!(&patched.data[512 + 9..512 + 13], b"\x90\x90\x90\x90");
         assert_eq!(
-            &patched.data[512 + 17 + 9..512 + 17 + 13],
+            &patched.data[512 + 21 + 9..512 + 21 + 13],
             b"\x90\x90\x90\x90"
         );
         let again = plan_binary(&patched.data, TargetKind::AgyCli).unwrap();
@@ -492,12 +548,24 @@ mod tests {
             0x01000007,
         );
         assert!(plan_binary(&three, TargetKind::AgyCli).is_err());
+        let mut wrong_target = gate.to_vec();
+        wrong_target[15] = 1;
+        let error = plan_binary(
+            &macho_fixture(&wrong_target, 0x01000007),
+            TargetKind::AgyCli,
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("разные адреса"));
     }
 
     #[test]
     #[ignore = "set AGY_X64_FIXTURE to an extracted official agy binary"]
     fn official_x64_cli_fixture_has_two_gates() {
-        let path = std::env::var("AGY_X64_FIXTURE").unwrap();
+        let path = std::path::PathBuf::from(std::env::var("AGY_X64_FIXTURE").unwrap());
+        let targets = crate::core::detector::find_targets_in_path(&path);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].kind, TargetKind::AgyCli);
         let stock = fs::read(path).unwrap();
         let patched = plan_binary(&stock, TargetKind::AgyCli).unwrap();
         assert_eq!((patched.changes, patched.existing), (2, 0));
@@ -516,7 +584,7 @@ mod tests {
 
     #[test]
     fn legacy_x64_cli_requires_an_exact_backup_to_restore() {
-        let code = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85";
+        let code = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x00\x00\x00\x00";
         let stock = pe_fixture(code, 0x8664);
         let legacy = plan_binary_with_cli_profile(&stock, TargetKind::AgyCli, true)
             .unwrap()
@@ -539,7 +607,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn legacy_x64_cli_migrates_from_verified_backup_and_restores_stock() {
-        let code = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85";
+        let code = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x00\x00\x00\x00";
         let stock = pe_fixture(code, 0x8664);
         let legacy = plan_binary_with_cli_profile(&stock, TargetKind::AgyCli, true)
             .unwrap()
@@ -564,7 +632,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn legacy_x64_cli_migrates_through_journal() {
-        let code = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85";
+        let code = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x00\x00\x00\x00";
         let stock = pe_fixture(code, 0x8664);
         let legacy = plan_binary_with_cli_profile(&stock, TargetKind::AgyCli, true)
             .unwrap()
@@ -698,7 +766,7 @@ mod tests {
     }
     #[test]
     fn binary_wildcards_match_linefeed_but_ambiguous_gates_are_rejected() {
-        let bytes = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85";
+        let bytes = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x00\x00\x00\x00";
         assert!(regex_cli_x64_long_orig().is_match(bytes));
         let mut duplicate = [bytes.as_slice(), bytes.as_slice()].concat();
         assert!(apply_pattern(
@@ -721,7 +789,7 @@ mod tests {
         .unwrap();
         assert_eq!((changes, existing), (2, 0));
         assert_eq!(&duplicate[9..13], b"\x90\x90\x90\x90");
-        assert_eq!(&duplicate[15 + 9..15 + 13], b"\x90\x90\x90\x90");
+        assert_eq!(&duplicate[19 + 9..19 + 13], b"\x90\x90\x90\x90");
     }
     #[test]
     fn partial_js_is_completed_and_unrelated_text_is_unsupported() {
