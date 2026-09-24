@@ -15,9 +15,16 @@ pub const MGR_GATE_ARM64_FIX: &[u8] = b"\x23\x00\x80\x52\x03\x20\x00\x39";
 
 pub const CLI_GATE_X64_LONG_ORIG_REGEX: &str =
     r"(?s-u)\x48\x85\xc0\x0f\x84....\x80\x78\x08\x00\x0f\x85";
+/// Keep the null branch and remove only the flag comparison. For non-null
+/// pointers the preceding `test %rax, %rax` leaves ZF clear, so `jne` skips
+/// the ineligible path without writing to the object.
 pub const CLI_GATE_X64_LONG_PATCHED_REGEX: &str =
+    r"(?s-u)\x48\x85\xc0\x0f\x84....\x90\x90\x90\x90\x0f\x85";
+pub const CLI_GATE_X64_LONG_FIX: &[u8] = b"\x90\x90\x90\x90";
+pub const CLI_GATE_X64_LONG_FIX_AT: usize = 9;
+pub const CLI_GATE_X64_LONG_V1_PATCHED_REGEX: &str =
     r"(?s-u)\x48\x85\xc0\x90\x90\x90\x90\x90\x90\x80\x78\x08\x00\x0f\x85";
-pub const CLI_GATE_X64_LONG_FIX: &[u8] = b"\x48\x85\xc0\x90\x90\x90\x90\x90\x90";
+pub const CLI_GATE_X64_LONG_V1_FIX: &[u8] = b"\x48\x85\xc0\x90\x90\x90\x90\x90\x90";
 
 #[inline]
 pub fn regex_mgr_x64_orig() -> &'static BytesRegex {
@@ -48,6 +55,11 @@ pub fn regex_cli_x64_long_orig() -> &'static BytesRegex {
 pub fn regex_cli_x64_long_patched() -> &'static BytesRegex {
     static RE: OnceLock<BytesRegex> = OnceLock::new();
     RE.get_or_init(|| BytesRegex::new(CLI_GATE_X64_LONG_PATCHED_REGEX).expect("Valid regex"))
+}
+#[inline]
+pub fn regex_cli_x64_long_v1_patched() -> &'static BytesRegex {
+    static RE: OnceLock<BytesRegex> = OnceLock::new();
+    RE.get_or_init(|| BytesRegex::new(CLI_GATE_X64_LONG_V1_PATCHED_REGEX).expect("Valid regex"))
 }
 #[inline]
 pub fn regex_ide_js_patched() -> &'static StrRegex {

@@ -85,44 +85,77 @@ fn apply_pattern(
     original: &regex::bytes::Regex,
     patched: &regex::bytes::Regex,
     fix: &[u8],
+    fix_at: usize,
+    max_matches: usize,
 ) -> Result<(usize, usize), String> {
     let offsets: Vec<_> = original.find_iter(bytes).map(|m| m.start()).collect();
     let existing = patched.find_iter(bytes).count();
-    if offsets.len() + existing > 1 {
+    if offsets.len() + existing > max_matches {
         return Err("Неоднозначная машинная сигнатура; файл не изменён".into());
     }
     for offset in &offsets {
-        bytes[*offset..*offset + fix.len()].copy_from_slice(fix);
+        let at = offset
+            .checked_add(fix_at)
+            .ok_or("Смещение патча переполнено")?;
+        let end = at.checked_add(fix.len()).ok_or("Длина патча переполнена")?;
+        let slot = bytes
+            .get_mut(at..end)
+            .ok_or("Патч выходит за пределы секции")?;
+        slot.copy_from_slice(fix);
     }
     Ok((offsets.len(), existing))
 }
 
 fn plan_binary(data: &[u8], kind: TargetKind) -> Result<Plan, String> {
+    plan_binary_with_cli_profile(data, kind, false)
+}
+
+fn plan_binary_with_cli_profile(
+    data: &[u8],
+    kind: TargetKind,
+    legacy_cli: bool,
+) -> Result<Plan, String> {
     let file = object::File::parse(data)
         .map_err(|e| format!("Неподдерживаемый executable (PE/ELF/Mach-O): {e}"))?;
-    let (original, patched, fix, profile) = match (kind, file.architecture()) {
+    let (original, patched, fix, fix_at, max_matches, profile) = match (kind, file.architecture()) {
         (TargetKind::LanguageServer, Architecture::X86_64) => (
             regex_mgr_x64_orig(),
             regex_mgr_x64_patched(),
             MGR_GATE_X64_FIX,
+            0,
+            1,
             "core-x64-v1",
         ),
         (TargetKind::LanguageServer, Architecture::Aarch64) => (
             regex_mgr_arm64_orig(),
             regex_mgr_arm64_patched(),
             MGR_GATE_ARM64_FIX,
+            0,
+            1,
             "core-arm64-v1",
+        ),
+        (TargetKind::AgyCli, Architecture::X86_64) if legacy_cli => (
+            regex_cli_x64_long_orig(),
+            regex_cli_x64_long_v1_patched(),
+            CLI_GATE_X64_LONG_V1_FIX,
+            0,
+            1,
+            "agy-x64-long-v1",
         ),
         (TargetKind::AgyCli, Architecture::X86_64) => (
             regex_cli_x64_long_orig(),
             regex_cli_x64_long_patched(),
             CLI_GATE_X64_LONG_FIX,
-            "agy-x64-long-v1",
+            CLI_GATE_X64_LONG_FIX_AT,
+            2,
+            "agy-x64-long-v2",
         ),
         (TargetKind::AgyCli, Architecture::Aarch64) => (
             regex_mgr_arm64_orig(),
             regex_mgr_arm64_patched(),
             MGR_GATE_ARM64_FIX,
+            0,
+            1,
             "agy-arm64-v1",
         ),
         _ => return Err("Нет профиля патча для этой архитектуры/компонента".into()),
@@ -140,11 +173,12 @@ fn plan_binary(data: &[u8], kind: TargetKind) -> Result<Plan, String> {
         let section_bytes = output
             .get_mut(start..end)
             .ok_or("Секция за пределами файла")?;
-        let (c, p) = apply_pattern(section_bytes, original, patched, fix)?;
+        let (c, p) = apply_pattern(section_bytes, original, patched, fix, fix_at, max_matches)?;
         changes += c;
         existing += p;
     }
-    if changes + existing != 1 {
+    let total = changes + existing;
+    if total == 0 || total > max_matches {
         return Err(format!(
             "Версия не поддерживается профилем {profile}: совпадений {}. SHA-256 {}",
             changes + existing,
@@ -258,9 +292,54 @@ fn prepare_for_write(path: &Path, data: Vec<u8>, kind: TargetKind) -> Result<Vec
     Ok(data)
 }
 
+fn is_legacy_x64_cli(data: &[u8]) -> bool {
+    if !regex_cli_x64_long_v1_patched().is_match(data) {
+        return false;
+    }
+    plan_binary_with_cli_profile(data, TargetKind::AgyCli, true)
+        .is_ok_and(|p| p.changes == 0 && p.existing == 1)
+}
+
+fn legacy_cli_backup_matches(original: &[u8], current: &[u8]) -> bool {
+    plan_binary_with_cli_profile(original, TargetKind::AgyCli, true)
+        .is_ok_and(|p| p.changes == 1 && p.existing == 0 && p.data == current)
+}
+
+fn legacy_backup_paths(path: &Path) -> Vec<std::path::PathBuf> {
+    let mut paths = vec![path.with_extension("bak"), path.with_extension("original")];
+    let mut appended = path.as_os_str().to_os_string();
+    appended.push(".bak");
+    paths.push(appended.into());
+    paths
+}
+
+fn verified_legacy_cli_backup(path: &Path, current: &[u8]) -> Option<Vec<u8>> {
+    legacy_backup_paths(path).into_iter().find_map(|backup| {
+        let original = fs::read(backup).ok()?;
+        legacy_cli_backup_matches(&original, current).then_some(original)
+    })
+}
+
 pub fn patch_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     let _guard = operation_guard();
-    let before = fs::read(&target.path).map_err(|e| e.to_string())?;
+    let mut before = fs::read(&target.path).map_err(|e| e.to_string())?;
+    if target.kind == TargetKind::AgyCli && is_legacy_x64_cli(&before) {
+        ensure_file_closed(&target.path)?;
+        if journal::has_record(&target.path) {
+            if !journal::restore(&target.path)? {
+                return Err("Backup старого патча исчез; файл не изменён".into());
+            }
+        } else {
+            let original = verified_legacy_cli_backup(&target.path, &before).ok_or(
+                "Обнаружен старый патч agy-x64-long-v1, но точный исходный backup не найден; переустановите исходный agy",
+            )?;
+            if fs::read(&target.path).map_err(|e| e.to_string())? != before {
+                return Err("Файл изменён другим процессом; повторите проверку".into());
+            }
+            crate::system::fs_utils::robust_write_file(&target.path, &original)?;
+        }
+        before = fs::read(&target.path).map_err(|e| e.to_string())?;
+    }
     let p = plan(&before, target.kind)?;
     if p.changes == 0 {
         return if p.existing > 0 {
@@ -295,21 +374,16 @@ pub fn restore_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     if current_state == BinaryState::Stock {
         return Ok(PatchOutcome::AlreadyStock);
     }
-    // Legacy backups are accepted only if applying this exact engine reproduces the current bytes.
-    let mut candidates = vec![
-        target.path.with_extension("bak"),
-        target.path.with_extension("original"),
-    ];
-    let mut appended = target.path.as_os_str().to_os_string();
-    appended.push(".bak");
-    candidates.push(appended.into());
-    for backup in candidates {
+    // Legacy backups are accepted only when they reproduce the current bytes.
+    for backup in legacy_backup_paths(&target.path) {
         if let Ok(original) = fs::read(&backup) {
-            if let Ok(p) = plan(&original, target.kind) {
-                if p.changes > 0 && p.existing == 0 && p.data == before {
-                    crate::system::fs_utils::robust_write_file(&target.path, &original)?;
-                    return Ok(PatchOutcome::Restored);
-                }
+            let current_matches = plan(&original, target.kind)
+                .is_ok_and(|p| p.changes > 0 && p.existing == 0 && p.data == before);
+            let old_cli_matches =
+                target.kind == TargetKind::AgyCli && legacy_cli_backup_matches(&original, &before);
+            if current_matches || old_cli_matches {
+                crate::system::fs_utils::robust_write_file(&target.path, &original)?;
+                return Ok(PatchOutcome::Restored);
             }
         }
     }
@@ -389,12 +463,123 @@ mod tests {
         }
         assert!(plan_binary(&macho_fixture(x64, 0x01000007), TargetKind::AgyCli).is_err());
         let cli = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85";
+        let patched = plan_binary(&macho_fixture(cli, 0x01000007), TargetKind::AgyCli).unwrap();
+        assert_eq!((patched.changes, patched.existing), (1, 0));
+        assert_eq!(&patched.data[512 + 9..512 + 13], b"\x90\x90\x90\x90");
+        assert_eq!(&patched.data[512..512 + 9], &cli[..9]);
+        let repeated = plan_binary(&patched.data, TargetKind::AgyCli).unwrap();
+        assert_eq!((repeated.changes, repeated.existing), (0, 1));
+    }
+
+    #[test]
+    fn x64_cli_patches_every_copy_of_the_same_gate() {
+        let gate = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x11\x22";
+        let other = b"\x48\x85\xc0\x0f\x84\x22\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x33\x44";
+        let original = macho_fixture(&[gate.as_slice(), other.as_slice()].concat(), 0x01000007);
+        let patched = plan_binary(&original, TargetKind::AgyCli).unwrap();
+        assert_eq!(patched.profile, "agy-x64-long-v2");
+        assert_eq!((patched.changes, patched.existing), (2, 0));
+        assert_eq!(&patched.data[512 + 9..512 + 13], b"\x90\x90\x90\x90");
         assert_eq!(
-            plan_binary(&macho_fixture(cli, 0x01000007), TargetKind::AgyCli)
-                .unwrap()
-                .changes,
-            1
+            &patched.data[512 + 17 + 9..512 + 17 + 13],
+            b"\x90\x90\x90\x90"
         );
+        let again = plan_binary(&patched.data, TargetKind::AgyCli).unwrap();
+        assert_eq!((again.changes, again.existing), (0, 2));
+        assert_eq!(again.data, patched.data);
+        let three = macho_fixture(
+            &[gate.as_slice(), other.as_slice(), gate.as_slice()].concat(),
+            0x01000007,
+        );
+        assert!(plan_binary(&three, TargetKind::AgyCli).is_err());
+    }
+
+    #[test]
+    #[ignore = "set AGY_X64_FIXTURE to an extracted official agy binary"]
+    fn official_x64_cli_fixture_has_two_gates() {
+        let path = std::env::var("AGY_X64_FIXTURE").unwrap();
+        let stock = fs::read(path).unwrap();
+        let patched = plan_binary(&stock, TargetKind::AgyCli).unwrap();
+        assert_eq!((patched.changes, patched.existing), (2, 0));
+        assert_eq!(
+            stock
+                .iter()
+                .zip(&patched.data)
+                .filter(|(a, b)| a != b)
+                .count(),
+            8
+        );
+        let repeated = plan_binary(&patched.data, TargetKind::AgyCli).unwrap();
+        assert_eq!((repeated.changes, repeated.existing), (0, 2));
+        assert_eq!(repeated.data, patched.data);
+    }
+
+    #[test]
+    fn legacy_x64_cli_requires_an_exact_backup_to_restore() {
+        let code = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85";
+        let stock = pe_fixture(code, 0x8664);
+        let legacy = plan_binary_with_cli_profile(&stock, TargetKind::AgyCli, true)
+            .unwrap()
+            .data;
+        let dir = tempfile::tempdir().unwrap();
+        let target = FoundTarget {
+            path: dir.path().join("agy.exe"),
+            kind: TargetKind::AgyCli,
+            name: "agy".into(),
+        };
+        fs::write(&target.path, &legacy).unwrap();
+        fs::write(target.path.with_extension("bak"), b"wrong backup").unwrap();
+        assert!(restore_target(&target).is_err());
+        assert_eq!(fs::read(&target.path).unwrap(), legacy);
+        fs::write(target.path.with_extension("bak"), &stock).unwrap();
+        assert_eq!(restore_target(&target).unwrap(), PatchOutcome::Restored);
+        assert_eq!(fs::read(&target.path).unwrap(), stock);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn legacy_x64_cli_migrates_from_verified_backup_and_restores_stock() {
+        let code = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85";
+        let stock = pe_fixture(code, 0x8664);
+        let legacy = plan_binary_with_cli_profile(&stock, TargetKind::AgyCli, true)
+            .unwrap()
+            .data;
+        let dir = tempfile::tempdir().unwrap();
+        let target = FoundTarget {
+            path: dir.path().join("agy.exe"),
+            kind: TargetKind::AgyCli,
+            name: "agy".into(),
+        };
+        fs::write(&target.path, &legacy).unwrap();
+        let error = patch_target(&target).unwrap_err();
+        assert!(error.contains("agy-x64-long-v1"));
+        assert_eq!(fs::read(&target.path).unwrap(), legacy);
+        fs::write(target.path.with_extension("bak"), &stock).unwrap();
+        assert_eq!(patch_target(&target).unwrap(), PatchOutcome::Changed(1));
+        assert_eq!(patch_target(&target).unwrap(), PatchOutcome::AlreadyPatched);
+        assert_eq!(restore_target(&target).unwrap(), PatchOutcome::Restored);
+        assert_eq!(fs::read(&target.path).unwrap(), stock);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn legacy_x64_cli_migrates_through_journal() {
+        let code = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85";
+        let stock = pe_fixture(code, 0x8664);
+        let legacy = plan_binary_with_cli_profile(&stock, TargetKind::AgyCli, true)
+            .unwrap()
+            .data;
+        let dir = tempfile::tempdir().unwrap();
+        let target = FoundTarget {
+            path: dir.path().join("agy.exe"),
+            kind: TargetKind::AgyCli,
+            name: "agy".into(),
+        };
+        fs::write(&target.path, &stock).unwrap();
+        journal::apply(&target.path, Some(&stock), &legacy, "agy-x64-long-v1").unwrap();
+        assert_eq!(patch_target(&target).unwrap(), PatchOutcome::Changed(1));
+        assert_eq!(restore_target(&target).unwrap(), PatchOutcome::Restored);
+        assert_eq!(fs::read(&target.path).unwrap(), stock);
     }
 
     #[test]
@@ -520,9 +705,23 @@ mod tests {
             &mut duplicate,
             regex_cli_x64_long_orig(),
             regex_cli_x64_long_patched(),
-            CLI_GATE_X64_LONG_FIX
+            CLI_GATE_X64_LONG_FIX,
+            CLI_GATE_X64_LONG_FIX_AT,
+            1
         )
         .is_err());
+        let (changes, existing) = apply_pattern(
+            &mut duplicate,
+            regex_cli_x64_long_orig(),
+            regex_cli_x64_long_patched(),
+            CLI_GATE_X64_LONG_FIX,
+            CLI_GATE_X64_LONG_FIX_AT,
+            2,
+        )
+        .unwrap();
+        assert_eq!((changes, existing), (2, 0));
+        assert_eq!(&duplicate[9..13], b"\x90\x90\x90\x90");
+        assert_eq!(&duplicate[15 + 9..15 + 13], b"\x90\x90\x90\x90");
     }
     #[test]
     fn partial_js_is_completed_and_unrelated_text_is_unsupported() {
