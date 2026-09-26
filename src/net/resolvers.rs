@@ -19,10 +19,6 @@ pub struct Provider {
 
 pub const PROVIDERS: &[Provider] = &[
     Provider {
-        name: "xbox-dns.ru",
-        v4: &["111.88.96.50", "111.88.96.51"],
-    },
-    Provider {
         name: "comss.one",
         v4: &["83.220.169.155", "212.109.195.93", "195.133.25.16"],
     },
@@ -591,7 +587,7 @@ mod tests {
         config.doh[0].url = "https://another.test/dns-query".into();
         assert!(key != cache_key(&resolver_pool::from_config(&config).unwrap(), &query, 0));
         config = super::super::config::Config::default();
-        config.provider_order = vec!["dns-ai.ru".into()];
+        config.provider_order = vec!["geohide.ru".into(), "dns-ai.ru".into()];
         assert!(key != cache_key(&resolver_pool::from_config(&config).unwrap(), &query, 0));
         config.disabled_providers.push("dns-ai.ru".into());
         assert!(key != cache_key(&resolver_pool::from_config(&config).unwrap(), &query, 0));

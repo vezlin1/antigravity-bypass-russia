@@ -88,11 +88,18 @@ pub fn from_config(config: &config::Config) -> Result<Vec<Provider>, String> {
         transport: Transport::Doh(p.clone()),
     }));
     providers.retain(|p| !config.disabled_providers.contains(&p.name));
+    // dns-ai leads by default, including when an old config lists only UDP
+    // providers. An explicit position for dns-ai remains the user's choice.
+    let explicit_lead = config.provider_order.iter().any(|name| name == "dns-ai.ru");
     providers.sort_by_key(|p| {
+        if !explicit_lead && p.name == "dns-ai.ru" {
+            return 0;
+        }
         config
             .provider_order
             .iter()
             .position(|name| name == &p.name)
+            .map(|position| position + 1)
             .unwrap_or(usize::MAX)
     });
     Ok(providers)
@@ -134,7 +141,7 @@ mod tests {
         let pool = from_config(&c).unwrap();
         assert_eq!(
             pool.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            ["dns-ai.ru", "custom", "xbox-dns.ru", "geohide.ru"]
+            ["dns-ai.ru", "custom", "geohide.ru"]
         );
         assert!(
             pool[0].udp_addresses().is_empty(),
@@ -159,7 +166,7 @@ mod tests {
             .map(|p| p.name.clone())
             .collect();
         assert!(from_config(&c).is_err());
-        c.disabled_providers.pop();
+        c.disabled_providers.retain(|name| name != "dns-ai.ru");
         let pool = from_config(&c).unwrap();
         assert_eq!(pool.len(), 1);
         assert_eq!(pool[0].kind(), "doh");

@@ -1,8 +1,7 @@
 pub const NRPT_TAG: &str = "ANTIGRAVITY-BYPASS-RUSSIA";
 
-/// Studio/Gemini canaries. Cloud Code is a separate family: xbox-dns and
-/// comss currently pass it through to real Google, so their IPs must not
-/// sit in that host's NRPT fallback list.
+/// Studio/Gemini canaries. Their substitution results must be checked separately
+/// from Cloud Code: a provider can support one family and pass the other through.
 pub const SUBSTITUTION_CANARIES: &[&str] = &[
     "aistudio.google.com",
     "makersuite.google.com",

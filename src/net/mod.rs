@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(super::assemble_nameservers(false, &["1.2.3.4"]), "1.2.3.4");
         assert_eq!(
             super::assemble_nameservers(false, &[]).split(';').count(),
-            3
+            2
         );
     }
 
