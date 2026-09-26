@@ -41,6 +41,34 @@ fn assemble_nameservers(via_relay: bool, substituters: &[&str]) -> String {
     servers.join(";")
 }
 
+fn assemble_dns_rules(
+    agent_rules: &[(String, Vec<&str>)],
+    studio_servers: &[&str],
+    via_relay: bool,
+    use_split_dns: bool,
+) -> Vec<(String, String)> {
+    let namespace = |name: &str| {
+        if use_split_dns {
+            name.trim_start_matches('.').to_ascii_lowercase()
+        } else {
+            name.to_string()
+        }
+    };
+    // Agent probes are specific to each host. Keep their results when Studio
+    // also covers that domain; macOS maps exact and suffix names to one file.
+    let mut rules: Vec<_> = agent_rules
+        .iter()
+        .map(|(name, servers)| (namespace(name), assemble_nameservers(via_relay, servers)))
+        .collect();
+    for name in NRPT_STUDIO {
+        let name = namespace(name);
+        if !rules.iter().any(|(existing, _)| *existing == name) {
+            rules.push((name, assemble_nameservers(via_relay, studio_servers)));
+        }
+    }
+    rules
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -72,6 +100,112 @@ mod tests {
             super::assemble_nameservers(false, &[]).split(';').count(),
             3
         );
+    }
+
+    #[test]
+    fn macos_rules_keep_agent_dns_when_studio_results_differ() {
+        use super::*;
+        let cases: &[(&[&str], &[&str])] = &[
+            (&["45.155.204.190"], &["111.88.96.50", "45.155.204.190"]),
+            (
+                &["45.155.204.190", "111.88.96.50"],
+                &["111.88.96.50", "45.155.204.190"],
+            ),
+            (&[], &[]),
+            (&[], &["111.88.96.50"]),
+            (&["45.155.204.190"], &[]),
+        ];
+        let expected_domains: std::collections::BTreeSet<_> = nrpt_domains()
+            .into_iter()
+            .map(|name| name.trim_start_matches('.').to_string())
+            .collect();
+        for (agent_servers, studio_servers) in cases {
+            let agent_rules: Vec<_> = NRPT_AGENT
+                .iter()
+                .map(|name| (name.to_string(), agent_servers.to_vec()))
+                .collect();
+            let rules = assemble_dns_rules(&agent_rules, studio_servers, false, true);
+            assert_eq!(rules.len(), expected_domains.len());
+            assert_eq!(
+                rules
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected_domains
+            );
+            for host in NRPT_AGENT {
+                assert_eq!(
+                    rules.iter().find(|(name, _)| name == host).unwrap().1,
+                    assemble_nameservers(false, agent_servers)
+                );
+            }
+            assert_eq!(
+                rules
+                    .iter()
+                    .find(|(name, _)| name == "aistudio.google.com")
+                    .unwrap()
+                    .1,
+                assemble_nameservers(false, studio_servers)
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let resolver_dir = dir.path().join("resolver");
+            let prepared = split_dns::prepare(&resolver_dir, &rules).unwrap();
+            assert!(!resolver_dir.exists());
+            split_dns::apply(&resolver_dir, &prepared).unwrap();
+            let content =
+                std::fs::read_to_string(resolver_dir.join("generativelanguage.googleapis.com"))
+                    .unwrap();
+            let servers: Vec<_> = content
+                .lines()
+                .filter_map(|line| line.strip_prefix("nameserver "))
+                .collect();
+            assert_eq!(
+                servers.join(";"),
+                assemble_nameservers(false, agent_servers)
+            );
+            assert!(split_dns::remove(&resolver_dir, &nrpt_domains()).is_empty());
+            for domain in &expected_domains {
+                assert!(!resolver_dir.join(domain).exists());
+            }
+        }
+    }
+
+    #[test]
+    fn windows_rules_keep_exact_and_suffix_namespaces_with_their_dns() {
+        use super::*;
+        let agent_servers = vec!["45.155.204.190"];
+        let studio_servers = ["111.88.96.50", "45.155.204.190"];
+        let agent_rules: Vec<_> = NRPT_AGENT
+            .iter()
+            .map(|name| (name.to_string(), agent_servers.clone()))
+            .collect();
+        for via_relay in [false, true] {
+            let rules = assemble_dns_rules(&agent_rules, &studio_servers, via_relay, false);
+            let expected_names: std::collections::BTreeSet<_> =
+                nrpt_domains().into_iter().collect();
+            assert_eq!(rules.len(), expected_names.len());
+            assert_eq!(
+                rules
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected_names
+            );
+            for host in NRPT_AGENT {
+                assert_eq!(
+                    rules.iter().find(|(name, _)| name == host).unwrap().1,
+                    assemble_nameservers(via_relay, &agent_servers)
+                );
+            }
+            assert_eq!(
+                rules
+                    .iter()
+                    .find(|(name, _)| name == ".generativelanguage.googleapis.com")
+                    .unwrap()
+                    .1,
+                assemble_nameservers(via_relay, &studio_servers)
+            );
+        }
     }
 }
 
@@ -202,7 +336,8 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     }
 
     let mut sub_notes = Vec::new();
-    let mut pending: Vec<(String, Vec<&'static str>)> = Vec::new();
+    let mut agent_rules: Vec<(String, Vec<&'static str>)> = Vec::new();
+    let mut studio_subs: Vec<&'static str> = Vec::new();
     step("Проверяем доступные серверы");
     {
         for name in NRPT_AGENT {
@@ -210,13 +345,12 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
             let subs = resolvers::substituting_addrs(host, if_index);
             if subs.is_empty() {
                 sub_notes.push(format!("{host}: нет"));
-                pending.push(((*name).to_string(), resolvers::fallback_v4()));
+                agent_rules.push(((*name).to_string(), resolvers::fallback_v4()));
             } else {
                 sub_notes.push(format!("{host}: {}", subs.join(", ")));
-                pending.push(((*name).to_string(), subs));
+                agent_rules.push(((*name).to_string(), subs));
             }
         }
-        let mut studio_subs: Vec<&'static str> = Vec::new();
         for name in SUBSTITUTION_CANARIES {
             let host = name.trim_start_matches('.');
             for s in resolvers::substituting_addrs(host, if_index) {
@@ -228,16 +362,17 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         if studio_subs.is_empty() {
             sub_notes
                 .push("Studio/Gemini: подмена не подтверждена, оставлены все резервные DNS".into());
-            for name in NRPT_STUDIO {
-                pending.push(((*name).to_string(), resolvers::fallback_v4()));
-            }
         } else {
             sub_notes.push(format!("Studio/Gemini: {}", studio_subs.join(", ")));
-            for name in NRPT_STUDIO {
-                pending.push(((*name).to_string(), studio_subs.clone()));
-            }
         }
     }
+    // Reject invalid or conflicting resolver plans before ranking writes hosts
+    // or setup changes the service. Applying later rechecks file ownership.
+    #[cfg(target_os = "macos")]
+    let rules = split_dns::prepare(
+        std::path::Path::new("/etc/resolver"),
+        &assemble_dns_rules(&agent_rules, &studio_subs, false, true),
+    )?;
     step("Выбираем подходящее подключение");
     let ranked = crate::net::rank::rescan_agent(if_index)?;
     for note in crate::net::rank::format_notes(&ranked) {
@@ -270,17 +405,12 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         relay_note =
             "процесс запущен, но DNS-проверка не прошла; сохранены резервные адреса".into();
     }
-    let mut rules: Vec<(String, String)> = Vec::new();
     // Keep verified agent addresses installed by rescan_agent. A VPN enabled
     // later may intercept loopback DNS even while the relay remains healthy.
-    for (name, subs) in &pending {
-        if !rules.iter().any(|(n, _)| n == name) {
-            rules.push((name.clone(), assemble_nameservers(relay_ok, subs)));
-        }
-    }
 
     #[cfg(target_os = "windows")]
     {
+        let rules = assemble_dns_rules(&agent_rules, &studio_subs, relay_ok, false);
         step("Сохраняем настройки подключения");
         let count = crate::net::nrpt::apply_nrpt_rules_direct(&rules, NRPT_TAG, "Antigravity DNS");
         if count != rules.len() {

@@ -42,12 +42,21 @@ fn normalized_rules(rules: &[(String, String)]) -> Result<BTreeMap<String, Strin
     Ok(normalized)
 }
 
-pub fn apply(directory: &Path, rules: &[(String, String)]) -> Result<(), String> {
+/// Validate the full plan without changing resolver files or their backups.
+pub fn prepare(
+    directory: &Path,
+    rules: &[(String, String)],
+) -> Result<Vec<(String, String)>, String> {
     let rules = normalized_rules(rules)?;
     preflight(
         directory,
         &rules.keys().map(String::as_str).collect::<Vec<_>>(),
     )?;
+    Ok(rules.into_iter().collect())
+}
+
+pub fn apply(directory: &Path, rules: &[(String, String)]) -> Result<(), String> {
+    let rules = prepare(directory, rules)?;
     fs::create_dir_all(directory).map_err(|e| e.to_string())?;
     for (domain, servers) in rules {
         let path = directory.join(&domain);
@@ -95,6 +104,39 @@ pub fn remove(directory: &Path, domains: &[&str]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preparation_preserves_existing_settings_and_apply_rechecks_user_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = vec![("a.test".into(), "127.0.0.1".into())];
+        apply(dir.path(), &initial).unwrap();
+        let path = dir.path().join("a.test");
+        let before = fs::read(&path).unwrap();
+        let updated = vec![
+            ("a.test".into(), "192.0.2.1".into()),
+            ("z.test".into(), "192.0.2.2".into()),
+        ];
+        let plan = prepare(dir.path(), &updated).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!dir.path().join("z.test").exists());
+        assert!(!dir.path().join("z.test.ag-backups").exists());
+
+        let mut conflicting = updated.clone();
+        conflicting.push((".a.test".into(), "192.0.2.3".into()));
+        assert!(prepare(dir.path(), &conflicting).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+        let mut invalid = updated;
+        invalid.push(("invalid.test".into(), "bad-ip".into()));
+        assert!(prepare(dir.path(), &invalid).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        let custom = "nameserver 192.0.2.9\n";
+        fs::write(&path, custom).unwrap();
+        assert!(apply(dir.path(), &plan).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), custom);
+        assert!(!dir.path().join("z.test").exists());
+        assert!(!dir.path().join("z.test.ag-backups").exists());
+    }
+
     #[test]
     fn reconfiguration_validates_every_rule_and_preserves_user_edits() {
         let dir = tempfile::tempdir().unwrap();
