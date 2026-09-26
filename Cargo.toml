@@ -20,6 +20,7 @@ sha2 = "0.10"
 tempfile = "3"
 object = { version = "0.36", default-features = false, features = ["read", "std"] }
 jsonc-parser = { version = "0.26", features = ["cst", "serde"] }
+time = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -27,7 +28,6 @@ libc = "0.2"
 [dev-dependencies]
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
-time = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Foundation", "Win32_System_Registry", "Win32_System_RestartManager", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation"] }

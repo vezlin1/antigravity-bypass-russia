@@ -48,6 +48,15 @@ fn skip_name_opt(buf: &[u8], mut pos: usize) -> Option<usize> {
     None
 }
 
+/// Reuse a packet only within every record's TTL, aging it for downstream caches.
+/// OPT uses this field for EDNS flags and must not be changed.
+pub fn aged_reply(reply: &[u8], elapsed: u32) -> Option<Vec<u8>> {
+    if elapsed >= 300 {
+        return None;
+    }
+    rewrite_ttls(reply, elapsed, u32::MAX, true)
+}
+
 pub fn answer_addrs(buf: &[u8]) -> Vec<IpAddr> {
     let mut out = Vec::new();
     if buf.len() < 12 {
@@ -301,6 +310,15 @@ pub fn response_matches(query: &[u8], reply: &[u8]) -> bool {
 
 /// Cache hits never renew a DNS record's original lifetime. OPT is not a TTL.
 pub fn age_ttls(packet: &[u8], age_secs: u32, cap_secs: u32) -> Option<Vec<u8>> {
+    rewrite_ttls(packet, age_secs, cap_secs, false)
+}
+
+fn rewrite_ttls(
+    packet: &[u8],
+    age_secs: u32,
+    cap_secs: u32,
+    reject_expired: bool,
+) -> Option<Vec<u8>> {
     if packet.len() < 12 {
         return None;
     }
@@ -321,6 +339,9 @@ pub fn age_ttls(packet: &[u8], age_secs: u32, cap_secs: u32) -> Option<Vec<u8>> 
         let kind = u16::from_be_bytes([out[pos], out[pos + 1]]);
         if kind != 41 {
             let ttl = u32::from_be_bytes(out[pos + 4..pos + 8].try_into().ok()?);
+            if reject_expired && ttl <= age_secs {
+                return None;
+            }
             let ttl = ttl.saturating_sub(age_secs).min(cap_secs);
             out[pos + 4..pos + 8].copy_from_slice(&ttl.to_be_bytes());
         }
@@ -436,6 +457,24 @@ pub fn address_response(query: &[u8], addresses: &[Ipv4Addr]) -> Option<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cached_packets_age_ttls_expire_and_preserve_edns_flags() {
+        let query = build_query("example.test", 12);
+        let mut reply = address_response(&query, &[Ipv4Addr::LOCALHOST]).unwrap();
+        reply[11] = 1;
+        reply.extend_from_slice(&[0, 0, 41, 4, 208, 0, 0, 128, 0, 0, 0]);
+        let ttl = query.len() + 6;
+        let aged = aged_reply(&reply, 7).unwrap();
+        assert_eq!(
+            u32::from_be_bytes(aged[ttl..ttl + 4].try_into().unwrap()),
+            13
+        );
+        assert_eq!(&aged[aged.len() - 11..], &reply[reply.len() - 11..]);
+        assert!(aged_reply(&reply, 20).is_none());
+        assert!(aged_reply(&reply[..reply.len() - 1], 0).is_none());
+        reply[ttl..ttl + 4].fill(0);
+        assert!(aged_reply(&reply, 0).is_none());
+    }
     #[test]
     fn negative_responses_preserve_question_and_discard_edns_without_waiting_for_timeout() {
         let query = build_query("cloudcode-pa.googleapis.com", 0x1234);

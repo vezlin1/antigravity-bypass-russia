@@ -9,6 +9,7 @@ pub mod nrpt;
 pub mod provider;
 pub mod rank;
 pub mod relay;
+pub mod resolver_pool;
 pub mod resolvers;
 pub mod route_health;
 pub mod routes;
@@ -336,8 +337,8 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     }
 
     let mut sub_notes = Vec::new();
-    let mut agent_rules: Vec<(String, Vec<&'static str>)> = Vec::new();
-    let mut studio_subs: Vec<&'static str> = Vec::new();
+    let mut agent_rules: Vec<(String, Vec<String>)> = Vec::new();
+    let mut studio_subs: Vec<String> = Vec::new();
     step("Проверяем доступные серверы");
     {
         for name in NRPT_AGENT {
@@ -366,23 +367,31 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
             sub_notes.push(format!("Studio/Gemini: {}", studio_subs.join(", ")));
         }
     }
+    let agent_rules: Vec<_> = agent_rules
+        .iter()
+        .map(|(name, servers)| {
+            (
+                name.clone(),
+                servers.iter().map(String::as_str).collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let studio_subs: Vec<_> = studio_subs.iter().map(String::as_str).collect();
     // Reject invalid or conflicting resolver plans before ranking writes hosts
     // or setup changes the service. Applying later rechecks file ownership.
     #[cfg(target_os = "macos")]
-    let rules = split_dns::prepare(
+    let _prepared = split_dns::prepare(
         std::path::Path::new("/etc/resolver"),
-        &assemble_dns_rules(&agent_rules, &studio_subs, false, true),
+        &assemble_dns_rules(&agent_rules, &studio_subs, true, true),
     )?;
     step("Выбираем подходящее подключение");
-    let ranked = crate::net::rank::rescan_agent(if_index)?;
+    let ranked = crate::net::rank::discover_agent(if_index)?;
     for note in crate::net::rank::format_notes(&ranked) {
         sub_notes.push(note);
     }
-    crate::net::doh::disable_system_doh()?;
-
     let mut relay_ok = false;
     let mut relay_note = String::new();
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         step("Запускаем DNS-обход");
         match crate::system::service::enable() {
@@ -393,19 +402,33 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
                 }
             }
             Err(e) => {
-                relay_note = format!("релей не установлен ({e}), NRPT напрямую на SmartDNS");
+                relay_note = format!("релей не установлен ({e}), используются прямые UDP DNS");
             }
         }
     }
-    #[cfg(target_os = "macos")]
-    crate::system::service::disable()?;
     // Readiness is local; separately verify that the DNS data path answers.
     if relay_ok && !relay_answers() {
         relay_ok = false;
         relay_note =
             "процесс запущен, но DNS-проверка не прошла; сохранены резервные адреса".into();
     }
-    // Keep verified agent addresses installed by rescan_agent. A VPN enabled
+    if !relay_ok && resolvers::fallback_v4().is_empty() {
+        return Err("Включены только DoH-провайдеры, но локальный DNS не запустился".into());
+    }
+    if !relay_ok && resolver_pool::load()?.iter().any(|p| p.kind() == "doh") {
+        sub_notes.push(
+            "DoH доступен при подборе IP; для текущих DNS-запросов нужна работающая служба".into(),
+        );
+    }
+    #[cfg(target_os = "macos")]
+    let rules = split_dns::prepare(
+        std::path::Path::new("/etc/resolver"),
+        &assemble_dns_rules(&agent_rules, &studio_subs, relay_ok, true),
+    )?;
+    crate::net::rank::apply_ranked(&ranked)?;
+    crate::net::doh::disable_system_doh()?;
+
+    // Keep verified agent addresses installed by apply_ranked. A VPN enabled
     // later may intercept loopback DNS even while the relay remains healthy.
 
     #[cfg(target_os = "windows")]
@@ -450,7 +473,7 @@ fn relay_answers() -> bool {
         &query,
         LISTEN_IP.parse().unwrap(),
         0,
-        Duration::from_secs(3),
+        Duration::from_secs(5),
     )
     .is_ok_and(|reply| client::is_successful_response(&reply))
 }

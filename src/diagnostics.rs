@@ -127,10 +127,12 @@ fn config_summary(config: &net::config::Config) -> Value {
         })
         .collect();
     json!({"status": "ok", "doh": doh, "extra_udp": udp,
-        "mode": "classic-2.0",
-        "watch_region_errors": false,
+        "mode": "configured-udp-doh",
+        "active_providers": net::resolver_pool::from_config(config).ok().map(|pool| pool.iter().enumerate().map(|(i, p)| json!({"provider": i + 1, "transport": p.kind()})).collect::<Vec<_>>()),
+        "disabled_provider_count": config.disabled_providers.len(),
+        "watch_region_errors": config.watch_region_errors,
         "log_root_count": config.log_roots.len(),
-        "supported_log_count": 0})
+        "log_reading": "bounded recent language-server logs"})
 }
 
 fn rank_snapshot(path: &Path) -> Value {
@@ -398,6 +400,22 @@ pub fn collect() -> Value {
     let mut jobs: Vec<(String, Box<dyn FnOnce() -> Value + Send>)> = vec![
         ("installations".into(), Box::new(installations)),
         ("service".into(), Box::new(service_summary)),
+        (
+            "model_observation".into(),
+            Box::new(|| serde_json::to_value(crate::model_status::snapshot()).unwrap()),
+        ),
+        (
+            "dns_capabilities".into(),
+            Box::new(|| {
+                let interface = net::egress::detect().map(|e| e.if_index).unwrap_or(0);
+                match net::resolvers::capabilities(interface) {
+                    Ok(rows) => {
+                        json!({"status": "ok", "providers": rows, "scope": "DNS substitution per domain; not model access"})
+                    }
+                    Err(_) => unavailable("unreadable_or_invalid_configuration"),
+                }
+            }),
+        ),
         (
             "system_network".into(),
             Box::new(move || platform::network(&route_ips)),

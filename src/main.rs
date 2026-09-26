@@ -1,5 +1,6 @@
 mod core;
 mod diagnostics;
+mod model_status;
 mod net;
 mod system;
 mod ui;

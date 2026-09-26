@@ -1,6 +1,6 @@
 //! Rank substituted proxy IPs by TLS speed and keep a short fallback list.
 //!
-//! Version 2.0 selection, run only when the user enables the bypass.
+//! Certificate and HTTP checks run when the user enables the bypass.
 //! No scheduled rescans or model-response measurements.
 
 use std::fs;
@@ -8,11 +8,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::net::client::{answer_addrs, build_query};
 use crate::net::hosts::write_entries as write_hosts_entries;
 use crate::net::provider::NRPT_AGENT;
 use crate::net::relay;
-use crate::net::resolvers::{self, Verdict};
+use crate::net::resolvers;
 use crate::net::routes;
 
 const MAX_FALLBACKS: usize = 3;
@@ -27,22 +26,15 @@ pub fn rank_path() -> PathBuf {
     relay::log_dir().join("proxy_rank.conf")
 }
 
-pub fn rescan_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
+pub fn discover_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
     let previous = load();
+    let geohide_enabled = super::resolver_pool::load()?
+        .iter()
+        .any(|p| p.name == "geohide.ru");
     let mut ranked = Vec::new();
     for name in NRPT_AGENT {
         let host = name.trim_start_matches('.').to_string();
-        let mut candidates: Vec<IpAddr> = Vec::new();
-        let q = build_query(&host, 0x524B);
-        if let Some(hit) = resolvers::resolve_best(&q, if_index) {
-            if hit.verdict == Verdict::Substituted {
-                for a in answer_addrs(&hit.reply) {
-                    if !candidates.contains(&a) {
-                        candidates.push(a);
-                    }
-                }
-            }
-        }
+        let mut candidates = resolvers::candidate_addrs(&host, if_index)?;
         if let Some(old) = previous.iter().find(|h| h.host == host) {
             for (ip, _) in &old.ips {
                 let a = IpAddr::V4(*ip);
@@ -51,7 +43,10 @@ pub fn rescan_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
                 }
             }
         }
-        for seed in crate::net::provider::GEOHIDE_PROXY_V4 {
+        for seed in crate::net::provider::GEOHIDE_PROXY_V4
+            .iter()
+            .filter(|_| geohide_enabled)
+        {
             if let Ok(v4) = seed.parse::<Ipv4Addr>() {
                 let a = IpAddr::V4(v4);
                 if !candidates.contains(&a) {
@@ -59,11 +54,23 @@ pub fn rescan_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
                 }
             }
         }
+        // Test the same physical path that will be used after pinning. Custom
+        // DoH answers can introduce proxy IPs absent from the built-in routes.
+        let candidates: Vec<_> = candidates
+            .into_iter()
+            .filter(IpAddr::is_ipv4)
+            .take(32)
+            .collect();
+        let addresses: Vec<_> = candidates
+            .iter()
+            .filter_map(|ip| match ip {
+                IpAddr::V4(ip) => Some(*ip),
+                _ => None,
+            })
+            .collect();
+        routes::sync_physical_hosts(&addresses)?;
         let mut ips = resolvers::rank_tls_v4(&candidates, &host);
         if ips.is_empty() {
-            if let Some(old) = previous.iter().find(|h| h.host == host) {
-                ranked.push(old.clone());
-            }
             continue;
         }
         if ips.len() > MAX_FALLBACKS {
@@ -71,15 +78,16 @@ pub fn rescan_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
         }
         ranked.push(RankedHost { host, ips });
     }
-    if ranked.iter().any(|h| !h.ips.is_empty()) {
-        routes::sync_physical_hosts(&ranked_ips(&ranked))?;
-        save(&ranked)?;
-        apply_hosts(&ranked)?;
-    }
     if ranked.iter().all(|h| h.ips.is_empty()) {
-        return Err("Нет доступных маршрутов; прежние настройки сохранены".into());
+        return Err("Нет проверенных маршрутов; прежние hosts и рейтинг сохранены".into());
     }
     Ok(ranked)
+}
+
+pub fn apply_ranked(ranked: &[RankedHost]) -> Result<(), String> {
+    routes::sync_physical_hosts(&ranked_ips(ranked))?;
+    save(ranked)?;
+    apply_hosts(ranked)
 }
 
 pub fn format_notes(ranked: &[RankedHost]) -> Vec<String> {

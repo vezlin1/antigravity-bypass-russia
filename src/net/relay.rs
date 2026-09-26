@@ -15,9 +15,6 @@ pub const LISTEN_IP: &str = "127.0.0.53";
 pub const LISTEN_PORT: u16 = 53;
 pub const HEALTH_PORT: u16 = 15353;
 pub const HEALTH_NAME: &str = "antigravity-relay-health.invalid";
-#[cfg(target_os = "macos")]
-const WORKER_THREADS: usize = 1;
-#[cfg(not(target_os = "macos"))]
 const WORKER_THREADS: usize = 4;
 
 static UPSTREAM_CACHE: std::sync::RwLock<Option<Vec<Ipv4Addr>>> = std::sync::RwLock::new(None);
@@ -257,7 +254,7 @@ fn relay(query: &[u8]) -> Option<Vec<u8>> {
             ));
             Some(hit.reply)
         }
-        None => None,
+        None => Some(crate::net::client::servfail_response(query)),
     }
 }
 

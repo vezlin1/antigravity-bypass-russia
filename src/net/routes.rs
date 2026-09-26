@@ -64,19 +64,7 @@ pub fn sync_physical_hosts(extra: &[Ipv4Addr]) -> Result<(), String> {
         ips.extend(extra);
         // Bootstrap HTTPS DNS through the same physical route, without asking
         // the VPN's system resolver how to reach the DoH provider.
-        ips.extend(
-            super::config::load()?
-                .doh
-                .into_iter()
-                .flat_map(|p| p.bootstrap)
-                .filter_map(|ip| {
-                    if let std::net::IpAddr::V4(ip) = ip {
-                        Some(ip)
-                    } else {
-                        None
-                    }
-                }),
-        );
+        ips.extend(super::resolver_pool::bootstrap_v4()?);
         ips.sort();
         ips.dedup();
         for ip in ips {

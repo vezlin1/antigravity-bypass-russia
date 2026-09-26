@@ -439,6 +439,17 @@ pub fn handle_diagnostics() -> bool {
     }
     println!("\n  Проверена сеть. Доступ к моделям и аккаунту этой проверкой не подтверждается.");
     println!("  Откройте Antigravity и отправьте короткий запрос нужной модели.");
+    let observation = crate::model_status::snapshot();
+    println!("\n  Модель: {}.", observation.label());
+    println!("  Учитываются события за 15 минут. Начало ответа не подтверждает его завершение.");
+    if observation.last_failure.is_some()
+        && observation.state == crate::model_status::State::StreamStarted
+    {
+        println!("  Ранее в этом интервале была ошибка; начало нового ответа её не опровергает.");
+    }
+    if observation.partial {
+        println!("  Прочитана только часть журналов; сведения могут быть неполными.");
+    }
     for report in &reports {
         crate::net::relay::log_event(&format!("Диагностика: {report:?}"));
     }

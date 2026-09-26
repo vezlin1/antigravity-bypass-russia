@@ -54,6 +54,16 @@ pub fn print_dashboard() {
         component_status(status.cli_status)
     };
     status_row("Antigravity CLI:", cli);
+    let model = crate::model_status::snapshot();
+    let colour = if model.warning() {
+        "\x1b[93m"
+    } else {
+        "\x1b[90m"
+    };
+    status_row(
+        "Модель (журнал):",
+        &format!("{colour}{}\x1b[0m", model.label()),
+    );
     println!("\x1b[90m│{}│\x1b[0m", " ".repeat(67));
     println!("\x1b[90m╰{}╯\x1b[0m\n", "─".repeat(67));
 }

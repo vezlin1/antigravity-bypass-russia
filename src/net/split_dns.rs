@@ -70,7 +70,17 @@ pub fn apply(directory: &Path, rules: &[(String, String)]) -> Result<(), String>
             let ip: std::net::IpAddr = server.parse().map_err(|_| "Некорректный DNS-сервер")?;
             content.push_str(&format!("nameserver {ip}\n"));
         }
-        content.push_str("port 53\nsearch_order 1\ntimeout 2\n");
+        // The local worker may need the complete HTTPS DNS deadline before a
+        // provider answers. Keep the shorter timeout for direct UDP resolvers.
+        let timeout = if servers.split(';').any(|s| {
+            s.parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        }) {
+            5
+        } else {
+            2
+        };
+        content.push_str(&format!("port 53\nsearch_order 1\ntimeout {timeout}\n"));
         crate::system::journal::apply(&path, before.as_deref(), content.as_bytes(), "split-dns")?;
         #[cfg(unix)]
         if before.is_none() {

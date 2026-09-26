@@ -23,6 +23,8 @@ pub struct UdpProvider {
 pub struct Config {
     pub doh: Vec<DohProvider>,
     pub extra_udp: Vec<UdpProvider>,
+    pub disabled_providers: Vec<String>,
+    pub provider_order: Vec<String>,
     pub watch_region_errors: bool,
     pub log_roots: Vec<PathBuf>,
 }
@@ -40,6 +42,8 @@ impl Default for Config {
                 ],
             }],
             extra_udp: vec![],
+            disabled_providers: vec![],
+            provider_order: vec![],
             watch_region_errors: true,
             log_roots: user_log_roots(),
         }
@@ -183,14 +187,15 @@ pub fn validate(config: &Config) -> Result<(), String> {
     if config.doh.len() > 8 || config.extra_udp.len() > 8 || config.log_roots.len() > 16 {
         return Err("Слишком много провайдеров/каталогов в network.json".into());
     }
-    let mut names = std::collections::HashSet::new();
+    let mut names: std::collections::HashSet<&str> =
+        super::resolvers::PROVIDERS.iter().map(|p| p.name).collect();
     for provider in &config.extra_udp {
         if provider.addresses.is_empty()
             || provider.addresses.len() > 8
             || provider.name.is_empty()
             || provider.name.len() > 64
             || provider.name.chars().any(char::is_control)
-            || !names.insert(&provider.name)
+            || !names.insert(provider.name.as_str())
         {
             return Err("Некорректный UDP-провайдер в network.json".into());
         }
@@ -206,13 +211,27 @@ pub fn validate(config: &Config) -> Result<(), String> {
             || provider.name.is_empty()
             || provider.name.len() > 64
             || provider.name.chars().any(char::is_control)
-            || !names.insert(&provider.name)
+            || !names.insert(provider.name.as_str())
         {
             return Err("DoH: нужны уникальное имя и HTTPS URL без пароля/фрагмента".into());
         }
     }
     if config.log_roots.iter().any(|p| !p.is_absolute()) {
         return Err("Каталоги журналов должны быть абсолютными".into());
+    }
+    for list in [&config.disabled_providers, &config.provider_order] {
+        let mut seen = std::collections::HashSet::new();
+        if list
+            .iter()
+            .any(|name| !names.contains(name.as_str()) || !seen.insert(name))
+        {
+            return Err(
+                "Порядок/отключение DNS: неизвестное или повторяющееся имя провайдера".into(),
+            );
+        }
+    }
+    if config.disabled_providers.len() == names.len() {
+        return Err("Нужен хотя бы один включённый DNS-провайдер".into());
     }
     Ok(())
 }
