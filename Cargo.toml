@@ -43,3 +43,7 @@ panic = "abort"
 strip = true
 overflow-checks = false
 rpath = false
+
+# Official CLI fixtures are ~100 MB; unoptimized scans take minutes per test.
+[profile.test]
+opt-level = 2
