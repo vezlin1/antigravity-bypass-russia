@@ -13,6 +13,16 @@ pub const MGR_GATE_ARM64_PATCHED_REGEX: &str =
     r"(?s-u)\x23\x00\x80\x52\x03\x20\x00\x39(?:....){1,2}\x03\x10\x06\xa9";
 pub const MGR_GATE_ARM64_FIX: &[u8] = b"\x23\x00\x80\x52\x03\x20\x00\x39";
 
+/// CLI sign-in: CBNZ X1 (error), CBZ X0 (nil result), LDRB W2,[X0,#8],
+/// TBNZ W2,#0 (eligible), BL (ineligibility details). The two success
+/// branches must share a forward target; the patcher validates all targets.
+pub const CLI_GATE_ARM64_ORIG_REGEX: &str = r"(?s-u)[\x01\x21\x41\x61\x81\xa1\xc1\xe1]..\xb5[\x00\x20\x40\x60\x80\xa0\xc0\xe0]..\xb4\x02\x20\x40\x39[\x02\x22\x42\x62\x82\xa2\xc2\xe2].[\x00-\x07]\x37...[\x94-\x97]";
+pub const CLI_GATE_ARM64_PATCHED_REGEX: &str = r"(?s-u)[\x01\x21\x41\x61\x81\xa1\xc1\xe1]..\xb5[\x00\x20\x40\x60\x80\xa0\xc0\xe0]..\xb4\x22\x00\x80\x52[\x02\x22\x42\x62\x82\xa2\xc2\xe2].[\x00-\x07]\x37...[\x94-\x97]";
+/// MOV W2,#1 replaces only the flag load. Preserve nil/error handling and
+/// the existing branch, and never write into the authentication result.
+pub const CLI_GATE_ARM64_FIX: &[u8] = b"\x22\x00\x80\x52";
+pub const CLI_GATE_ARM64_FIX_AT: usize = 8;
+
 pub const CLI_GATE_X64_LONG_ORIG_REGEX: &str =
     r"(?s-u)\x48\x85\xc0\x0f\x84....\x80\x78\x08\x00\x0f\x85....";
 /// Keep the null branch and remove only the flag comparison. For non-null
@@ -45,6 +55,16 @@ pub fn regex_mgr_arm64_orig() -> &'static BytesRegex {
 pub fn regex_mgr_arm64_patched() -> &'static BytesRegex {
     static RE: OnceLock<BytesRegex> = OnceLock::new();
     RE.get_or_init(|| BytesRegex::new(MGR_GATE_ARM64_PATCHED_REGEX).expect("Valid regex"))
+}
+#[inline]
+pub fn regex_cli_arm64_orig() -> &'static BytesRegex {
+    static RE: OnceLock<BytesRegex> = OnceLock::new();
+    RE.get_or_init(|| BytesRegex::new(CLI_GATE_ARM64_ORIG_REGEX).expect("Valid regex"))
+}
+#[inline]
+pub fn regex_cli_arm64_patched() -> &'static BytesRegex {
+    static RE: OnceLock<BytesRegex> = OnceLock::new();
+    RE.get_or_init(|| BytesRegex::new(CLI_GATE_ARM64_PATCHED_REGEX).expect("Valid regex"))
 }
 #[inline]
 pub fn regex_cli_x64_long_orig() -> &'static BytesRegex {

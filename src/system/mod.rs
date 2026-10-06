@@ -2,6 +2,7 @@ pub mod command;
 pub mod env;
 pub mod file_lock;
 pub mod fs_utils;
+mod guarded_io;
 pub mod journal;
 pub mod lock;
 #[cfg(windows)]

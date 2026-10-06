@@ -35,5 +35,7 @@ fi
 for engine in "$repo_root/target/release/antigravity-bypass-russia" "$script_dir/$release_name" "$repo_root/$release_name"; do
   if [[ -x "$engine" ]]; then exec "$engine" "$@"; fi
 done
-printf '%s\n' 'Rust engine not found. Use the macOS release launcher with its bundled engines, or install Rust and run this repository script without sudo. The engine requests administrator privileges when needed.' >&2
+printf '%s\n' 'Rust engine not found. Download and run the standalone macOS launcher:' >&2
+printf '%s\n' '  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh' >&2
+printf '%s\n' 'Or install Rust (https://rustup.rs) and run this repository script without sudo. The engine requests administrator privileges when needed.' >&2
 exit 1

@@ -751,7 +751,8 @@ fn test_f10_01_cli_help_flag() {
     assert!(output.status.success(), "--help must exit with 0");
     assert!(stdout.contains("ANTIGRAVITY-BYPASS-RUSSIA"));
     assert!(stdout.contains("unlock"));
-    assert!(stdout.contains("proxy"));
+    assert!(stdout.contains("dns"));
+    assert!(stdout.contains("rollback"));
 }
 
 #[test]

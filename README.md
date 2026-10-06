@@ -83,14 +83,29 @@
 
 ### 🍏 macOS (Apple Silicon & Intel)
 
-1. Откройте **Терминал** и выполните команду:
+#### Вариант 1: Быстрый запуск в Терминале (Рекомендуется)
+1. Откройте **Терминал** и выполните команду для скачивания и запуска готовой утилиты:
    ```bash
-   git clone https://github.com/vezlin1/antigravity-bypass-russia.git
-   cd antigravity-bypass-russia
-   chmod +x scripts/unlock_and_restore.sh
-   sudo ./scripts/unlock_and_restore.sh
+   curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh
    ```
-2. В интерактивном меню выберите пункт **`1. Полная разблокировка`**. Скрипт настроит системный резолвер и снимет региональные ограничения.
+2. В интерактивном меню введите **`1`** (**`Полная разблокировка`**) и нажмите **Enter**. Скрипт настроит системный резолвер и снимет региональные ограничения (при необходимости запросит пароль администратора).
+
+> [!TIP]
+> Вы также можете вручную скачать [**`unlock_and_restore.sh`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest) из раздела релизов и запустить его через Терминал (`chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh`).
+
+#### Вариант 2: Запуск из исходников (Для разработчиков)
+<details>
+<summary><b>Инструкция для сборки из репозитория (требуется Rust)</b></summary>
+
+Если у вас установлен **Rust** (`cargo`), вы можете запустить утилиту прямо из клонированного репозитория:
+```bash
+git clone https://github.com/vezlin1/antigravity-bypass-russia.git
+cd antigravity-bypass-russia
+chmod +x scripts/unlock_and_restore.sh
+./scripts/unlock_and_restore.sh
+```
+*(Запускайте без `sudo` — скрипт сам соберёт движок через Cargo и запросит права администратора только при необходимости).*
+</details>
 
 ---
 

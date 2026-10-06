@@ -37,10 +37,14 @@ jobs:
           python-version: '3.12'
       - name: Isolated regression tests
         run: cargo test --locked --bin antigravity-bypass-russia --target ${{ matrix.target }}
+      - name: Official CLI profiles and rollback
+        run: python tests/verify_cli_profiles.py --target ${{ matrix.target }}
       - name: Launcher compatibility
         run: python tests/verify_wrappers.py
       - name: macOS bundle format
         run: python tests/verify_macos_bundle.py
+      - name: macOS source launcher
+        run: python tests/verify_macos_source_bundle.py
       - name: Build executable for read-only smoke checks
         run: cargo build --locked --bin antigravity-bypass-russia --target ${{ matrix.target }}
       - name: Read-only CLI and diagnostic export

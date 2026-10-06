@@ -1,4 +1,7 @@
-use crate::core::detector::{find_installations, find_targets_in_path, FoundTarget};
+use crate::core::detector::{
+    find_installations, find_targets_in_path, recover_installations, recover_targets_in_path,
+    FoundTarget,
+};
 use crate::core::patcher::{patch_target, restore_target};
 use crate::core::v8_cache::clear_ide_v8_caches;
 use crate::net::{apply_dns_rules, remove_dns_rules};
@@ -119,11 +122,63 @@ fn print_patch_result(
                 &format!("{label}: не удалось завершить операцию"),
                 &format!("{} ({}): {error}", t.name, t.path.display()),
             );
+            if cfg!(target_os = "macos") && app_management_blocked(&t.path, &error) {
+                for line in APP_MANAGEMENT_HINT {
+                    eprintln!("  \x1b[93m{line}\x1b[0m");
+                }
+            }
             false
         }
     }
 }
+
+const APP_MANAGEMENT_HINT: &[&str] = &[
+    "macOS запретила изменять файлы внутри приложения (защита «Управление приложениями»).",
+    "1. Закройте Antigravity.",
+    "2. Системные настройки → Конфиденциальность и безопасность → Управление приложениями:",
+    "   включите Терминал (или iTerm, из которого запускаете утилиту).",
+    "3. Полностью закройте терминал (⌘Q), откройте его снова и повторите операцию.",
+];
+
+/// App Management denies writes inside signed bundles with EPERM, even to root;
+/// a missing Unix permission is EACCES (os error 13) and needs no such hint.
+fn app_management_blocked(path: &Path, error: &str) -> bool {
+    error.contains("(os error 1)")
+        && path
+            .ancestors()
+            .any(|dir| dir.extension().is_some_and(|ext| ext == "app"))
+}
+
+#[cfg(test)]
+mod app_management_tests {
+    use super::app_management_blocked;
+    use std::path::Path;
+
+    #[test]
+    fn only_eperm_inside_an_app_bundle_explains_app_management() {
+        let bundled =
+            Path::new("/Applications/Antigravity.app/Contents/Resources/bin/language_server");
+        let eperm = "Operation not permitted (os error 1) at path \"/Applications/Antigravity.app/Contents/Resources/bin/.tmpvbl0fy\"";
+        assert!(app_management_blocked(bundled, eperm));
+        assert!(!app_management_blocked(
+            bundled,
+            "Permission denied (os error 13)"
+        ));
+        assert!(!app_management_blocked(
+            bundled,
+            "Version not supported (os error 10)"
+        ));
+        assert!(!app_management_blocked(
+            Path::new("/usr/local/bin/agy"),
+            eperm
+        ));
+    }
+}
 fn patch_root(root: &Path) -> bool {
+    if let Err(error) = recover_targets_in_path(root) {
+        operation_error("Не удалось восстановить прерванную запись", &error);
+        return false;
+    }
     let targets = find_targets_in_path(root);
     if targets.is_empty() {
         eprintln!("[✗] Нет поддерживаемых целей: {}", mask_path(root));
@@ -161,6 +216,10 @@ fn apply_files_side() -> bool {
     ok
 }
 fn patch_installations() -> FileSetupOutcome {
+    if let Err(error) = recover_installations() {
+        operation_error("Не удалось восстановить прерванную запись", &error);
+        return FileSetupOutcome::Stopped;
+    }
     let installs = find_installations();
     if installs.is_empty() {
         eprintln!("[✗] Установки не найдены; укажите путь в пункте 4.");
@@ -343,8 +402,17 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
 
 pub fn handle_rollback() -> bool {
     let installs = if let Some(path) = std::env::args().nth(2) {
-        vec![expand_env_vars(&path)]
+        let root = expand_env_vars(&path);
+        if let Err(error) = recover_targets_in_path(&root) {
+            operation_error("Не удалось восстановить прерванную запись", &error);
+            return false;
+        }
+        vec![root]
     } else {
+        if let Err(error) = recover_installations() {
+            operation_error("Не удалось восстановить прерванную запись", &error);
+            return false;
+        }
         find_installations()
     };
     let paths: Vec<_> = installs

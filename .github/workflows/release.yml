@@ -49,11 +49,17 @@ jobs:
       - name: Regression tests (isolated fixtures; destructive harnesses remain ignored)
         run: cargo test --locked --bin antigravity-bypass-russia --target ${{ matrix.target }}
 
+      - name: Official CLI profiles and rollback
+        run: python tests/verify_cli_profiles.py --target ${{ matrix.target }}
+
       - name: Launcher compatibility
         run: python tests/verify_wrappers.py
 
       - name: Standalone macOS launcher packaging
         run: python tests/verify_macos_bundle.py
+
+      - name: macOS source launcher
+        run: python tests/verify_macos_source_bundle.py
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
