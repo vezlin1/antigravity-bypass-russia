@@ -760,8 +760,9 @@ mod tests {
         tx.send(RaceMsg::Done(0)).unwrap();
         let worker = thread::spawn(move || {
             thread::sleep(Duration::from_millis(30));
-            tx.send(race_hit(1, vec![v4(192, 0, 2, 1)])).unwrap();
-            tx.send(RaceMsg::Done(1)).unwrap();
+            // The lookup may return right after the answer and close the channel.
+            let _ = tx.send(race_hit(1, vec![v4(192, 0, 2, 1)]));
+            let _ = tx.send(RaceMsg::Done(1));
             // Provider 2 and the reference DNS stay silent until the deadline.
             thread::sleep(Duration::from_secs(2));
             drop(tx);
@@ -795,8 +796,8 @@ mod tests {
         tx.send(RaceMsg::Done(1)).unwrap();
         let worker = thread::spawn(move || {
             thread::sleep(Duration::from_millis(50));
-            tx.send(race_hit(0, vec![v4(198, 51, 100, 1)])).unwrap();
-            tx.send(RaceMsg::Done(0)).unwrap();
+            let _ = tx.send(race_hit(0, vec![v4(198, 51, 100, 1)]));
+            let _ = tx.send(RaceMsg::Done(0));
             thread::sleep(Duration::from_secs(2));
         });
         let start = Instant::now();
@@ -862,14 +863,17 @@ mod tests {
         let _serial = CACHE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let key = test_key("single-flight.test");
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let start = Arc::new(std::sync::Barrier::new(8));
         let workers: Vec<_> = (0..8)
             .map(|_| {
                 let key = key.clone();
                 let calls = Arc::clone(&calls);
+                let start = Arc::clone(&start);
                 thread::spawn(move || {
+                    start.wait();
                     shared(key, || {
                         calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                        thread::sleep(Duration::from_millis(200));
+                        thread::sleep(Duration::from_millis(500));
                         Some(address_hit("single-flight.test"))
                     })
                 })

@@ -37,8 +37,17 @@ fn same_target_path(left: &Path, right: &Path) -> bool {
         .to_string_lossy()
         .replace('/', "\\")
         .eq_ignore_ascii_case(&right.to_string_lossy().replace('/', "\\"));
+    // APFS is case-insensitive by default: a listed "Antigravity.exe" and a probed
+    // "antigravity.exe" are one file. Compare identity, not spelling.
     #[cfg(not(windows))]
-    return left == right;
+    {
+        use std::os::unix::fs::MetadataExt;
+        left == right
+            || matches!(
+                (std::fs::metadata(left), std::fs::metadata(right)),
+                (Ok(a), Ok(b)) if a.dev() == b.dev() && a.ino() == b.ino()
+            )
+    }
 }
 
 #[derive(Debug, Clone, Default)]
