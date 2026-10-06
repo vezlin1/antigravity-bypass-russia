@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "antigravity-bypass-russia"
-version = "2.2.2"
+version = "2.3.0"
 dependencies = [
  "jsonc-parser",
  "libc",
