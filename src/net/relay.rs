@@ -15,7 +15,8 @@ pub const LISTEN_IP: &str = "127.0.0.53";
 pub const LISTEN_PORT: u16 = 53;
 pub const HEALTH_PORT: u16 = 15353;
 pub const HEALTH_NAME: &str = "antigravity-relay-health.invalid";
-const WORKER_THREADS: usize = 4;
+// A miss can block a worker for the whole upstream budget; keep queries from queuing behind it.
+const WORKER_THREADS: usize = 32;
 
 static UPSTREAM_CACHE: std::sync::RwLock<Option<Vec<Ipv4Addr>>> = std::sync::RwLock::new(None);
 static IF_INDEX_CACHE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -191,7 +192,7 @@ pub fn run() -> Result<(), String> {
     });
     let sock_arc = Arc::new(socket);
 
-    let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, std::net::SocketAddr)>(128);
+    let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, std::net::SocketAddr)>(256);
     let rx = Arc::new(Mutex::new(rx));
     for _ in 0..WORKER_THREADS {
         let rx_c = Arc::clone(&rx);
@@ -238,8 +239,14 @@ pub fn run() -> Result<(), String> {
     }
 }
 
+fn answered_locally(qtype: Option<u16>) -> bool {
+    // AAAA: pinned proxies are IPv4. SVCB/HTTPS (64/65): macOS asks for them on
+    // every lookup, and waiting on upstream for them delays each connection.
+    matches!(qtype, Some(28 | 64 | 65))
+}
+
 fn relay(query: &[u8]) -> Option<Vec<u8>> {
-    if question_type(query) == Some(28) {
+    if answered_locally(question_type(query)) {
         return Some(nodata_response(query));
     }
 
@@ -301,5 +308,24 @@ pub fn local_dns_available() -> Result<bool, String> {
             Ok(false)
         }
         Err(e) => Err(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn address_family_and_service_binding_questions_skip_upstream() {
+        for qtype in [28u16, 64, 65] {
+            let mut query = crate::net::client::build_query("daily-cloudcode-pa.googleapis.com", 7);
+            let at = query.len() - 4;
+            query[at..at + 2].copy_from_slice(&qtype.to_be_bytes());
+            assert_eq!(question_type(&query), Some(qtype));
+            let reply = relay(&query).unwrap();
+            assert!(crate::net::client::is_successful_response(&reply));
+            assert!(crate::net::client::answer_addrs(&reply).is_empty());
+        }
+        assert!(!answered_locally(Some(1)));
+        assert!(!answered_locally(None));
     }
 }

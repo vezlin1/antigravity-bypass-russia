@@ -2,13 +2,13 @@
 use super::{
     client::{
         answer_addrs, build_query, is_successful_response, query_raw_via, question_name,
-        without_addrs,
+        question_type, without_addrs,
     },
     resolver_pool::{self, Provider as ActiveProvider},
 };
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
-use std::sync::{mpsc, Mutex};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,13 @@ const LIVENESS_TTL_ALIVE: Duration = Duration::from_secs(600);
 const LIVENESS_TTL_DEAD: Duration = Duration::from_secs(60);
 static LIVENESS: Mutex<Option<HashMap<IpAddr, (bool, Instant)>>> = Mutex::new(None);
 
+const CACHE_CAPACITY: usize = 1024;
+// An expired answer is served at once with a short TTL while one refresh runs.
+const STALE_LIMIT: Duration = Duration::from_secs(3600);
+const STALE_TTL: u32 = 5;
+// Once an answer is usable, higher-priority providers get this long to beat it.
+const PREFERENCE_GRACE: Duration = Duration::from_millis(300);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Substituted,
@@ -44,6 +51,7 @@ pub enum Verdict {
     Passthrough,
     Unknown,
 }
+#[derive(Clone)]
 pub struct ResolveHit {
     pub reply: Vec<u8>,
     pub provider: String,
@@ -67,7 +75,7 @@ pub fn fallback_v4() -> Vec<String> {
 
 // Exact question bytes (including flags/EDNS), pool and interface are part of the key.
 // Changing/disabling an endpoint cannot reuse an answer from the previous configuration.
-#[derive(Hash, PartialEq, Eq)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 struct CacheKey {
     pool: String,
     interface: u32,
@@ -80,6 +88,9 @@ struct Cached {
     at: Instant,
 }
 static PACKETS: Mutex<Option<HashMap<CacheKey, Cached>>> = Mutex::new(None);
+// Identical concurrent questions share one upstream race.
+type Flight = Arc<(Mutex<Option<Option<ResolveHit>>>, Condvar)>;
+static IN_FLIGHT: Mutex<Option<HashMap<CacheKey, Flight>>> = Mutex::new(None);
 fn cache_key(pool: &[ActiveProvider], query: &[u8], interface: u32) -> CacheKey {
     CacheKey {
         pool: format!("{pool:?}"),
@@ -274,13 +285,57 @@ struct RaceResult {
 enum RaceMsg {
     Provider(RaceResult),
     Reference(Vec<IpAddr>),
+    /// Sent after the provider's answer, or alone when it failed.
+    Done(usize),
 }
 
-fn collect_race(rx: mpsc::Receiver<RaceMsg>, deadline: Instant) -> (Vec<RaceResult>, Vec<IpAddr>) {
+/// Stop rule for client-facing lookups; setup and reports wait for everyone.
+struct Settle {
+    providers: usize,
+    wants_address: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Progress {
+    Wait,
+    Grace,
+    Now,
+}
+
+fn progress(hits: &[RaceResult], reference: &[IpAddr], done: &[usize], rule: &Settle) -> Progress {
+    if done.len() >= rule.providers {
+        return Progress::Now;
+    }
+    let Some(best) = pick_winner(hits, reference).map(|i| &hits[i]) else {
+        return Progress::Wait;
+    };
+    // A non-Google answer for a Google name is the substitution we want; the
+    // reference DNS only tells "substituted" from "unknown", both of which win.
+    if rule.wants_address && score(best, reference) > 1 {
+        return Progress::Wait;
+    }
+    if (0..best.idx).all(|idx| done.contains(&idx)) {
+        Progress::Now
+    } else {
+        Progress::Grace
+    }
+}
+
+fn collect_race(
+    rx: mpsc::Receiver<RaceMsg>,
+    deadline: Instant,
+    settle: Option<&Settle>,
+) -> (Vec<RaceResult>, Vec<IpAddr>) {
     let mut hits = Vec::new();
     let mut reference = Vec::new();
+    let mut done = Vec::new();
+    let mut grace: Option<Instant> = None;
     // A fast passthrough must not hide a slower substituting provider.
-    while let Ok(message) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+    loop {
+        let until = grace.map_or(deadline, |g| g.min(deadline));
+        let Ok(message) = rx.recv_timeout(until.saturating_duration_since(Instant::now())) else {
+            break;
+        };
         match message {
             RaceMsg::Provider(hit) => hits.push(hit),
             RaceMsg::Reference(addrs) => {
@@ -289,6 +344,16 @@ fn collect_race(rx: mpsc::Receiver<RaceMsg>, deadline: Instant) -> (Vec<RaceResu
                         reference.push(addr);
                     }
                 }
+            }
+            RaceMsg::Done(idx) => done.push(idx),
+        }
+        if let Some(rule) = settle {
+            match progress(&hits, &reference, &done, rule) {
+                Progress::Now => break,
+                Progress::Grace => {
+                    grace.get_or_insert_with(|| Instant::now() + PREFERENCE_GRACE);
+                }
+                Progress::Wait => {}
             }
         }
     }
@@ -300,6 +365,7 @@ fn race_providers(
     pool: &[ActiveProvider],
     query: &[u8],
     interface: u32,
+    early: bool,
 ) -> (Vec<RaceResult>, Vec<IpAddr>) {
     let deadline = Instant::now() + resolver_pool::BUDGET;
     let (tx, rx) = mpsc::channel();
@@ -318,6 +384,7 @@ fn race_providers(
                     }));
                 }
             }
+            let _ = tx.send(RaceMsg::Done(idx));
         });
     }
     for ns in REFERENCE_V4 {
@@ -337,69 +404,166 @@ fn race_providers(
         });
     }
     drop(tx);
-    collect_race(rx, deadline)
+    let settle = early.then(|| Settle {
+        providers: pool.len(),
+        wants_address: question_type(query) == Some(1),
+    });
+    collect_race(rx, deadline, settle.as_ref())
+}
+
+fn score(hit: &RaceResult, reference: &[IpAddr]) -> u8 {
+    match classify(&hit.addrs, reference, &[]) {
+        Verdict::Substituted => 0,
+        Verdict::Unknown if hit.addrs.iter().any(|a| !looks_google(a)) => 1,
+        _ if !hit.addrs.is_empty() => 2,
+        _ => 3,
+    }
 }
 
 fn pick_winner(hits: &[RaceResult], reference: &[IpAddr]) -> Option<usize> {
     hits.iter()
         .enumerate()
-        .min_by_key(|(_, hit)| {
-            let score = match classify(&hit.addrs, reference, &[]) {
-                Verdict::Substituted => 0,
-                Verdict::Unknown if hit.addrs.iter().any(|a| !looks_google(a)) => 1,
-                _ if !hit.addrs.is_empty() => 2,
-                _ => 3,
-            };
-            (score, hit.idx)
-        })
+        .min_by_key(|(_, hit)| (score(hit, reference), hit.idx))
         .map(|(i, _)| i)
+}
+
+enum Lookup {
+    Fresh(ResolveHit),
+    Stale(ResolveHit),
+    Miss,
+}
+
+fn cached(key: &CacheKey) -> Lookup {
+    let Ok(guard) = PACKETS.lock() else {
+        return Lookup::Miss;
+    };
+    let Some(entry) = guard.as_ref().and_then(|c| c.get(key)) else {
+        return Lookup::Miss;
+    };
+    let age = entry.at.elapsed();
+    let hit = |reply| ResolveHit {
+        reply,
+        provider: entry.provider.clone(),
+        verdict: entry.verdict,
+    };
+    if let Some(reply) = super::client::aged_reply(&entry.reply, age.as_secs() as u32) {
+        return Lookup::Fresh(hit(reply));
+    }
+    if age < STALE_LIMIT {
+        if let Some(reply) = super::client::age_ttls(&entry.reply, 0, STALE_TTL) {
+            return Lookup::Stale(hit(reply));
+        }
+    }
+    Lookup::Miss
+}
+
+fn remember(key: CacheKey, hit: &ResolveHit) {
+    let Ok(mut guard) = PACKETS.lock() else {
+        return;
+    };
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if cache.len() >= CACHE_CAPACITY && !cache.contains_key(&key) {
+        let oldest = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.at)
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(
+        key,
+        Cached {
+            reply: hit.reply.clone(),
+            provider: hit.provider.clone(),
+            verdict: hit.verdict,
+            at: Instant::now(),
+        },
+    );
+}
+
+fn with_id(mut hit: ResolveHit, query: &[u8]) -> ResolveHit {
+    if hit.reply.len() >= 2 && query.len() >= 2 {
+        hit.reply[..2].copy_from_slice(&query[..2]);
+    }
+    hit
 }
 
 pub fn resolve_best(query: &[u8], interface: u32) -> Option<ResolveHit> {
     question_name(query)?;
     let pool = resolver_pool::load().ok()?;
     let key = cache_key(&pool, query, interface);
-    if let Ok(guard) = PACKETS.lock() {
-        if let Some(cached) = guard.as_ref().and_then(|c| c.get(&key)) {
-            if let Some(mut reply) =
-                super::client::aged_reply(&cached.reply, cached.at.elapsed().as_secs() as u32)
-            {
-                reply[..2].copy_from_slice(&query[..2]);
-                return Some(ResolveHit {
-                    reply,
-                    provider: cached.provider.clone(),
-                    verdict: cached.verdict,
-                });
+    match cached(&key) {
+        Lookup::Fresh(hit) => return Some(with_id(hit, query)),
+        Lookup::Stale(hit) => {
+            refresh_in_background(pool, query.to_vec(), interface, key);
+            return Some(with_id(hit, query));
+        }
+        Lookup::Miss => {}
+    }
+    shared(key, || resolve_uncached(&pool, query, interface)).map(|hit| with_id(hit, query))
+}
+
+fn refresh_in_background(pool: Vec<ActiveProvider>, query: Vec<u8>, interface: u32, key: CacheKey) {
+    let running = IN_FLIGHT
+        .lock()
+        .is_ok_and(|guard| guard.as_ref().is_some_and(|f| f.contains_key(&key)));
+    if !running {
+        thread::spawn(move || shared(key, || resolve_uncached(&pool, &query, interface)));
+    }
+}
+
+/// The first caller resolves and caches; concurrent callers with the same key wait for it.
+fn shared(key: CacheKey, resolve: impl FnOnce() -> Option<ResolveHit>) -> Option<ResolveHit> {
+    let (flight, leader) = {
+        let mut guard = IN_FLIGHT.lock().ok()?;
+        let flights = guard.get_or_insert_with(HashMap::new);
+        match flights.get(&key) {
+            Some(flight) => (Arc::clone(flight), false),
+            None => {
+                let flight: Flight = Arc::new((Mutex::new(None), Condvar::new()));
+                flights.insert(key.clone(), Arc::clone(&flight));
+                (flight, true)
             }
         }
+    };
+    let (slot, ready) = &*flight;
+    if !leader {
+        let wait = resolver_pool::BUDGET + LIVENESS_BUDGET + Duration::from_secs(1);
+        let guard = slot.lock().ok()?;
+        let (guard, _) = ready
+            .wait_timeout_while(guard, wait, |result| result.is_none())
+            .ok()?;
+        return guard.clone().flatten();
     }
-    let (hits, reference) = race_providers(&pool, query, interface);
+    let hit = resolve();
+    if let Some(hit) = &hit {
+        // Only address answers are cached; negative answers require SOA handling.
+        if !answer_addrs(&hit.reply).is_empty()
+            && super::client::aged_reply(&hit.reply, 0).is_some()
+        {
+            remember(key.clone(), hit);
+        }
+    }
+    if let Ok(mut guard) = IN_FLIGHT.lock() {
+        if let Some(flights) = guard.as_mut() {
+            flights.remove(&key);
+        }
+    }
+    if let Ok(mut result) = slot.lock() {
+        *result = Some(hit.clone());
+    }
+    ready.notify_all();
+    hit
+}
+
+fn resolve_uncached(pool: &[ActiveProvider], query: &[u8], interface: u32) -> Option<ResolveHit> {
+    let (hits, reference) = race_providers(pool, query, interface, true);
     let hit = &hits[pick_winner(&hits, &reference)?];
-    let verdict = classify(&hit.addrs, &reference, &[]);
-    let reply = drop_dead(&hit.reply);
-    let provider = pool[hit.idx].name.clone();
-    // Only address answers are cached; negative answers require SOA handling.
-    if !answer_addrs(&reply).is_empty() && super::client::aged_reply(&reply, 0).is_some() {
-        if let Ok(mut guard) = PACKETS.lock() {
-            let cache = guard.get_or_insert_with(HashMap::new);
-            if cache.len() >= 64 {
-                cache.clear();
-            }
-            cache.insert(
-                key,
-                Cached {
-                    reply: reply.clone(),
-                    provider: provider.clone(),
-                    verdict,
-                    at: Instant::now(),
-                },
-            );
-        }
-    }
     Some(ResolveHit {
-        reply,
-        provider,
-        verdict,
+        reply: drop_dead(&hit.reply),
+        provider: pool[hit.idx].name.clone(),
+        verdict: classify(&hit.addrs, &reference, &[]),
     })
 }
 
@@ -408,7 +572,7 @@ pub fn substituting_addrs(name: &str, interface: u32) -> Vec<String> {
     let Ok(pool) = resolver_pool::load() else {
         return vec![];
     };
-    let (hits, reference) = race_providers(&pool, &build_query(name, 0x5355), interface);
+    let (hits, reference) = race_providers(&pool, &build_query(name, 0x5355), interface, false);
     let mut ips = Vec::new();
     for hit in hits {
         if classify(&hit.addrs, &reference, &[]) == Verdict::Substituted {
@@ -452,7 +616,7 @@ fn substituted_candidates(hits: &[RaceResult], reference: &[IpAddr]) -> Vec<IpAd
 /// Ranking tries every substituter, even if the preferred DNS returns a dead proxy.
 pub fn candidate_addrs(name: &str, interface: u32) -> Result<Vec<IpAddr>, String> {
     let pool = resolver_pool::load()?;
-    let (hits, reference) = race_providers(&pool, &build_query(name, 0x524b), interface);
+    let (hits, reference) = race_providers(&pool, &build_query(name, 0x524b), interface, false);
     Ok(substituted_candidates(&hits, &reference))
 }
 
@@ -468,7 +632,7 @@ pub fn capabilities(interface: u32) -> Result<Vec<Capability>, String> {
     }
     for name in names {
         let host = name.trim_start_matches('.');
-        let (hits, reference) = race_providers(&pool, &build_query(host, 0x4341), interface);
+        let (hits, reference) = race_providers(&pool, &build_query(host, 0x4341), interface, false);
         for (idx, provider) in pool.iter().enumerate() {
             let hit = hits.iter().find(|h| h.idx == idx);
             out.push(Capability {
@@ -565,7 +729,7 @@ mod tests {
             }))
             .unwrap();
         });
-        let (hits, reference) = collect_race(rx, Instant::now() + Duration::from_secs(1));
+        let (hits, reference) = collect_race(rx, Instant::now() + Duration::from_secs(1), None);
         worker.join().unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[pick_winner(&hits, &reference).unwrap()].idx, 1);
@@ -574,6 +738,206 @@ mod tests {
             substituted_candidates(&hits, &reference),
             vec![v4(192, 0, 2, 1)]
         );
+    }
+
+    fn race_hit(idx: usize, addrs: Vec<IpAddr>) -> RaceMsg {
+        RaceMsg::Provider(RaceResult {
+            idx,
+            reply: vec![],
+            addrs,
+            server: None,
+        })
+    }
+
+    #[test]
+    fn client_lookup_returns_once_no_pending_provider_can_win() {
+        let rule = Settle {
+            providers: 3,
+            wants_address: true,
+        };
+        let (tx, rx) = mpsc::channel();
+        tx.send(race_hit(0, vec![v4(142, 250, 1, 1)])).unwrap();
+        tx.send(RaceMsg::Done(0)).unwrap();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            tx.send(race_hit(1, vec![v4(192, 0, 2, 1)])).unwrap();
+            tx.send(RaceMsg::Done(1)).unwrap();
+            // Provider 2 and the reference DNS stay silent until the deadline.
+            thread::sleep(Duration::from_secs(2));
+            drop(tx);
+        });
+        let start = Instant::now();
+        let (hits, reference) =
+            collect_race(rx, Instant::now() + Duration::from_secs(2), Some(&rule));
+        assert!(start.elapsed() < PREFERENCE_GRACE);
+        assert_eq!(hits[pick_winner(&hits, &reference).unwrap()].idx, 1);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn pending_preferred_provider_gets_only_a_short_grace() {
+        let rule = Settle {
+            providers: 2,
+            wants_address: true,
+        };
+        let (tx, rx) = mpsc::channel();
+        tx.send(race_hit(1, vec![v4(192, 0, 2, 1)])).unwrap();
+        tx.send(RaceMsg::Done(1)).unwrap();
+        let start = Instant::now();
+        let (hits, _) = collect_race(rx, Instant::now() + Duration::from_secs(2), Some(&rule));
+        let elapsed = start.elapsed();
+        assert!(elapsed >= PREFERENCE_GRACE && elapsed < Duration::from_secs(1));
+        assert_eq!(hits.len(), 1);
+        drop(tx);
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(race_hit(1, vec![v4(192, 0, 2, 1)])).unwrap();
+        tx.send(RaceMsg::Done(1)).unwrap();
+        let worker = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            tx.send(race_hit(0, vec![v4(198, 51, 100, 1)])).unwrap();
+            tx.send(RaceMsg::Done(0)).unwrap();
+            thread::sleep(Duration::from_secs(2));
+        });
+        let start = Instant::now();
+        let (hits, reference) =
+            collect_race(rx, Instant::now() + Duration::from_secs(2), Some(&rule));
+        assert!(start.elapsed() < PREFERENCE_GRACE);
+        assert_eq!(hits[pick_winner(&hits, &reference).unwrap()].idx, 0);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn genuine_google_answers_still_wait_for_substituters() {
+        let rule = Settle {
+            providers: 2,
+            wants_address: true,
+        };
+        let google = vec![v4(142, 250, 1, 1)];
+        let hits = [RaceResult {
+            idx: 0,
+            reply: vec![],
+            addrs: google.clone(),
+            server: None,
+        }];
+        assert_eq!(progress(&hits, &google, &[0], &rule), Progress::Wait);
+        assert_eq!(progress(&hits, &google, &[0, 1], &rule), Progress::Now);
+        let other = Settle {
+            providers: 2,
+            wants_address: false,
+        };
+        let empty = [RaceResult {
+            idx: 0,
+            reply: vec![],
+            addrs: vec![],
+            server: None,
+        }];
+        assert_eq!(progress(&empty, &[], &[0], &other), Progress::Now);
+        assert_eq!(progress(&[], &[], &[0], &other), Progress::Wait);
+    }
+
+    // Cache tests share the process-wide cache.
+    static CACHE_TESTS: Mutex<()> = Mutex::new(());
+
+    fn test_key(name: &str) -> CacheKey {
+        CacheKey {
+            pool: format!("test-{name}"),
+            interface: 0,
+            question: build_query(name, 0)[2..].to_vec(),
+        }
+    }
+
+    fn address_hit(name: &str) -> ResolveHit {
+        let query = build_query(name, 9);
+        ResolveHit {
+            reply: super::super::client::address_response(&query, &[Ipv4Addr::new(192, 0, 2, 7)])
+                .unwrap(),
+            provider: "test".into(),
+            verdict: Verdict::Substituted,
+        }
+    }
+
+    #[test]
+    fn concurrent_identical_questions_share_one_upstream_race() {
+        let _serial = CACHE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let key = test_key("single-flight.test");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let key = key.clone();
+                let calls = Arc::clone(&calls);
+                thread::spawn(move || {
+                    shared(key, || {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(200));
+                        Some(address_hit("single-flight.test"))
+                    })
+                })
+            })
+            .collect();
+        for worker in workers {
+            let hit = worker.join().unwrap().unwrap();
+            assert!(!answer_addrs(&hit.reply).is_empty());
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(cached(&key), Lookup::Fresh(_)));
+    }
+
+    #[test]
+    fn expired_answers_are_served_briefly_then_dropped() {
+        let _serial = CACHE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let hit = address_hit("stale.test");
+        let ttl = super::super::client::age_ttls(&hit.reply, 0, u32::MAX).unwrap();
+        assert!(super::super::client::aged_reply(&ttl, 0).is_some());
+        for (name, age, expected) in [
+            ("stale-a.test", Duration::from_secs(400), "stale"),
+            ("stale-b.test", STALE_LIMIT + Duration::from_secs(1), "miss"),
+        ] {
+            let key = test_key(name);
+            remember(key.clone(), &hit);
+            if let Some(entry) = PACKETS
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|c| c.get_mut(&key))
+            {
+                entry.at = Instant::now().checked_sub(age).unwrap();
+            }
+            match (cached(&key), expected) {
+                (Lookup::Stale(stale), "stale") => {
+                    let fresh = super::super::client::aged_reply(&stale.reply, 0).unwrap();
+                    assert!(super::super::client::aged_reply(&fresh, STALE_TTL).is_none());
+                    assert_eq!(answer_addrs(&stale.reply), answer_addrs(&hit.reply));
+                }
+                (Lookup::Miss, "miss") => {}
+                _ => panic!("{name}: unexpected cache state"),
+            }
+        }
+    }
+
+    #[test]
+    fn full_cache_evicts_the_oldest_answer_only() {
+        let _serial = CACHE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        *PACKETS.lock().unwrap() = None;
+        let hit = address_hit("evict.test");
+        let first = test_key("evict-first.test");
+        remember(first.clone(), &hit);
+        if let Some(entry) = PACKETS
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|c| c.get_mut(&first))
+        {
+            entry.at = Instant::now().checked_sub(Duration::from_secs(30)).unwrap();
+        }
+        for i in 0..CACHE_CAPACITY {
+            remember(test_key(&format!("evict-{i}.test")), &hit);
+        }
+        let guard = PACKETS.lock().unwrap();
+        let cache = guard.as_ref().unwrap();
+        assert!(cache.len() <= CACHE_CAPACITY);
+        assert!(!cache.contains_key(&first));
+        assert!(cache.contains_key(&test_key(&format!("evict-{}.test", CACHE_CAPACITY - 1))));
     }
 
     #[test]
