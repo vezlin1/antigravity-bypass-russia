@@ -4,7 +4,7 @@
 
 # ANTIGRAVITY-BYPASS-RUSSIA
 
-### ⚡ Разблокировка Google Antigravity & Gemini 2.0 в России
+### ⚡ Разблокировка Google Antigravity & Gemini 3.x,4.x в России
 **Без VPN • Без смены страны Google-аккаунта • На полной скорости вашего интернета**
 
 [![Платформы](https://img.shields.io/badge/Платформа-Windows_10%2F11_•_macOS-0078D4.svg?style=flat-square&logo=windows&logoColor=white)](README.md)
@@ -28,7 +28,7 @@
 
 ## 💡 Что это такое
 
-**Antigravity Bypass Russia** — бесплатная открытая утилита, которая устраняет региональные блокировки (**`User is ineligible`**, **`Location not supported`**) в **Google Antigravity**, **Gemini 2.0**, **Antigravity IDE** и расширениях для **VS Code / Cursor / Windsurf**.
+**Antigravity Bypass Russia** — бесплатная открытая утилита, которая устраняет региональные блокировки (**`User is ineligible`**, **`Location not supported`**) в **Google Antigravity**, **Gemini 3.x,4.x**, **Antigravity IDE** и расширениях для **VS Code / Cursor / Windsurf**.
 
 Вам **больше не нужно**:
 - Держать постоянно включённым медленный зарубежный VPN;
@@ -128,7 +128,7 @@ chmod +x scripts/unlock_and_restore.sh
 ## 🧩 Поддерживаемые редакторы
 
 - **Antigravity IDE** — автономная среда разработки от Google;
-- **Ядро Antigravity 2.0 (`language_server`)** — для процессоров x64 и ARM64;
+- **Ядро Antigravity 3.x,4.x (`language_server`)** — для процессоров x64 и ARM64;
 - **Расширения Antigravity** для **Visual Studio Code**, **Cursor**, **Windsurf**, **VS Code Insiders** и **VSCodium**;
 - Консольная утилита **Antigravity CLI (`agy`)**.
 
