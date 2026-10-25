@@ -1,6 +1,6 @@
 use crate::core::detector::{
     find_installations, find_targets_in_path, recover_installations, recover_targets_in_path,
-    FoundTarget,
+    same_target_path, FoundTarget,
 };
 use crate::core::patcher::{patch_target, restore_target};
 use crate::core::v8_cache::clear_ide_v8_caches;
@@ -289,10 +289,15 @@ fn patch_installations() -> FileSetupOutcome {
         eprintln!("[✗] Установки не найдены; укажите путь в пункте 4.");
         return FileSetupOutcome::Stopped;
     }
-    let targets: Vec<_> = installs
-        .iter()
-        .flat_map(|root| find_targets_in_path(root))
-        .collect();
+    let mut targets: Vec<FoundTarget> = Vec::new();
+    for t in installs.iter().flat_map(|root| find_targets_in_path(root)) {
+        if !targets
+            .iter()
+            .any(|existing| same_target_path(&existing.path, &t.path))
+        {
+            targets.push(t);
+        }
+    }
     if targets.is_empty() {
         eprintln!("[✗] Файлы приложения не найдены; укажите путь в пункте 4.");
         return FileSetupOutcome::Stopped;
@@ -456,11 +461,16 @@ pub fn handle_rollback() -> bool {
         }
         find_installations()
     };
-    let paths: Vec<_> = installs
-        .iter()
-        .flat_map(|root| find_targets_in_path(root))
-        .map(|t| t.path)
-        .collect();
+    let mut targets: Vec<FoundTarget> = Vec::new();
+    for t in installs.iter().flat_map(|root| find_targets_in_path(root)) {
+        if !targets
+            .iter()
+            .any(|existing| same_target_path(&existing.path, &t.path))
+        {
+            targets.push(t);
+        }
+    }
+    let paths: Vec<_> = targets.iter().map(|t| t.path.clone()).collect();
     clear_screen();
     banner();
     println!("  ОТКЛЮЧЕНИЕ ОБХОДА\n");
@@ -469,17 +479,12 @@ pub fn handle_rollback() -> bool {
     }
     println!("  Восстанавливаем настройки…\n");
     let mut ok = true;
-    for root in installs {
-        let targets = find_targets_in_path(&root);
-        if targets.is_empty() {
-            if crate::system::env::args().nth(2).is_some() {
-                eprintln!("[✗] Цели для отката не найдены: {}", root.display());
-                ok = false;
-            }
-        }
-        for target in targets {
-            ok &= print_patch_result(&target, restore_target(&target));
-        }
+    if targets.is_empty() && crate::system::env::args().nth(2).is_some() {
+        eprintln!("[✗] Цели для отката не найдены");
+        ok = false;
+    }
+    for target in targets {
+        ok &= print_patch_result(&target, restore_target(&target));
     }
     if !paths.is_empty() {
         if let Err(error) = clear_ide_v8_caches() {

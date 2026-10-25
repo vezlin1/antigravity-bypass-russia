@@ -31,7 +31,7 @@ pub(crate) fn is_agy_cli_name(name: &str) -> bool {
 
 const CLI_NAMES: [&str; 4] = ["agy.exe", "agy", "antigravity.exe", "antigravity"];
 
-fn same_target_path(left: &Path, right: &Path) -> bool {
+pub(crate) fn same_target_path(left: &Path, right: &Path) -> bool {
     #[cfg(windows)]
     return left
         .to_string_lossy()
@@ -83,11 +83,15 @@ fn is_already_contained(installs: &[PathBuf], candidate: &Path) -> bool {
         let cand_str = candidate.to_string_lossy().to_lowercase();
         let cand_canon = std::fs::canonicalize(candidate).ok();
         installs.iter().any(|existing| {
-            if existing.to_string_lossy().to_lowercase() == cand_str {
+            let ex_str = existing.to_string_lossy().to_lowercase();
+            if ex_str == cand_str {
+                return true;
+            }
+            if existing.is_dir() && candidate.starts_with(existing) {
                 return true;
             }
             if let (Some(c1), Some(c2)) = (&cand_canon, std::fs::canonicalize(existing).ok()) {
-                if c1 == &c2 {
+                if c1 == &c2 || (existing.is_dir() && c1.starts_with(c2)) {
                     return true;
                 }
             }
@@ -96,7 +100,9 @@ fn is_already_contained(installs: &[PathBuf], candidate: &Path) -> bool {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        installs.iter().any(|existing| existing == candidate)
+        installs.iter().any(|existing| {
+            existing == candidate || (existing.is_dir() && candidate.starts_with(existing))
+        })
     }
 }
 
@@ -117,6 +123,7 @@ pub fn find_installations() -> Vec<PathBuf> {
             r"%PROGRAMFILES(X86)%\Antigravity IDE",
             r"%USERPROFILE%\scoop\apps\antigravity\current",
             r"%USERPROFILE%\scoop\apps\antigravity-ide\current",
+            r"%USERPROFILE%\.gemini\bin",
         ];
         for c in candidates {
             let p = expand_env_vars(c);
@@ -174,10 +181,11 @@ pub fn find_installations() -> Vec<PathBuf> {
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "~/.local/bin",
+            "~/.gemini/bin",
         ];
         for c in candidates {
             let p = expand_env_vars(c);
-            if p.is_dir() && !installs.contains(&p) {
+            if p.is_dir() && !is_already_contained(&installs, &p) {
                 installs.push(p);
             }
         }
@@ -229,10 +237,11 @@ pub fn find_installations() -> Vec<PathBuf> {
             "~/.local/share/antigravity-ide",
             "~/.config/Antigravity",
             "~/.config/Antigravity IDE",
+            "~/.gemini/bin",
         ];
         for c in candidates {
             let p = expand_env_vars(c);
-            if p.is_dir() && !installs.contains(&p) {
+            if p.is_dir() && !is_already_contained(&installs, &p) {
                 installs.push(p);
             }
         }
@@ -286,6 +295,7 @@ fn cli_search_dirs() -> Vec<PathBuf> {
     for home in crate::system::env::get_user_homes() {
         dirs.push(home.join(".local/bin"));
         dirs.push(home.join(".agy/bin"));
+        dirs.push(home.join(".gemini/bin"));
     }
     dirs
 }
@@ -374,7 +384,7 @@ fn recovery_kind(name: &str, captured: &Path) -> Option<TargetKind> {
         && native_executable(captured)
     {
         Some(TargetKind::LanguageServer)
-    } else if matches!(name, "main.js" | "extension.js") {
+    } else if name == "main.js" {
         Some(TargetKind::IdeMainJs)
     } else if matches!(name, "app.asar" | "app1.asar") {
         Some(TargetKind::IdeAsar)
@@ -590,13 +600,15 @@ pub fn find_targets_in_path(root: &Path) -> Vec<FoundTarget> {
         }
         let kind = if name.ends_with(".asar") {
             TargetKind::IdeAsar
-        } else if name.ends_with(".js") {
+        } else if name == "main.js" {
             TargetKind::IdeMainJs
         } else if is_agy_cli_name(&name) {
             if !native_cli(root, &name) {
                 return targets;
             }
             TargetKind::AgyCli
+        } else if name.ends_with(".js") {
+            return targets;
         } else {
             TargetKind::LanguageServer
         };
@@ -729,9 +741,6 @@ pub fn find_targets_in_path(root: &Path) -> Vec<FoundTarget> {
             .join("code")
             .join("electron-main")
             .join("main.js"),
-        PathBuf::from("dist").join("extension.js"),
-        PathBuf::from("out").join("extension.js"),
-        PathBuf::from("extension.js"),
     ];
 
     for rel in &js_rel_candidates {
@@ -1239,6 +1248,39 @@ mod detection_tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[test]
+    fn vscode_extension_directory_ignores_extension_js_and_finds_gemini_cli() {
+        let root = tempfile::tempdir().unwrap();
+        let ext_dir = root
+            .path()
+            .join("extensions/google.google-antigravity-1.9.0");
+        std::fs::create_dir_all(&ext_dir).unwrap();
+        std::fs::write(ext_dir.join("extension.js"), b"// vscode extension entry").unwrap();
+        std::fs::write(
+            ext_dir.join("package.json"),
+            b"{\"name\":\"google-antigravity\"}",
+        )
+        .unwrap();
+
+        // The extension directory itself contains no patchable IDE files:
+        let targets = find_targets_in_path(&ext_dir);
+        assert!(
+            targets.is_empty(),
+            "extension.js must not be treated as IdeMainJs"
+        );
+
+        // The CLI binary in ~/.gemini/bin is detected as TargetKind::AgyCli:
+        let gemini_bin = root.path().join(".gemini/bin");
+        std::fs::create_dir_all(&gemini_bin).unwrap();
+        let cli_file = gemini_bin.join(if cfg!(windows) { "agy.exe" } else { "agy" });
+        std::fs::write(&cli_file, cli_fixture(true, false)).unwrap();
+
+        let cli_targets = find_targets_in_path(&gemini_bin);
+        assert_eq!(cli_targets.len(), 1);
+        assert_eq!(cli_targets[0].kind, TargetKind::AgyCli);
+        assert_eq!(cli_targets[0].path, cli_file);
     }
 }
 
