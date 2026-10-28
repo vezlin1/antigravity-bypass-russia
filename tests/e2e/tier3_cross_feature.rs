@@ -29,7 +29,7 @@ fn test_t3_01_socket_tuning_with_proxy_racing() {
 
 #[test]
 fn test_t3_02_direct_nrpt_with_bandwidth_gated_hosts() {
-    let fast_relays = ["83.220.169.155", "111.88.96.50", "212.109.195.93"];
+    let fast_relays = ["192.0.2.10", "111.88.96.50", "192.0.2.11"];
     let ns_string = format_direct_nrpt_nameservers(&fast_relays);
     assert!(!ns_string.contains("127.0.0.53"));
 
@@ -42,14 +42,14 @@ fn test_t3_02_direct_nrpt_with_bandwidth_gated_hosts() {
     let _path = temp.write_file("hosts", &hosts_content);
 
     let read_back = temp.read_file("hosts");
-    assert!(read_back.contains("83.220.169.155"));
+    assert!(read_back.contains("192.0.2.10"));
     assert!(read_back.contains("111.88.96.50"));
 }
 
 #[test]
 fn test_t3_03_benchmark_leader_selection_with_route_preference() {
     let candidates = vec![
-        ("83.220.169.155", "Comss Frankfurt 10G", 50u64, 110u64, 50i32, 10000u64),
+        ("192.0.2.10", "Example Frankfurt 10G", 50u64, 110u64, 50i32, 10000u64),
         ("37.230.192.51", "Geohide Moscow", 15u64, 800u64, 0i32, 500u64),
         ("111.88.96.50", "Xbox-DNS Anycast", 35u64, 130u64, 40i32, 8000u64),
     ];
@@ -66,7 +66,7 @@ fn test_t3_03_benchmark_leader_selection_with_route_preference() {
         .collect();
 
     scored.sort_by_key(|(_, _, score)| *score);
-    assert_eq!(scored[0].0, "83.220.169.155", "Leader must be Comss Frankfurt 10G under PreferEurope10G");
+    assert_eq!(scored[0].0, "192.0.2.10", "Leader must be Example Frankfurt 10G under PreferEurope10G");
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn test_t3_04_os_tuning_with_high_throughput_streaming_proxy() {
 
 #[test]
 fn test_t3_05_direct_resolution_with_static_routes() {
-    let smartdns_ips = vec!["111.88.96.50", "83.220.169.155", "212.109.195.93"];
+    let smartdns_ips = vec!["111.88.96.50", "192.0.2.10", "192.0.2.11"];
     let mut sync_routes = Vec::new();
     for ip in &smartdns_ips {
         sync_routes.push(format!("route add {} mask 255.255.255.255 192.168.1.1 metric 1 if 10", ip));
@@ -141,8 +141,8 @@ fn test_t3_07_circuit_breaker_trip_and_cooldown_with_ranking() {
 fn test_t3_08_hosts_population_after_benchmark_completion() {
     let benchmark_results = vec![
         BenchmarkResult {
-            name: "Comss.one Frankfurt".into(),
-            ip: "83.220.169.155".into(),
+            name: "relay.example Frankfurt".into(),
+            ip: "192.0.2.10".into(),
             tcp_rtt_ms: 25,
             tls_rtt_ms: 35,
             est_ttft_ms: 60,
@@ -171,7 +171,7 @@ fn test_t3_08_hosts_population_after_benchmark_completion() {
         .collect();
 
     assert_eq!(top_ips.len(), 2);
-    assert_eq!(top_ips[0], "83.220.169.155");
+    assert_eq!(top_ips[0], "192.0.2.10");
 }
 
 #[test]
@@ -187,9 +187,9 @@ fn test_t3_10_full_activation_and_clean_rollback_cycle() {
     let hosts_path = temp.write_file("hosts", initial_hosts);
 
     // Step 1: Activation
-    let active_hosts = format!("{}\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n83.220.169.155 generativelanguage.googleapis.com\n# END ANTIGRAVITY-BYPASS-RUSSIA\n", initial_hosts.trim_end());
+    let active_hosts = format!("{}\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n192.0.2.10 generativelanguage.googleapis.com\n# END ANTIGRAVITY-BYPASS-RUSSIA\n", initial_hosts.trim_end());
     std::fs::write(&hosts_path, &active_hosts).unwrap();
-    assert!(temp.read_file("hosts").contains("83.220.169.155"));
+    assert!(temp.read_file("hosts").contains("192.0.2.10"));
 
     // Step 2: Rollback
     let restored = strip_hosts_block(&temp.read_file("hosts"));

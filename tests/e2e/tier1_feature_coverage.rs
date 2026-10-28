@@ -132,7 +132,8 @@ fn test_f2_05_os_tuning_idempotency() {
 }
 
 // =========================================================================
-// FEATURE 3: Multi-Provider SNI Relay Pool (Comss, Xbox-DNS)
+// FEATURE 3: Multi-Provider SNI Relay Pool (synthetic fixtures)
+// Example relays use documentation IPs; this is not the production DNS pool.
 // =========================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,8 +157,8 @@ pub struct RelayNode {
 
 pub const TEST_MULTI_PROVIDER_RELAYS: &[RelayNode] = &[
     RelayNode {
-        ip: "83.220.169.155",
-        provider: "Comss.one",
+        ip: "192.0.2.10",
+        provider: "relay.example",
         location: "Frankfurt (DE) 10G Anycast",
         region: RelayRegion::EuropeCentral,
         bandwidth_mbps: 10000,
@@ -172,8 +173,8 @@ pub const TEST_MULTI_PROVIDER_RELAYS: &[RelayNode] = &[
         priority_weight: 40,
     },
     RelayNode {
-        ip: "212.109.195.93",
-        provider: "Comss.one",
+        ip: "192.0.2.11",
+        provider: "relay.example",
         location: "Amsterdam (NL) 10G High-Speed",
         region: RelayRegion::EuropeCentral,
         bandwidth_mbps: 10000,
@@ -188,8 +189,8 @@ pub const TEST_MULTI_PROVIDER_RELAYS: &[RelayNode] = &[
         priority_weight: 35,
     },
     RelayNode {
-        ip: "195.133.25.16",
-        provider: "Comss.one",
+        ip: "192.0.2.12",
+        provider: "relay.example",
         location: "Helsinki (FI) Low-Latency",
         region: RelayRegion::EuropeNorth,
         bandwidth_mbps: 1000,
@@ -214,16 +215,16 @@ pub const TEST_MULTI_PROVIDER_RELAYS: &[RelayNode] = &[
 ];
 
 #[test]
-fn test_f3_01_multi_provider_pool_contains_comss_10g() {
-    let comss_frankfurt = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "83.220.169.155");
-    assert!(comss_frankfurt.is_some());
-    let node = comss_frankfurt.unwrap();
+fn test_f3_01_multi_provider_pool_contains_example_10g() {
+    let example_frankfurt = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "192.0.2.10");
+    assert!(example_frankfurt.is_some());
+    let node = example_frankfurt.unwrap();
     assert_eq!(node.bandwidth_mbps, 10000);
     assert_eq!(node.region, RelayRegion::EuropeCentral);
 
-    let comss_amsterdam = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "212.109.195.93");
-    assert!(comss_amsterdam.is_some());
-    assert_eq!(comss_amsterdam.unwrap().bandwidth_mbps, 10000);
+    let example_amsterdam = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "192.0.2.11");
+    assert!(example_amsterdam.is_some());
+    assert_eq!(example_amsterdam.unwrap().bandwidth_mbps, 10000);
 }
 
 #[test]
@@ -238,7 +239,7 @@ fn test_f3_02_multi_provider_pool_contains_xbox_anycast() {
 
 #[test]
 fn test_f3_03_multi_provider_pool_contains_helsinki_edge() {
-    let helsinki = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "195.133.25.16");
+    let helsinki = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "192.0.2.12");
     assert!(helsinki.is_some());
     assert_eq!(helsinki.unwrap().region, RelayRegion::EuropeNorth);
 }
@@ -254,7 +255,7 @@ fn test_f3_04_relay_region_classification() {
 
 #[test]
 fn test_f3_05_provider_priority_weights() {
-    let european_node = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "83.220.169.155").unwrap();
+    let european_node = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "192.0.2.10").unwrap();
     let domestic_node = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "37.230.192.51").unwrap();
     assert!(european_node.priority_weight > domestic_node.priority_weight);
     assert_eq!(european_node.priority_weight, 50);
@@ -397,11 +398,11 @@ fn test_f5_04_composite_score_dead_node_penalty() {
 fn test_f5_05_composite_ranking_sorting_order() {
     let mut nodes = vec![
         ("37.230.192.51", compute_composite_score(RoutingPreference::PreferEurope10G, 15, 800, 0, 500)),
-        ("83.220.169.155", compute_composite_score(RoutingPreference::PreferEurope10G, 50, 110, 50, 10000)),
-        ("212.109.195.93", compute_composite_score(RoutingPreference::PreferEurope10G, 55, 120, 45, 10000)),
+        ("192.0.2.10", compute_composite_score(RoutingPreference::PreferEurope10G, 50, 110, 50, 10000)),
+        ("192.0.2.11", compute_composite_score(RoutingPreference::PreferEurope10G, 55, 120, 45, 10000)),
     ];
     nodes.sort_by_key(|(_, score)| *score);
-    assert_eq!(nodes[0].0, "83.220.169.155", "Comss Frankfurt 10G must be sorted first");
+    assert_eq!(nodes[0].0, "192.0.2.10", "Example Frankfurt 10G must be sorted first");
 }
 
 // =========================================================================
@@ -414,16 +415,16 @@ pub fn format_direct_nrpt_nameservers(substituters: &[&str]) -> String {
 
 #[test]
 fn test_f6_01_direct_nrpt_omits_127_0_0_53() {
-    let servers = &["111.88.96.50", "83.220.169.155", "212.109.195.93"];
+    let servers = &["111.88.96.50", "192.0.2.10", "192.0.2.11"];
     let ns_string = format_direct_nrpt_nameservers(servers);
     assert!(!ns_string.contains("127.0.0.53"), "Direct NRPT must omit local daemon hop 127.0.0.53");
 }
 
 #[test]
 fn test_f6_02_direct_nrpt_nameservers_format() {
-    let servers = &["111.88.96.50", "83.220.169.155", "212.109.195.93"];
+    let servers = &["111.88.96.50", "192.0.2.10", "192.0.2.11"];
     let ns_string = format_direct_nrpt_nameservers(servers);
-    assert_eq!(ns_string, "111.88.96.50;83.220.169.155;212.109.195.93");
+    assert_eq!(ns_string, "111.88.96.50;192.0.2.10;192.0.2.11");
 }
 
 #[test]
@@ -447,7 +448,7 @@ fn test_f6_04_direct_nrpt_registry_values_spec() {
 #[test]
 fn test_f6_05_macos_resolver_file_generation() {
     let domain = "generativelanguage.googleapis.com";
-    let servers = ["111.88.96.50", "83.220.169.155"];
+    let servers = ["111.88.96.50", "192.0.2.10"];
     let mut content = format!("# ANTIGRAVITY-BYPASS-RUSSIA\n# {}\n", domain);
     for s in &servers {
         content.push_str(&format!("nameserver {}\n", s));
@@ -455,7 +456,7 @@ fn test_f6_05_macos_resolver_file_generation() {
     content.push_str("port 53\nsearch_order 1\ntimeout 2\n");
 
     assert!(content.contains("nameserver 111.88.96.50"));
-    assert!(content.contains("nameserver 83.220.169.155"));
+    assert!(content.contains("nameserver 192.0.2.10"));
     assert!(content.contains("timeout 2"));
 }
 
@@ -497,7 +498,7 @@ fn test_f7_01_hosts_block_markers() {
 
 #[test]
 fn test_f7_02_hosts_strip_block_integrity() {
-    let initial = "127.0.0.1 localhost\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n83.220.169.155 generativelanguage.googleapis.com\n# END ANTIGRAVITY-BYPASS-RUSSIA\n::1 localhost\n";
+    let initial = "127.0.0.1 localhost\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n192.0.2.10 generativelanguage.googleapis.com\n# END ANTIGRAVITY-BYPASS-RUSSIA\n::1 localhost\n";
     let stripped = strip_hosts_block(initial);
     assert_eq!(stripped, "127.0.0.1 localhost\n::1 localhost\n");
 }
@@ -519,15 +520,15 @@ fn test_f7_03_hosts_bandwidth_threshold_filtering() {
 fn test_f7_04_hosts_max_fallbacks_limit() {
     const MAX_FALLBACKS: usize = 3;
     let candidates = vec![
-        "83.220.169.155",
-        "212.109.195.93",
+        "192.0.2.10",
+        "192.0.2.11",
         "111.88.96.50",
         "111.88.96.51",
-        "195.133.25.16",
+        "192.0.2.12",
     ];
     let truncated: Vec<&str> = candidates.into_iter().take(MAX_FALLBACKS).collect();
     assert_eq!(truncated.len(), 3);
-    assert_eq!(truncated, vec!["83.220.169.155", "212.109.195.93", "111.88.96.50"]);
+    assert_eq!(truncated, vec!["192.0.2.10", "192.0.2.11", "111.88.96.50"]);
 }
 
 #[test]
@@ -535,7 +536,7 @@ fn test_f7_05_hosts_atomic_write_simulation() {
     let temp = TempTestDir::new("hosts_atomic");
     let target = temp.write_file("hosts", "127.0.0.1 localhost\n");
 
-    let updated_content = format!("{}\n{}\n83.220.169.155 generativelanguage.googleapis.com\n{}\n",
+    let updated_content = format!("{}\n{}\n192.0.2.10 generativelanguage.googleapis.com\n{}\n",
         temp.read_file("hosts").trim_end(), START_MARK, END_MARK);
 
     let tmp_path = temp.file_path("hosts.tmp");
@@ -544,7 +545,7 @@ fn test_f7_05_hosts_atomic_write_simulation() {
 
     let final_content = temp.read_file("hosts");
     assert!(final_content.contains(START_MARK));
-    assert!(final_content.contains("83.220.169.155"));
+    assert!(final_content.contains("192.0.2.10"));
 }
 
 // =========================================================================
@@ -553,11 +554,11 @@ fn test_f7_05_hosts_atomic_write_simulation() {
 
 #[test]
 fn test_f8_01_hosts_clean_rollback() {
-    let hosts_with_block = "127.0.0.1 localhost\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n83.220.169.155 cloudcode-pa.googleapis.com\n# END ANTIGRAVITY-BYPASS-RUSSIA\n";
+    let hosts_with_block = "127.0.0.1 localhost\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n192.0.2.10 cloudcode-pa.googleapis.com\n# END ANTIGRAVITY-BYPASS-RUSSIA\n";
     let cleaned = strip_hosts_block(hosts_with_block);
     assert!(!cleaned.contains(START_MARK));
     assert!(!cleaned.contains(END_MARK));
-    assert!(!cleaned.contains("83.220.169.155"));
+    assert!(!cleaned.contains("192.0.2.10"));
     assert_eq!(cleaned.trim(), "127.0.0.1 localhost");
 }
 
@@ -598,7 +599,7 @@ fn test_f8_03_macos_resolver_cleanup() {
 
 #[test]
 fn test_f8_04_static_routes_clean_deletion() {
-    let pinned_ips = ["111.88.96.50", "83.220.169.155", "212.109.195.93"];
+    let pinned_ips = ["111.88.96.50", "192.0.2.10", "192.0.2.11"];
     let delete_commands: Vec<String> = pinned_ips
         .iter()
         .map(|ip| format!("route delete {}", ip))
@@ -667,8 +668,8 @@ fn test_f9_01_benchmark_table_headers() {
 fn test_f9_02_benchmark_leader_identification() {
     let results = vec![
         BenchmarkResult {
-            name: "Comss.one (Frankfurt Anycast 10G)".into(),
-            ip: "83.220.169.155".into(),
+            name: "relay.example (Frankfurt Anycast 10G)".into(),
+            ip: "192.0.2.10".into(),
             tcp_rtt_ms: 28,
             tls_rtt_ms: 34,
             est_ttft_ms: 62,
@@ -691,7 +692,7 @@ fn test_f9_02_benchmark_leader_identification() {
     ];
     let formatted = format_benchmark_table(&results);
     assert!(formatted.contains("[✓ Лидер]"));
-    assert!(formatted.contains("83.220.169.155"));
+    assert!(formatted.contains("192.0.2.10"));
 }
 
 #[test]

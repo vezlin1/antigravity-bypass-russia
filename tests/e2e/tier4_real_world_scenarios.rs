@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn test_t4_01_antigravity_ide_cold_start_european_anycast() {
-    let candidate_ips = ["83.220.169.155", "212.109.195.93", "111.88.96.50"];
+    let candidate_ips = ["192.0.2.10", "192.0.2.11", "111.88.96.50"];
     let direct_nrpt_entry = format_direct_nrpt_nameservers(&candidate_ips);
     assert!(!direct_nrpt_entry.contains("127.0.0.53"));
 
@@ -58,7 +58,7 @@ fn test_t4_02_high_speed_gemini_streaming_zero_stutter() {
 fn test_t4_03_option1_direct_nrpt_switch_from_vpn() {
     let physical_gateway = "192.168.1.1";
     let if_index = 12;
-    let smartdns_ips = ["111.88.96.50", "83.220.169.155", "212.109.195.93"];
+    let smartdns_ips = ["111.88.96.50", "192.0.2.10", "192.0.2.11"];
 
     let mut pinned_routes = Vec::new();
     for ip in &smartdns_ips {
@@ -70,7 +70,7 @@ fn test_t4_03_option1_direct_nrpt_switch_from_vpn() {
     assert_eq!(pinned_routes.len(), 3);
 
     let nrpt_ns = format_direct_nrpt_nameservers(&smartdns_ips);
-    assert_eq!(nrpt_ns, "111.88.96.50;83.220.169.155;212.109.195.93");
+    assert_eq!(nrpt_ns, "111.88.96.50;192.0.2.10;192.0.2.11");
     assert!(!nrpt_ns.contains("127.0.0.53"));
 }
 
@@ -79,11 +79,11 @@ fn test_t4_04_live_benchmark_probing_7_relays_leader_selection() {
     let mut results = Vec::new();
     for node in TEST_MULTI_PROVIDER_RELAYS.iter() {
         let (tcp_rtt, tls_rtt, bw, is_up) = match node.ip {
-            "83.220.169.155" => (25u128, 35u128, 15000.0, true),
+            "192.0.2.10" => (25u128, 35u128, 15000.0, true),
             "111.88.96.50" => (20u128, 45u128, 9000.0, true),
-            "212.109.195.93" => (28u128, 38u128, 14000.0, true),
+            "192.0.2.11" => (28u128, 38u128, 14000.0, true),
             "111.88.96.51" => (22u128, 55u128, 8000.0, true),
-            "195.133.25.16" => (35u128, 42u128, 9500.0, true),
+            "192.0.2.12" => (35u128, 42u128, 9500.0, true),
             "45.155.204.190" => (15u128, 90u128, 2000.0, true),
             "37.230.192.51" => (16u128, 110u128, 1500.0, true),
             _ => (0, 0, 0.0, false),
@@ -121,7 +121,7 @@ fn test_t4_04_live_benchmark_probing_7_relays_leader_selection() {
     let table = format_benchmark_table(&results);
 
     assert_eq!(results.len(), 7);
-    assert_eq!(results[0].ip, "83.220.169.155", "Comss Frankfurt 10G Anycast must be the leader");
+    assert_eq!(results[0].ip, "192.0.2.10", "Example Frankfurt 10G Anycast must be the leader");
     assert!(table.contains("[✓ Лидер]"));
 }
 
@@ -133,7 +133,7 @@ fn test_t4_05_full_lifecycle_activation_traffic_clean_rollback() {
 
     // 1. Activate
     let active_block = format!(
-        "{}\n{}\n83.220.169.155 daily-cloudcode-pa.googleapis.com\n83.220.169.155 generativelanguage.googleapis.com\n{}\n",
+        "{}\n{}\n192.0.2.10 daily-cloudcode-pa.googleapis.com\n192.0.2.10 generativelanguage.googleapis.com\n{}\n",
         original_hosts.trim_end(),
         START_MARK,
         END_MARK

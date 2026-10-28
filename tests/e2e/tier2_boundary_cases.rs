@@ -182,11 +182,11 @@ fn test_f3_b01_empty_relay_list_handling() {
 #[test]
 fn test_f3_b02_duplicate_ip_entries_filter() {
     use std::collections::HashSet;
-    let ips = ["83.220.169.155", "111.88.96.50", "83.220.169.155", "212.109.195.93"];
+    let ips = ["192.0.2.10", "111.88.96.50", "192.0.2.10", "192.0.2.11"];
     let mut unique = HashSet::new();
     let dedup: Vec<&str> = ips.iter().copied().filter(|ip| unique.insert(*ip)).collect();
     assert_eq!(dedup.len(), 3);
-    assert_eq!(dedup, vec!["83.220.169.155", "111.88.96.50", "212.109.195.93"]);
+    assert_eq!(dedup, vec!["192.0.2.10", "111.88.96.50", "192.0.2.11"]);
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn test_f3_b03_invalid_ipv4_octet_parser() {
     assert!(parse_ipv4("256.0.0.1").is_err());
     assert!(parse_ipv4("192.168.1.1.1").is_err());
     assert!(parse_ipv4("not_an_ip").is_err());
-    assert!(parse_ipv4("83.220.169.155").is_ok());
+    assert!(parse_ipv4("192.0.2.10").is_ok());
 }
 
 #[test]
@@ -208,7 +208,7 @@ fn test_f3_b04_ipv6_address_filtering() {
     };
     assert_eq!(parse_as_ipv4_only("::1"), None);
     assert_eq!(parse_as_ipv4_only("2001:4860:4860::8888"), None);
-    assert!(parse_as_ipv4_only("83.220.169.155").is_some());
+    assert!(parse_as_ipv4_only("192.0.2.10").is_some());
 }
 
 #[test]
@@ -312,10 +312,10 @@ fn test_f5_b04_all_nodes_dead_pool() {
 #[test]
 fn test_f5_b05_single_node_pool() {
     let mut nodes = vec![
-        ("83.220.169.155", compute_composite_score(RoutingPreference::PreferEurope10G, 40, 80, 50, 10000)),
+        ("192.0.2.10", compute_composite_score(RoutingPreference::PreferEurope10G, 40, 80, 50, 10000)),
     ];
     nodes.sort_by_key(|(_, score)| *score);
-    assert_eq!(nodes[0].0, "83.220.169.155");
+    assert_eq!(nodes[0].0, "192.0.2.10");
 }
 
 // =========================================================================
@@ -339,11 +339,11 @@ fn test_f6_b02_wildcard_domain_normalization() {
 #[test]
 fn test_f6_b03_duplicate_nameserver_string_dedup() {
     use std::collections::HashSet;
-    let raw = ["83.220.169.155", "83.220.169.155", "111.88.96.50"];
+    let raw = ["192.0.2.10", "192.0.2.10", "111.88.96.50"];
     let mut seen = HashSet::new();
     let dedup: Vec<&str> = raw.iter().copied().filter(|s| seen.insert(*s)).collect();
     let joined = dedup.join(";");
-    assert_eq!(joined, "83.220.169.155;111.88.96.50");
+    assert_eq!(joined, "192.0.2.10;111.88.96.50");
 }
 
 #[test]
@@ -420,7 +420,7 @@ fn test_f7_b04_preexisting_user_mappings() {
 
 #[test]
 fn test_f7_b05_duplicate_hosts_blocks() {
-    let duplicate_blocks = "# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n83.220.169.155 test.com\n# END ANTIGRAVITY-BYPASS-RUSSIA\n127.0.0.1 localhost\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n111.88.96.50 test2.com\n# END ANTIGRAVITY-BYPASS-RUSSIA\n";
+    let duplicate_blocks = "# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n192.0.2.10 test.com\n# END ANTIGRAVITY-BYPASS-RUSSIA\n127.0.0.1 localhost\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n111.88.96.50 test2.com\n# END ANTIGRAVITY-BYPASS-RUSSIA\n";
     let stripped = strip_hosts_block(duplicate_blocks);
     assert_eq!(stripped.trim(), "127.0.0.1 localhost");
 }
@@ -534,7 +534,7 @@ fn test_f9_b03_extreme_ttft_display() {
 fn test_f9_b04_unicode_and_cyrillic_rendering() {
     let result = BenchmarkResult {
         name: "Франкфурт 10G Anycast".into(),
-        ip: "83.220.169.155".into(),
+        ip: "192.0.2.10".into(),
         tcp_rtt_ms: 25,
         tls_rtt_ms: 35,
         est_ttft_ms: 60,

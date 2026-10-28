@@ -136,12 +136,12 @@ mod tests {
             name: "custom".into(),
             addresses: vec!["192.0.2.1".parse().unwrap()],
         });
-        c.disabled_providers = vec!["comss.one".into()];
+        c.disabled_providers = vec!["geohide.ru".into()];
         c.provider_order = vec!["dns-ai.ru".into(), "custom".into()];
         let pool = from_config(&c).unwrap();
         assert_eq!(
             pool.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            ["dns-ai.ru", "custom", "geohide.ru"]
+            ["dns-ai.ru", "custom"]
         );
         assert!(
             pool[0].udp_addresses().is_empty(),

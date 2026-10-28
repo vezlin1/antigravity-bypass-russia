@@ -206,13 +206,13 @@ fn upgrade_builtin_defaults(config: &mut Config) {
             provider.bootstrap = current.clone();
         }
     }
-    let custom_xbox = config.extra_udp.iter().any(|p| p.name == "xbox-dns.ru")
-        || config.doh.iter().any(|p| p.name == "xbox-dns.ru");
-    if !custom_xbox {
-        config
-            .disabled_providers
-            .retain(|name| name != "xbox-dns.ru");
-        config.provider_order.retain(|name| name != "xbox-dns.ru");
+    for retired in ["xbox-dns.ru", "comss.one"] {
+        let custom = config.extra_udp.iter().any(|p| p.name == retired)
+            || config.doh.iter().any(|p| p.name == retired);
+        if !custom {
+            config.disabled_providers.retain(|name| name != retired);
+            config.provider_order.retain(|name| name != retired);
+        }
     }
 }
 
@@ -296,11 +296,14 @@ mod tests {
             let mut config: Config = serde_json::from_value(serde_json::json!({
                 "doh": [{"name": "dns-ai.ru", "url": "https://dns.dns-ai.ru/dns-query", "bootstrap": previous}],
                 "provider_order": ["xbox-dns.ru", "comss.one"],
-                "disabled_providers": ["xbox-dns.ru"],
+                "disabled_providers": ["xbox-dns.ru", "comss.one"],
                 "watch_region_errors": false
             })).unwrap();
             upgrade_builtin_defaults(&mut config);
             assert_eq!(config.doh[0].bootstrap, Config::default().doh[0].bootstrap);
+            assert!(config.provider_order.is_empty());
+            assert!(config.disabled_providers.is_empty());
+            assert!(validate(&config).is_ok());
             let upgraded = serde_json::to_value(&config).unwrap();
             upgrade_builtin_defaults(&mut config);
             assert_eq!(upgraded, serde_json::to_value(&config).unwrap());
@@ -308,7 +311,7 @@ mod tests {
         let mut config: Config = serde_json::from_value(serde_json::json!({
             "doh": [{"name": "dns-ai.ru", "url": "https://dns.dns-ai.ru/dns-query", "bootstrap": ["192.144.59.14", "186.246.49.127"]}],
             "provider_order": ["xbox-dns.ru", "comss.one"],
-            "disabled_providers": ["xbox-dns.ru"],
+            "disabled_providers": ["xbox-dns.ru", "comss.one"],
             "watch_region_errors": false
         })).unwrap();
         upgrade_builtin_defaults(&mut config);
@@ -317,14 +320,41 @@ mod tests {
         let pool = super::super::resolver_pool::from_config(&config).unwrap();
         assert_eq!(
             pool.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            ["dns-ai.ru", "comss.one", "geohide.ru"]
+            ["dns-ai.ru", "geohide.ru"]
         );
         config.provider_order = vec!["geohide.ru".into(), "dns-ai.ru".into()];
         let pool = super::super::resolver_pool::from_config(&config).unwrap();
         assert_eq!(
             pool.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            ["geohide.ru", "dns-ai.ru", "comss.one"]
+            ["geohide.ru", "dns-ai.ru"]
         );
+    }
+
+    #[test]
+    fn retired_provider_names_preserve_explicit_custom_definitions() {
+        for name in ["xbox-dns.ru", "comss.one"] {
+            for use_doh in [false, true] {
+                let mut config = Config::default();
+                if use_doh {
+                    config.doh.push(DohProvider {
+                        name: name.into(),
+                        url: "https://resolver.example/dns-query".into(),
+                        bootstrap: vec!["192.0.2.10".parse().unwrap()],
+                    });
+                } else {
+                    config.extra_udp.push(UdpProvider {
+                        name: name.into(),
+                        addresses: vec!["192.0.2.10".parse().unwrap()],
+                    });
+                }
+                config.provider_order = vec![name.into()];
+                config.disabled_providers = vec![name.into()];
+                let before = serde_json::to_value(&config).unwrap();
+                upgrade_builtin_defaults(&mut config);
+                assert_eq!(before, serde_json::to_value(&config).unwrap());
+                assert!(validate(&config).is_ok());
+            }
+        }
     }
 
     #[test]

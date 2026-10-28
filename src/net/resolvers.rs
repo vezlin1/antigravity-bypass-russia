@@ -17,16 +17,10 @@ pub struct Provider {
     pub v4: &'static [&'static str],
 }
 
-pub const PROVIDERS: &[Provider] = &[
-    Provider {
-        name: "comss.one",
-        v4: &["83.220.169.155", "212.109.195.93", "195.133.25.16"],
-    },
-    Provider {
-        name: "geohide.ru",
-        v4: &["45.155.204.190", "37.230.192.51"],
-    },
-];
+pub const PROVIDERS: &[Provider] = &[Provider {
+    name: "geohide.ru",
+    v4: &["45.155.204.190", "37.230.192.51"],
+}];
 
 const REFERENCE_V4: &[&str] = &["8.8.8.8", "1.1.1.1"];
 const REFERENCE_STUBS: [Ipv4Addr; 2] = [Ipv4Addr::new(8, 6, 112, 0), Ipv4Addr::new(8, 47, 69, 0)];

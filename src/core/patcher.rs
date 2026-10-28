@@ -187,12 +187,48 @@ fn plan_x64_cli(data: &[u8], legacy_cli: bool) -> Result<Plan, String> {
             changes += 1;
         }
     }
+    let mut existing = gates.len() - changes;
+    let mut hub_sites = 0;
+    // New IDEs run agy --hub, which also uses PersonalAuthValidator.Validate.
+    // Older CLI builds may lack this gate. Keep the legacy planner byte-exact
+    // for backup migration, and include both gates in the current transaction.
+    if !legacy_cli {
+        let file = object::File::parse(data).map_err(|e| e.to_string())?;
+        for section in file.sections().filter(|s| s.kind() == SectionKind::Text) {
+            let Some((start, size)) = section.file_range() else {
+                continue;
+            };
+            let start = usize::try_from(start).map_err(|_| "Некорректное смещение секции")?;
+            let end = start
+                .checked_add(usize::try_from(size).map_err(|_| "Некорректная секция")?)
+                .ok_or("Переполнение секции")?;
+            let bytes = output
+                .get_mut(start..end)
+                .ok_or("Секция за пределами файла")?;
+            let (stock, patched) = apply_pattern(
+                bytes,
+                regex_mgr_x64_orig(),
+                regex_mgr_x64_patched(),
+                MGR_GATE_X64_FIX,
+                0,
+                1,
+            )?;
+            hub_sites += stock + patched;
+            changes += stock;
+            existing += patched;
+        }
+        if hub_sites > 1 {
+            return Err("Неоднозначная проверка авторизации agy --hub; файл не изменён".into());
+        }
+    }
     Ok(Plan {
         data: output,
         changes,
-        existing: gates.len() - changes,
+        existing,
         profile: if legacy_cli {
             "agy-x64-long-v1"
+        } else if hub_sites > 0 {
+            "agy-x64-cli-hub-v3"
         } else {
             "agy-x64-long-v2"
         }
@@ -666,6 +702,46 @@ pub fn restore_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn x64_hub_gate_upgrade_is_transactional_and_reversible() {
+        let cli = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x00\x00\x00\x00";
+        let hub = b"\x80\x78\x08\x00\x74\x0a\x48\x8b\x44\x24\x20\x48\x89\x44\x60";
+        let stock = pe_fixture(&[cli.as_slice(), hub.as_slice()].concat(), 0x8664);
+        let p = plan_binary(&stock, TargetKind::AgyCli).unwrap();
+        assert_eq!((p.changes, p.existing), (2, 0));
+        assert_eq!(p.profile, "agy-x64-cli-hub-v3");
+        assert_eq!(
+            plan_binary(&p.data, TargetKind::AgyCli).unwrap().existing,
+            2
+        );
+        let mut old = stock.clone();
+        old[521..525].copy_from_slice(CLI_GATE_X64_LONG_FIX);
+        assert_eq!(
+            state_for_data(&old, TargetKind::AgyCli),
+            BinaryState::PartiallyPatched
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let target = FoundTarget {
+            path: dir.path().join("agy.exe"),
+            kind: TargetKind::AgyCli,
+            name: "agy".into(),
+        };
+        fs::write(&target.path, &old).unwrap();
+        assert!(patch_target(&target).is_err());
+        assert_eq!(fs::read(&target.path).unwrap(), old);
+        journal::apply(&target.path, Some(&old), &stock, "fixture-reset").unwrap();
+        journal::retire(&target.path, Some(&stock)).unwrap();
+        journal::apply(&target.path, Some(&stock), &old, "agy-x64-long-v2").unwrap();
+        assert_eq!(patch_target(&target).unwrap(), PatchOutcome::Changed(1));
+        assert_eq!(patch_target(&target).unwrap(), PatchOutcome::AlreadyPatched);
+        assert_eq!(restore_target(&target).unwrap(), PatchOutcome::Restored);
+        assert_eq!(fs::read(&target.path).unwrap(), stock);
+        let ambiguous = pe_fixture(
+            &[cli.as_slice(), hub.as_slice(), hub.as_slice()].concat(),
+            0x8664,
+        );
+        assert!(plan_binary(&ambiguous, TargetKind::AgyCli).is_err());
+    }
     #[cfg(unix)]
     #[test]
     fn symlink_target_is_not_replaced() {
@@ -813,19 +889,38 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].kind, TargetKind::AgyCli);
         let stock = fs::read(path).unwrap();
+        let hub = plan_binary(&stock, TargetKind::LanguageServer).ok();
+        let hub_count = hub.as_ref().map_or(0, |p| p.changes);
+        let hub_bytes = hub.as_ref().map_or(0, |p| {
+            stock.iter().zip(&p.data).filter(|(a, b)| a != b).count()
+        });
         let patched = plan_binary(&stock, TargetKind::AgyCli).unwrap();
-        assert_eq!((patched.changes, patched.existing), (gates, 0));
+        assert_eq!((patched.changes, patched.existing), (gates + hub_count, 0));
         assert_eq!(
             stock
                 .iter()
                 .zip(&patched.data)
                 .filter(|(a, b)| a != b)
                 .count(),
-            gates * 4
+            gates * 4 + hub_bytes
         );
         let repeated = plan_binary(&patched.data, TargetKind::AgyCli).unwrap();
-        assert_eq!((repeated.changes, repeated.existing), (0, gates));
+        assert_eq!(
+            (repeated.changes, repeated.existing),
+            (0, gates + hub_count)
+        );
         assert_eq!(repeated.data, patched.data);
+        // Optional artifact for live testing in a separate VM. Never overwrite
+        // the official input fixture, including through a symlink.
+        if let Some(output) = std::env::var_os("AGY_X64_PATCH_OUTPUT") {
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(output)
+                .unwrap();
+            file.write_all(&patched.data).unwrap();
+        }
         drop(repeated);
         drop(patched);
         let legacy = plan_binary_with_cli_profile(&stock, TargetKind::AgyCli, true).unwrap();
@@ -850,7 +945,10 @@ mod tests {
                     prepare_for_write(&target.path, legacy.data.clone(), target.kind).unwrap();
                 journal::apply(&target.path, Some(&stock), &signed, "agy-x64-long-v1").unwrap();
             }
-            assert_eq!(patch_target(&target).unwrap(), PatchOutcome::Changed(gates));
+            assert_eq!(
+                patch_target(&target).unwrap(),
+                PatchOutcome::Changed(gates + hub_count)
+            );
             assert_eq!(patch_target(&target).unwrap(), PatchOutcome::AlreadyPatched);
             assert_eq!(restore_target(&target).unwrap(), PatchOutcome::Restored);
             assert_eq!(fs::read(&target.path).unwrap(), stock);

@@ -286,8 +286,17 @@ fn cli_search_dirs() -> Vec<PathBuf> {
     for home in crate::system::env::get_user_homes() {
         dirs.push(home.join(".local/bin"));
         dirs.push(home.join(".agy/bin"));
+        dirs.push(home.join(".gemini/bin"));
     }
     dirs
+}
+
+#[test]
+fn cli_search_includes_ide_managed_installations() {
+    let dirs = cli_search_dirs();
+    for home in crate::system::env::get_user_homes() {
+        assert!(dirs.contains(&home.join(".gemini/bin")));
+    }
 }
 
 /// Only mutating commands call recovery. Read-only discovery/status never
