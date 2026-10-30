@@ -58,6 +58,10 @@ with tempfile.TemporaryDirectory(prefix="ag wrapper ") as temporary:
             arch = "arm64" if os.uname().machine == "arm64" else "x64"
             shutil.copyfile(binary, folder / f"antigravity-bypass-russia-macos-{arch}")
             (folder / f"antigravity-bypass-russia-macos-{arch}").chmod(0o755)
+        elif os.uname().sysname == "Linux":
+            arch = "arm64" if os.uname().machine in ("aarch64", "arm64") else "x64"
+            shutil.copyfile(binary, folder / f"antigravity-bypass-russia-linux-{arch}")
+            (folder / f"antigravity-bypass-russia-linux-{arch}").chmod(0o755)
         result = run([bash, "-n", str(wrapper)])
         assert result.returncode == 0, result.stderr
         # Git Bash rewrites /-prefixed arguments for native programs unless disabled.

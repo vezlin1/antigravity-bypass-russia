@@ -7,7 +7,7 @@
 ### ⚡ Разблокировка Google Antigravity & Gemini в России
 **Без VPN • Без смены страны Google-аккаунта • На полной скорости вашего интернета**
 
-[![Платформы](https://img.shields.io/badge/Платформа-Windows_10%2F11_•_macOS-0078D4.svg?style=flat-square&logo=windows&logoColor=white)](README.md)
+[![Платформы](https://img.shields.io/badge/Платформа-Windows_•_macOS_•_Linux-0078D4.svg?style=flat-square&logo=linux&logoColor=white)](README.md)
 [![Сеть](https://img.shields.io/badge/Сеть-VPN_не_нужен-2ea44f.svg?style=flat-square&logo=shield&logoColor=white)](README.md)
 [![Размер](https://img.shields.io/badge/Размер-1.08_МБ_(Rust)-8A2BE2.svg?style=flat-square&logo=rust&logoColor=white)](https://github.com/vezlin1/antigravity-bypass-russia/releases)
 [![Лицензия](https://img.shields.io/badge/Лицензия-MIT-informational.svg?style=flat-square)](LICENSE)
@@ -109,6 +109,70 @@ chmod +x scripts/unlock_and_restore.sh
 
 ---
 
+### 🐧 Linux (Ubuntu, Debian, Fedora, Arch Linux, ARM64 и др.)
+
+Готовые Linux-сборки требуют glibc 2.35+ и OpenSSL 3 (например, Ubuntu 22.04+ или Debian 12+). Нужны `iproute2`, `procps`, `psmisc`, `lsof` и `sudo`/PolicyKit.
+
+В системах с systemd-resolved сохраняются исходные DNS и домены интерфейса; без него поддерживается обычный файл `/etc/resolv.conf`. Если другая служба управляет этим файлом через символическую ссылку, утилита сохраняет её настройки и сообщает о необходимости отдельной настройки DNS. Для Gemini и AI Studio используется локальный DNS-релей; обычные домены передаются исходным DNS-серверам. Откат восстанавливает сохранённые настройки. Без systemd фоновый процесс работает до перезапуска системы.
+
+Перед патчем закройте приложение. Ошибки проверки `lsof` останавливают запись.
+
+#### Вариант 1: Установка в один клик (Рекомендуется)
+Выполните команду автоматической установки в терминале:
+```bash
+curl -fsSL https://raw.githubusercontent.com/vezlin1/antigravity-bypass-russia/main/scripts/install.sh | bash
+```
+Скрипт автоматически определит вашу архитектуру (**x86_64** или **ARM64**), установит утилиту в систему и создаст команды:
+* `antigravity-bypass-russia`
+* `ag-bypass`
+
+Запустите утилиту командой `ag-bypass`, введите **`1`** (**`Полная разблокировка`**) и нажмите **Enter**.
+
+#### Вариант 2: Готовый пакет .deb или бинарный файл
+* **Пакет `.deb` (Ubuntu / Debian / Linux Mint):**
+  Скачайте [**`antigravity-bypass-russia-linux-x64.deb`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest) и установите:
+  ```bash
+  sudo dpkg -i antigravity-bypass-russia-linux-x64.deb
+  ```
+* **Прямой запуск бинарного файла:**
+  ```bash
+  # Для 64-битных ПК (x86_64):
+  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
+
+  # Для ARM64 (Raspberry Pi, Asahi Linux, ARM-серверы):
+  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-arm64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
+  ```
+* **Arch Linux / Manjaro:**
+  В репозитории доступен [`packages/arch/PKGBUILD`](packages/arch/PKGBUILD) для быстрой сборки и установки через `makepkg -si`.
+
+#### Вариант 3: Запуск из репозитория
+<details>
+<summary><b>Инструкция для сборки из репозитория (требуется Rust)</b></summary>
+
+Установите системные зависимости (если ещё не установлены):
+```bash
+# Ubuntu / Debian
+sudo apt install build-essential pkg-config libssl-dev lsof iproute2 procps psmisc
+
+# Fedora
+sudo dnf install gcc pkgconf-pkg-config openssl-devel lsof iproute procps-ng psmisc
+
+# Arch Linux
+sudo pacman -S base-devel openssl lsof iproute2 procps-ng psmisc
+```
+
+Склонируйте репозиторий и запустите скрипт:
+```bash
+git clone https://github.com/vezlin1/antigravity-bypass-russia.git
+cd antigravity-bypass-russia
+chmod +x scripts/unlock_and_restore.sh
+./scripts/unlock_and_restore.sh
+```
+*(Запускайте без `sudo` — скрипт сам соберёт движок через Cargo от вашего пользователя и запросит `sudo` только при установке службы и обновлении сетевых настроек).*
+</details>
+
+---
+
 ## ⚙️ Как это работает
 
 Утилита работает точечно и полностью локально на вашем компьютере:
@@ -189,7 +253,7 @@ chmod +x scripts/unlock_and_restore.sh
 2. Выберите пункт **`6. ПОЛНЫЙ ОТКАТ`**.
 3. Программа автоматически:
    - Восстановит оригинальные файлы ядра и интерфейса из резервных копий `.bak`;
-   - Удалит записи маршрутизации (NRPT на Windows / `/etc/resolver/` на macOS);
+   - Удалит записи маршрутизации (NRPT на Windows / `/etc/resolver/` на macOS / `/etc/hosts` и systemd-сервис на Linux);
    - Сбросит системный кэш DNS и кэш сессий V8;
    - Очистит переменные окружения.
 

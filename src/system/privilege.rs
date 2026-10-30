@@ -221,15 +221,35 @@ pub fn ensure_admin() {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let current_exe = std::env::current_exe().unwrap_or_default();
-        let args: Vec<String> = std::env::args().skip(1).collect();
-        let mut cmd = Command::new("/usr/bin/sudo");
-        cmd.arg(current_exe);
-        for a in args {
-            cmd.arg(a);
-        }
-        if let Ok(mut child) = cmd.spawn() {
-            let status = child.wait().unwrap_or_default();
-            std::process::exit(status.code().unwrap_or(1));
+        let args = super::user_context::elevation_arguments().unwrap_or_else(|error| {
+            eprintln!("Не удалось сохранить профиль пользователя: {error}");
+            std::process::exit(1);
+        });
+        let is_tty = unsafe { libc::isatty(0) == 1 };
+        if is_tty {
+            let mut cmd = Command::new("sudo");
+            cmd.arg(current_exe);
+            for a in args {
+                cmd.arg(a);
+            }
+            if let Ok(mut child) = cmd.spawn() {
+                let status = child.wait().unwrap_or_default();
+                std::process::exit(status.code().unwrap_or(1));
+            }
+        } else {
+            if let Ok(mut child) = Command::new("pkexec").arg(&current_exe).args(&args).spawn() {
+                let status = child.wait().unwrap_or_default();
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            let mut cmd = Command::new("sudo");
+            cmd.arg(current_exe);
+            for a in args {
+                cmd.arg(a);
+            }
+            if let Ok(mut child) = cmd.spawn() {
+                let status = child.wait().unwrap_or_default();
+                std::process::exit(status.code().unwrap_or(1));
+            }
         }
         std::process::exit(1);
     }

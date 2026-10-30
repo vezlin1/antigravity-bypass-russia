@@ -7,6 +7,11 @@ fn command(
     args: &[&str],
     budget: Duration,
 ) -> Result<String, &'static str> {
+    #[cfg(target_os = "linux")]
+    let program = {
+        let name = program.as_ref().to_str().ok_or("invalid_command")?;
+        system::command::executable(name).map_err(|_| "command_unavailable")?
+    };
     // A temporary output file avoids pipe deadlocks and inheriting a live reader on timeout.
     let mut output = tempfile::tempfile().map_err(|_| "temporary_file_failed")?;
     let mut child = system::process::no_window(&mut Command::new(program))
@@ -265,7 +270,23 @@ pub(super) fn network(ips: &[Ipv4Addr]) -> Value {
     json!({"status": "ok", "dns": dns, "routes": routes, "resolver_files": files})
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+pub(super) fn network(_ips: &[Ipv4Addr]) -> Value {
+    let routes = command("ip", &["route"], Duration::from_secs(2))
+        .map(|out| json!({"status": "ok", "output": out.trim()}))
+        .unwrap_or_else(|e| unavailable(&e));
+    let dns = command("resolvectl", &["status"], Duration::from_secs(2))
+        .or_else(|_| command("systemd-resolve", &["--status"], Duration::from_secs(2)))
+        .map(|out| json!({"status": "ok", "output": out.trim()}))
+        .unwrap_or_else(|_| {
+            std::fs::read_to_string("/etc/resolv.conf")
+                .map(|c| json!({"status": "ok", "resolv_conf": c.trim()}))
+                .unwrap_or_else(|e| unavailable(&e.to_string()))
+        });
+    json!({"status": "ok", "dns": dns, "routes": routes})
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub(super) fn network(_ips: &[Ipv4Addr]) -> Value {
     unavailable("unsupported_platform")
 }
@@ -293,7 +314,28 @@ pub(super) fn os_version() -> Value {
             Err(e) => unavailable(e),
         }
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = std::fs::read_to_string("/etc/os-release") {
+            let mut name = String::new();
+            let mut version = String::new();
+            for line in content.lines() {
+                if let Some(val) = line.strip_prefix("PRETTY_NAME=") {
+                    name = val.trim_matches('"').to_string();
+                } else if let Some(val) = line.strip_prefix("VERSION_ID=") {
+                    version = val.trim_matches('"').to_string();
+                }
+            }
+            if !name.is_empty() {
+                return json!({"status": "ok", "distro": name, "version": version});
+            }
+        }
+        if let Ok(out) = command("uname", &["-sr"], Duration::from_secs(2)) {
+            return json!({"status": "ok", "version": version_text(out.trim())});
+        }
+        unavailable("unsupported_platform")
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     unavailable("unsupported_platform")
 }
 

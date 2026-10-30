@@ -24,10 +24,14 @@ jobs:
         include:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: macos-15
+          - os: macos-latest
             target: aarch64-apple-darwin
           - os: macos-15-intel
             target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,14 +40,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install Linux dependencies (x86_64)
+        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config lsof iproute2 openssl
+      - name: Install Linux dependencies (ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
       - name: Isolated regression tests
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo test --locked --bin antigravity-bypass-russia --target ${{ matrix.target }}
       - name: Socket regression tests
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo test --locked --test socket_tests --target ${{ matrix.target }}
       - name: Official CLI profiles and rollback
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: python tests/verify_cli_profiles.py --target ${{ matrix.target }}
       - name: Current App, IDE and CLI versions
         run: python tests/verify_upstream_versions.py
+      - name: Installer platform selection
+        run: python tests/verify_installer.py
+
       - name: Launcher compatibility
         run: python tests/verify_wrappers.py
       - name: macOS bundle format
@@ -53,8 +73,12 @@ jobs:
       - name: macOS owner build kit
         run: python tests/verify_macos_build_kit.py
       - name: Build executable for read-only smoke checks
-        run: cargo build --locked --bin antigravity-bypass-russia --target ${{ matrix.target }}
+        run: cargo build --locked --bin antigravity-bypass-russia --target ${{ matrix.target }} ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--features vendored-openssl' || '' }}
+      - name: Linux setup and rollback in isolated namespaces
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo python3 tests/verify_linux_runtime.py target/${{ matrix.target }}/debug/antigravity-bypass-russia
       - name: Read-only CLI and diagnostic export
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: python tests/verify_release.py target/${{ matrix.target }}/debug/antigravity-bypass-russia${{ runner.os == 'Windows' && '.exe' || '' }}
       - name: Install Python 3.9 for packaging compatibility
         if: runner.os == 'Windows'

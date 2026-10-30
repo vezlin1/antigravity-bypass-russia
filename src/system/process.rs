@@ -232,6 +232,7 @@ pub fn stop_process_by_name(process_name: &str) {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = crate::system::command::output("killall", ["-9", process_name]);
+        let _ = crate::system::command::output("pkill", ["-9", "-x", process_name]);
     }
 }
 

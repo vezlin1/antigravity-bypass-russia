@@ -477,7 +477,43 @@ if ($mine.Count -gt 0) {
         }
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(out) = crate::system::command::output("ip", ["route", "show", "default"]) {
+            if out.status.success() {
+                let txt = String::from_utf8_lossy(&out.stdout);
+                for line in txt.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    let mut if_name = "";
+                    let mut gateway = "";
+                    for i in 0..parts.len() {
+                        if parts[i] == "dev" && i + 1 < parts.len() {
+                            if_name = parts[i + 1];
+                        } else if parts[i] == "via" && i + 1 < parts.len() {
+                            gateway = parts[i + 1];
+                        }
+                    }
+                    if !if_name.is_empty()
+                        && !if_name.starts_with("tun")
+                        && !if_name.starts_with("tap")
+                        && !if_name.starts_with("wg")
+                        && !if_name.starts_with("ppp")
+                    {
+                        let idx = unsafe {
+                            let c_name = std::ffi::CString::new(if_name).ok()?;
+                            libc::if_nametoindex(c_name.as_ptr())
+                        };
+                        if idx > 0 && !gateway.is_empty() {
+                            return Some((idx, gateway.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     None
 }
 
@@ -558,6 +594,56 @@ pub fn detect() -> Option<Egress> {
         }
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        let phys_gw = detect_physical();
+        if let Ok(out) = crate::system::command::output("ip", ["route", "get", "8.8.8.8"]) {
+            if out.status.success() {
+                let txt = String::from_utf8_lossy(&out.stdout);
+                let mut if_name = String::new();
+                let mut gateway = String::new();
+                let parts: Vec<&str> = txt.split_whitespace().collect();
+                for i in 0..parts.len() {
+                    if parts[i] == "dev" && i + 1 < parts.len() {
+                        if_name = parts[i + 1].to_string();
+                    } else if parts[i] == "via" && i + 1 < parts.len() {
+                        gateway = parts[i + 1].to_string();
+                    }
+                }
+                if !if_name.is_empty() {
+                    let vpn = if_name.starts_with("tun")
+                        || if_name.starts_with("tap")
+                        || if_name.starts_with("wg")
+                        || if_name.starts_with("ppp");
+                    let idx = unsafe {
+                        let c_name = std::ffi::CString::new(if_name.as_str()).ok()?;
+                        libc::if_nametoindex(c_name.as_ptr())
+                    };
+                    if idx > 0 {
+                        let gw = if !gateway.is_empty() {
+                            Some(gateway)
+                        } else {
+                            phys_gw.as_ref().map(|(_, g)| g.clone())
+                        };
+                        return Some(Egress {
+                            if_index: idx,
+                            gateway: gw,
+                            vpn_active: vpn,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some((phys, gw)) = phys_gw {
+            return Some(Egress {
+                if_index: phys,
+                gateway: Some(gw),
+                vpn_active: false,
+            });
+        }
+        None
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     None
 }

@@ -1,0 +1,25 @@
+# Maintainer: animesao <175932616+animesao@users.noreply.github.com>
+pkgname=antigravity-bypass-russia-bin
+pkgver=2.5.0
+pkgrel=1
+pkgdesc="Google Antigravity & Gemini bypass in Russia (No VPN, SmartDNS & SIMD Binary Patcher)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/vezlin1/antigravity-bypass-russia"
+license=('MIT')
+depends=('openssl' 'glibc' 'gcc-libs' 'iproute2' 'procps-ng' 'psmisc' 'lsof' 'sudo')
+provides=('antigravity-bypass-russia')
+conflicts=('antigravity-bypass-russia')
+
+source_x86_64=("antigravity-bypass-russia-x86_64-${pkgver}::https://github.com/vezlin1/antigravity-bypass-russia/releases/download/v${pkgver}/antigravity-bypass-russia-linux-x64")
+source_aarch64=("antigravity-bypass-russia-aarch64-${pkgver}::https://github.com/vezlin1/antigravity-bypass-russia/releases/download/v${pkgver}/antigravity-bypass-russia-linux-arm64")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+    if [ "$CARCH" = "x86_64" ]; then
+        install -Dm755 "${srcdir}/antigravity-bypass-russia-x86_64-${pkgver}" "${pkgdir}/usr/bin/antigravity-bypass-russia"
+    elif [ "$CARCH" = "aarch64" ]; then
+        install -Dm755 "${srcdir}/antigravity-bypass-russia-aarch64-${pkgver}" "${pkgdir}/usr/bin/antigravity-bypass-russia"
+    fi
+    ln -sf /usr/bin/antigravity-bypass-russia "${pkgdir}/usr/bin/ag-bypass"
+}

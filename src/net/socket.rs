@@ -297,7 +297,34 @@ pub fn bind_socket_to_interface(sock: &UdpSocket, if_index: u32) -> Result<(), S
         Ok(())
     }
 
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = sock.as_raw_fd();
+        let mut ifname = [0u8; libc::IF_NAMESIZE];
+        let name_ptr =
+            unsafe { libc::if_indextoname(if_index, ifname.as_mut_ptr() as *mut libc::c_char) };
+        if !name_ptr.is_null() {
+            let len = unsafe { libc::strlen(ifname.as_ptr() as *const libc::c_char) };
+            let result = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_BINDTODEVICE,
+                    ifname.as_ptr() as *const libc::c_void,
+                    (len + 1) as libc::socklen_t,
+                )
+            };
+            if result != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+        } else {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         let _ = (sock, if_index);
         Ok(())
@@ -496,9 +523,32 @@ pub fn get_os_network_status() -> String {
         lines.join("\n")
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
     {
-        "OS Network Stack Status (Linux): Standard kernel TCP stack active".to_string()
+        let mut lines = Vec::new();
+        lines.push("OS Network Stack Status (Linux sysctl Parameters):".to_string());
+
+        let sysctl_keys = [
+            ("net.ipv4.tcp_window_scaling", "TCP Window Scaling"),
+            ("net.core.rmem_max", "Core Max Receive Buffer"),
+            ("net.core.wmem_max", "Core Max Send Buffer"),
+            ("net.ipv4.tcp_fastopen", "TCP Fast Open"),
+        ];
+
+        for (key, label) in &sysctl_keys {
+            if let Ok(output) = crate::system::command::output("sysctl", ["-n", key]) {
+                let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !val.is_empty() {
+                    lines.push(format!("  - {}: {}", label, val));
+                }
+            }
+        }
+
+        if lines.len() == 1 {
+            lines.push("  - Unable to query sysctl TCP parameters".to_string());
+        }
+
+        lines.join("\n")
     }
 
     #[cfg(not(any(target_os = "windows", unix)))]
@@ -543,7 +593,16 @@ fn tcp_tunables() -> &'static [(&'static str, &'static str)] {
             ("net.inet.tcp.fastopen", "3"),
         ]
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        &[
+            ("net.ipv4.tcp_window_scaling", "1"),
+            ("net.core.rmem_max", "16777216"),
+            ("net.core.wmem_max", "16777216"),
+            ("net.ipv4.tcp_fastopen", "3"),
+        ]
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
         &[]
     }
@@ -569,7 +628,7 @@ fn capture_tcp() -> Result<TcpSnapshot, String> {
             }
         }
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     for (key, _) in tcp_tunables() {
         let out =
             crate::system::command::output("sysctl", ["-n", key]).map_err(|e| e.to_string())?;
@@ -796,6 +855,7 @@ fn read_legacy_heuristics() -> Option<String> {
 fn restore_legacy_tcp() -> Result<Vec<String>, String> {
     let original =
         parse_legacy_tcp(&fs::read_to_string(tcp_backup_path()).map_err(|e| e.to_string())?)?;
+    #[allow(unused_mut)]
     let mut current = capture_tcp()?.original;
     #[cfg(windows)]
     if let Some(value) = read_legacy_heuristics() {
@@ -821,6 +881,7 @@ fn restore_legacy_tcp() -> Result<Vec<String>, String> {
             unresolved.push(e);
         }
     }
+    #[allow(unused_mut)]
     let mut after = capture_tcp()?.original;
     #[cfg(windows)]
     if let Some(value) = read_legacy_heuristics() {

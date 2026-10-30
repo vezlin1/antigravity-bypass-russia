@@ -7,6 +7,8 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64) release_name=antigravity-bypass-russia-macos-arm64 ;;
   Darwin:x86_64) release_name=antigravity-bypass-russia-macos-x64 ;;
+  Linux:x86_64) release_name=antigravity-bypass-russia-linux-x64 ;;
+  Linux:aarch64) release_name=antigravity-bypass-russia-linux-arm64 ;;
   *) release_name=antigravity-bypass-russia ;;
 esac
 # A downloaded engine beside this launcher takes precedence over old builds.
@@ -35,7 +37,8 @@ fi
 for engine in "$repo_root/target/release/antigravity-bypass-russia" "$script_dir/$release_name" "$repo_root/$release_name"; do
   if [[ -x "$engine" ]]; then exec "$engine" "$@"; fi
 done
-printf '%s\n' 'Rust engine not found. Download and run the standalone macOS launcher:' >&2
-printf '%s\n' '  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh' >&2
+printf '%s\n' 'Rust engine not found. Download the standalone release for your platform:' >&2
+printf '%s\n' '  Linux:  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia' >&2
+printf '%s\n' '  macOS:  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh' >&2
 printf '%s\n' 'Or install Rust (https://rustup.rs) and run this repository script without sudo. The engine requests administrator privileges when needed.' >&2
 exit 1

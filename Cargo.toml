@@ -1,13 +1,17 @@
 [package]
 name = "antigravity-bypass-russia"
-version = "2.4.0"
+version = "2.5.0"
 edition = "2021"
 rust-version = "1.89"
 authors = ["Antigravity Contributors"]
 license = "MIT"
-description = "Clean & Fast Antigravity 2.0 / Gemini Bypass and Rollback Tool for Windows & macOS (No VPN, SmartDNS NRPT & SIMD Binary Patcher)"
+description = "Clean & Fast Antigravity 2.0 / Gemini Bypass and Rollback Tool for Windows, macOS & Linux (No VPN, SmartDNS NRPT & SIMD Binary Patcher)"
 readme = "README.md"
 keywords = ["antigravity", "antigravity-russia", "gemini", "dns-forwarder", "cross-platform"]
+
+[features]
+default = []
+vendored-openssl = ["native-tls/vendored"]
 
 [dependencies]
 regex = { version = "1.10", default-features = false, features = ["std", "perf"] }

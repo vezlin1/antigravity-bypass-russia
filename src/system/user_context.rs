@@ -64,13 +64,13 @@ pub fn initialize() -> Result<(), String> {
     let (arguments, handoff) = take_handoff(std::env::args_os().collect())?;
     #[cfg(windows)]
     windows::initialize(&handoff)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         if handoff.process.is_some() || handoff.path.is_some() {
-            return Err("Контекст Windows не поддерживается на macOS".into());
+            return Err("Контекст Windows не поддерживается на Unix".into());
         }
         if requires_profile(&arguments) || handoff.uid.is_some() {
-            macos::initialize(handoff.uid.as_deref())?;
+            unix::initialize(handoff.uid.as_deref())?;
         }
     }
     ARGUMENTS
@@ -78,11 +78,19 @@ pub fn initialize() -> Result<(), String> {
         .map_err(|_| "Контекст уже настроен".to_string())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn requires_profile(arguments: &[OsString]) -> bool {
     !matches!(
         arguments.get(1).and_then(|a| a.to_str()),
-        Some("-h" | "--help" | "help" | "-V" | "--version" | "version" | "--dns-forwarder")
+        Some(
+            "-h" | "--help"
+                | "help"
+                | "-V"
+                | "--version"
+                | "version"
+                | "--dns-forwarder"
+                | "--linux-dns-apply"
+        )
     )
 }
 
@@ -101,8 +109,8 @@ pub fn args() -> std::vec::IntoIter<String> {
         .into_iter()
 }
 
-#[cfg(target_os = "macos")]
-pub use macos::{elevation_arguments, home};
+#[cfg(unix)]
+pub use unix::{elevation_arguments, home};
 #[cfg(windows)]
 pub use windows::{elevation_arguments, environment_key};
 
@@ -515,7 +523,7 @@ mod windows {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn select_uid(
     real: u32,
     elevated: bool,
@@ -541,10 +549,10 @@ fn select_uid(
     (real != 0)
         .then_some(real)
         .or(console.filter(|id| *id != 0))
-        .ok_or_else(|| "Не найден пользователь macOS; запускайте утилиту из своей сессии".into())
+        .ok_or_else(|| "Не найден пользователь; запускайте утилиту из своей сессии".into())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(unix, test))]
 fn home_for_uid(
     uid: u32,
     lookup: impl FnOnce(u32) -> Result<PathBuf, String>,
@@ -556,8 +564,8 @@ fn home_for_uid(
     Ok(path)
 }
 
-#[cfg(target_os = "macos")]
-mod macos {
+#[cfg(unix)]
+mod unix {
     use super::*;
     use std::ffi::CStr;
     use std::os::unix::ffi::OsStrExt;

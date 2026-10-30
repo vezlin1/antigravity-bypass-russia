@@ -27,13 +27,31 @@ fn print_help() {
 }
 
 fn main() {
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, unix))]
     if let Err(error) = system::user_context::initialize() {
         eprintln!("Не удалось определить профиль пользователя: {error}");
         std::process::exit(1);
     }
     let args: Vec<String> = system::env::args().collect();
     let command = args.get(1).map(String::as_str).unwrap_or("");
+    #[cfg(target_os = "linux")]
+    if command == "--linux-dns-apply" {
+        if args.len() != 2 {
+            std::process::exit(2);
+        }
+        if unsafe { libc::geteuid() } != 0 {
+            std::process::exit(1);
+        }
+        if !net::wait_for_ready(std::time::Duration::from_secs(4), net::relay_ready) {
+            eprintln!("DNS-служба не подтвердила готовность; настройки DNS сохранены");
+            std::process::exit(1);
+        }
+        if let Err(error) = net::linux_dns::apply() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     #[cfg(target_os = "macos")]
     if command == "--endpoint-session" {
         if let Err(error) = core::endpoint_session::restore() {
@@ -58,6 +76,10 @@ fn main() {
     if matches!(command, "-V" | "--version" | "version") {
         println!("antigravity-bypass-russia v{}", env!("CARGO_PKG_VERSION"));
         return;
+    }
+    if command.is_empty() && args.len() > 1 {
+        eprintln!("Лишние аргументы. См. --help");
+        std::process::exit(2);
     }
     if !matches!(
         command,

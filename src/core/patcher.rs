@@ -448,7 +448,7 @@ fn state_for_data(data: &[u8], kind: TargetKind) -> BinaryState {
 }
 
 fn ensure_file_closed(path: &Path) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     {
         let holders = crate::system::file_lock::holders(&[path.to_path_buf()])?;
         if !holders.is_empty() {

@@ -8,6 +8,8 @@ pub const FORWARDER_FLAG: &str = "--dns-forwarder";
 pub const TASK_NAME: &str = "AntigravityBypassRussia";
 pub const LAUNCHD_LABEL: &str = "com.antigravity.bypass.russia";
 pub const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/com.antigravity.bypass.russia.plist";
+pub const SYSTEMD_SERVICE: &str = "/etc/systemd/system/antigravity-bypass-russia.service";
+pub const SYSTEMD_LABEL: &str = "antigravity-bypass-russia";
 pub const EXE_NAME: &str = if cfg!(target_os = "windows") {
     "ag_dns.exe"
 } else {
@@ -228,7 +230,7 @@ pub fn registered_state() -> Result<bool, String> {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        Ok(false)
+        Ok(linux_has_systemd() && Path::new(SYSTEMD_SERVICE).exists())
     }
 }
 
@@ -262,7 +264,9 @@ pub fn running_state() -> Result<bool, String> {
                 .eq_ignore_ascii_case(EXE_NAME)
         }))
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    return linux_worker_pids().map(|pids| !pids.is_empty());
+    #[cfg(target_os = "macos")]
     {
         #[cfg(target_os = "macos")]
         let args = vec!["-f".to_string(), format!("{} {}", EXE_NAME, FORWARDER_FLAG)];
@@ -279,6 +283,72 @@ pub fn running_state() -> Result<bool, String> {
             )),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_worker_pids() -> Result<Vec<i32>, String> {
+    let mut pids = Vec::new();
+    for entry in fs::read_dir("/proc").map_err(|e| e.to_string())?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        if stat
+            .rsplit_once(") ")
+            .is_some_and(|(_, rest)| rest.starts_with('Z'))
+        {
+            continue;
+        }
+        let executable = fs::read_link(entry.path().join("exe"));
+        if executable
+            .as_ref()
+            .is_err_and(|e| e.kind() == std::io::ErrorKind::PermissionDenied)
+            && stat.contains(&format!("({EXE_NAME}) "))
+        {
+            return Err("Не удалось проверить процесс DNS-службы; запустите проверку с правами администратора".into());
+        }
+        if executable.is_ok_and(|path| {
+            path == installed_exe()
+                || path.to_string_lossy() == format!("{} (deleted)", installed_exe().display())
+        }) {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+
+fn stop_worker() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let pids = linux_worker_pids()?;
+        for pid in &pids {
+            if unsafe { libc::kill(*pid, libc::SIGTERM) } != 0
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !linux_worker_pids()?.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        for pid in linux_worker_pids()?.iter().filter(|pid| pids.contains(pid)) {
+            if unsafe { libc::kill(*pid, libc::SIGKILL) } != 0
+                && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+            {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    crate::system::process::stop_process_by_name(EXE_NAME);
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -476,8 +546,14 @@ pub fn enable() -> Result<(), String> {
         {
             unload_mac_job()?;
         }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            if linux_has_systemd() && Path::new(SYSTEMD_SERVICE).exists() {
+                linux_systemctl(&["stop", SYSTEMD_LABEL])?;
+            }
+        }
 
-        crate::system::process::stop_process_by_name(EXE_NAME);
+        stop_worker()?;
 
         let mut copy_res = Err(std::io::Error::new(std::io::ErrorKind::Other, "init"));
         for attempt in 0..20 {
@@ -495,7 +571,7 @@ pub fn enable() -> Result<(), String> {
                     let _ =
                         crate::system::command::output("taskkill", ["/F", "/T", "/IM", EXE_NAME]);
                 }
-                crate::system::process::stop_process_by_name(EXE_NAME);
+                stop_worker()?;
             }
         }
 
@@ -636,6 +712,83 @@ pub fn enable() -> Result<(), String> {
         }
     }
 
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let unit_content = format!(
+            "[Unit]\n\
+            Description=Antigravity Bypass Russia DNS Forwarder\n\
+            After=network.target\n\n\
+            [Service]\n\
+            Type=simple\n\
+            ExecStart={} {}\n\
+            ExecStartPost={} --linux-dns-apply\n\
+            Restart=on-failure\n\
+            RestartSec=5\n\n\
+            [Install]\n\
+            WantedBy=multi-user.target\n",
+            dst.display(),
+            FORWARDER_FLAG,
+            dst.display()
+        );
+
+        if linux_has_systemd() {
+            crate::system::fs_utils::robust_write_file(
+                Path::new(SYSTEMD_SERVICE),
+                unit_content.as_bytes(),
+            )
+            .map_err(|e| e.to_string())?;
+            linux_systemctl(&["daemon-reload"])?;
+            linux_systemctl(&["enable", SYSTEMD_LABEL])?;
+            linux_systemctl(&["restart", SYSTEMD_LABEL])?;
+        } else {
+            stop_worker()?;
+            linux_spawn_worker()?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_has_systemd() -> bool {
+    Path::new("/run/systemd/system").is_dir()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_systemctl(args: &[&str]) -> Result<(), String> {
+    let out =
+        crate::system::command::output("systemctl", args).map_err(|e| format!("systemctl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "systemctl {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_spawn_worker() -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while running_state()? {
+        if std::time::Instant::now() >= deadline {
+            return Err("Прежний DNS-процесс ещё работает; повторный запуск отменён".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::process::Command::new(installed_exe())
+        .arg(FORWARDER_FLAG)
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Запуск DNS-службы: {e}"))?;
+    if !crate::net::wait_for_ready(std::time::Duration::from_secs(4), crate::net::relay_ready) {
+        return Err("DNS-служба Linux не подтвердила готовность; DNS не переключён".into());
+    }
     Ok(())
 }
 
@@ -643,7 +796,7 @@ pub fn enable() -> Result<(), String> {
 fn stop_windows_worker() -> Result<(), String> {
     let _ = crate::system::command::output("schtasks", ["/End", "/TN", TASK_NAME]);
     if running_state()? {
-        crate::system::process::stop_process_by_name(EXE_NAME);
+        stop_worker()?;
     }
     for _ in 0..20 {
         if !running_state()? {
@@ -680,7 +833,15 @@ pub fn start() -> Result<(), String> {
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
-    Ok(())
+    {
+        if linux_has_systemd() {
+            linux_systemctl(&["start", SYSTEMD_LABEL])
+        } else if running_state()? {
+            Ok(())
+        } else {
+            linux_spawn_worker()
+        }
+    }
 }
 
 pub fn disable() -> Result<(), String> {
@@ -700,8 +861,21 @@ pub fn disable() -> Result<(), String> {
             fs::remove_file(LAUNCHD_PLIST).map_err(|e| format!("Удаление plist: {e}"))?;
         }
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if linux_has_systemd() && Path::new(SYSTEMD_SERVICE).exists() {
+            linux_systemctl(&["stop", SYSTEMD_LABEL])?;
+            linux_systemctl(&["disable", SYSTEMD_LABEL])?;
+        }
+        if Path::new(SYSTEMD_SERVICE).exists() {
+            fs::remove_file(SYSTEMD_SERVICE).map_err(|e| e.to_string())?;
+            if linux_has_systemd() {
+                linux_systemctl(&["daemon-reload"])?;
+            }
+        }
+    }
 
-    crate::system::process::stop_process_by_name(EXE_NAME);
+    stop_worker()?;
 
     for _ in 0..20 {
         if !running_state()? {

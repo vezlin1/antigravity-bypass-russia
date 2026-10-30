@@ -35,56 +35,83 @@ fn windows_directory() -> io::Result<PathBuf> {
 
 pub fn executable(program: &str) -> io::Result<PathBuf> {
     #[cfg(windows)]
-    let path = windows_directory()?.join(match program {
-        "powershell" => r"WindowsPowerShell\v1.0\powershell.exe",
-        "netsh" => "netsh.exe",
-        "ipconfig" => "ipconfig.exe",
-        "schtasks" => "schtasks.exe",
-        "tasklist" => "tasklist.exe",
-        "taskkill" => "taskkill.exe",
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Неизвестная системная команда",
-            ))
-        }
-    });
+    {
+        let path = windows_directory()?.join(match program {
+            "powershell" => r"WindowsPowerShell\v1.0\powershell.exe",
+            "netsh" => "netsh.exe",
+            "ipconfig" => "ipconfig.exe",
+            "schtasks" => "schtasks.exe",
+            "tasklist" => "tasklist.exe",
+            "taskkill" => "taskkill.exe",
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Неизвестная системная команда",
+                ))
+            }
+        });
+        return match path.metadata() {
+            Ok(metadata) if metadata.is_file() => Ok(path),
+            Ok(_) => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "Системная команда {program}: {} не является файлом",
+                    path.display()
+                ),
+            )),
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!(
+                    "Системная команда {program} недоступна по пути {}: {error}",
+                    path.display()
+                ),
+            )),
+        };
+    }
     #[cfg(unix)]
-    let path = PathBuf::from(match program {
-        "launchctl" => "/bin/launchctl",
-        "route" => "/sbin/route",
-        "sysctl" => "/usr/sbin/sysctl",
-        "lsof" => "/usr/sbin/lsof",
-        "scutil" => "/usr/sbin/scutil",
-        "codesign" => "/usr/bin/codesign",
-        "xattr" => "/usr/bin/xattr",
-        "pgrep" => "/usr/bin/pgrep",
-        "killall" => "/usr/bin/killall",
-        "dscacheutil" => "/usr/bin/dscacheutil",
-        "stat" => "/usr/bin/stat",
-        _ => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Неизвестная системная команда",
-            ))
+    {
+        let candidates: &[&str] = match program {
+            "launchctl" => &["/bin/launchctl"],
+            "route" => &["/sbin/route", "/usr/sbin/route"],
+            "sysctl" => &[
+                "/sbin/sysctl",
+                "/usr/sbin/sysctl",
+                "/bin/sysctl",
+                "/usr/bin/sysctl",
+            ],
+            "lsof" => &["/usr/sbin/lsof", "/usr/bin/lsof"],
+            "scutil" => &["/usr/sbin/scutil"],
+            "codesign" => &["/usr/bin/codesign"],
+            "xattr" => &["/usr/bin/xattr"],
+            "pgrep" => &["/usr/bin/pgrep", "/bin/pgrep"],
+            "pkill" => &["/usr/bin/pkill", "/bin/pkill"],
+            "killall" => &["/usr/bin/killall", "/bin/killall"],
+            "dscacheutil" => &["/usr/bin/dscacheutil"],
+            "stat" => &["/usr/bin/stat", "/bin/stat"],
+            "uname" => &["/usr/bin/uname", "/bin/uname"],
+            "systemctl" => &["/bin/systemctl", "/usr/bin/systemctl"],
+            "ip" => &["/sbin/ip", "/usr/sbin/ip", "/bin/ip", "/usr/bin/ip"],
+            "resolvectl" => &["/usr/bin/resolvectl", "/bin/resolvectl"],
+            "systemd-resolve" => &["/usr/bin/systemd-resolve", "/bin/systemd-resolve"],
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Неизвестная системная команда",
+                ))
+            }
+        };
+        for &cand in candidates {
+            let p = PathBuf::from(cand);
+            if let Ok(metadata) = p.metadata() {
+                if metadata.is_file() {
+                    return Ok(p);
+                }
+            }
         }
-    });
-    match path.metadata() {
-        Ok(metadata) if metadata.is_file() => Ok(path),
-        Ok(_) => Err(io::Error::new(
+        return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!(
-                "Системная команда {program}: {} не является файлом",
-                path.display()
-            ),
-        )),
-        Err(error) => Err(io::Error::new(
-            error.kind(),
-            format!(
-                "Системная команда {program} недоступна по пути {}: {error}",
-                path.display()
-            ),
-        )),
+            format!("Системная команда {program} недоступна в системных путях"),
+        ));
     }
 }
 
@@ -221,7 +248,9 @@ mod tests {
                     "dscacheutil",
                     "stat",
                 ];
-                #[cfg(not(any(windows, target_os = "macos")))]
+                #[cfg(target_os = "linux")]
+                let commands = ["sysctl", "pgrep", "stat"];
+                #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
                 let commands: [&str; 0] = [];
                 for program in commands {
                     let path = executable(program).unwrap();

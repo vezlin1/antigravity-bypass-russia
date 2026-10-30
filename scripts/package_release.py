@@ -8,6 +8,8 @@ TARGETS = {
     "x86_64-pc-windows-msvc": ("windows-x64", "antigravity-bypass-russia.exe", "unlock_and_restore.ps1"),
     "aarch64-apple-darwin": ("macos-arm64", "antigravity-bypass-russia-macos-arm64", "unlock_and_restore.sh"),
     "x86_64-apple-darwin": ("macos-x64", "antigravity-bypass-russia-macos-x64", "unlock_and_restore.sh"),
+    "x86_64-unknown-linux-gnu": ("linux-x64", "antigravity-bypass-russia-linux-x64", "unlock_and_restore.sh"),
+    "aarch64-unknown-linux-gnu": ("linux-arm64", "antigravity-bypass-russia-linux-arm64", "unlock_and_restore.sh"),
 }
 
 

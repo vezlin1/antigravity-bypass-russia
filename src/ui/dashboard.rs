@@ -35,13 +35,7 @@ pub fn print_dashboard() {
     let network = network_status(rules, running.ok(), hosts_count);
     status_row("Обход:", network);
     status_row("Antigravity:", component_status(status.core_status));
-    let ide = if !status.incomplete_ide_installations.is_empty() {
-        "\x1b[93mПереустановите Antigravity IDE\x1b[0m"
-    } else if !status.ide_installations.is_empty() {
-        "\x1b[92mУстановлена\x1b[0m"
-    } else {
-        "\x1b[90mНе найдена\x1b[0m"
-    };
+    let ide = ide_display_status(&status);
     status_row("Antigravity IDE:", ide);
     let cli = if status.cli_status.is_none() && !status.cli_launchers.is_empty() {
         "\x1b[93mНужна проверка\x1b[0m"
@@ -89,7 +83,33 @@ fn network_status(
 
 #[cfg(test)]
 mod tests {
-    use super::network_status;
+    use super::*;
+    use crate::core::detector::SystemComponentsStatus;
+    use crate::core::patcher::BinaryState;
+    use std::path::PathBuf;
+
+    #[test]
+    fn ide_display_status_reflects_patch_state() {
+        let mut status = SystemComponentsStatus::default();
+        assert_eq!(ide_display_status(&status), "\x1b[90mНе найдена\x1b[0m");
+
+        status.ide_installations.push(PathBuf::from("/ide"));
+        assert_eq!(ide_display_status(&status), "\x1b[92mУстановлена\x1b[0m");
+
+        status.ide_status = Some(BinaryState::Stock);
+        assert_eq!(ide_display_status(&status), "\x1b[93mНе пропатчено\x1b[0m");
+
+        status.ide_status = Some(BinaryState::Patched);
+        assert_eq!(ide_display_status(&status), "\x1b[92mПропатчено\x1b[0m");
+
+        status
+            .incomplete_ide_installations
+            .push(PathBuf::from("/ide"));
+        assert_eq!(
+            ide_display_status(&status),
+            "\x1b[93mПереустановите Antigravity IDE\x1b[0m"
+        );
+    }
 
     #[test]
     fn hosts_configuration_does_not_require_a_relay_or_mask_partial_pins() {
@@ -106,6 +126,18 @@ mod tests {
         assert!(network_status(0, Some(true), Some(0)).contains("Нужна проверка"));
         assert!(network_status(1, Some(false), Some(0)).contains("Нужна проверка"));
         assert!(network_status(1, None, Some(0)).contains("Не удалось проверить службу"));
+    }
+}
+
+fn ide_display_status(status: &crate::core::detector::SystemComponentsStatus) -> &'static str {
+    if !status.incomplete_ide_installations.is_empty() {
+        "\x1b[93mПереустановите Antigravity IDE\x1b[0m"
+    } else if let Some(state) = status.ide_status {
+        component_status(Some(state))
+    } else if !status.ide_installations.is_empty() {
+        "\x1b[92mУстановлена\x1b[0m"
+    } else {
+        "\x1b[90mНе найдена\x1b[0m"
     }
 }
 

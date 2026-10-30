@@ -1,28 +1,29 @@
 {
   "ide": "2.6.0",
-  "checked_at": "2026-10-29",
+  "checked_at": "2026-10-30",
   "cli": {
     "windows_amd64": {
-      "version": "1.4.9",
-      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.9-4962164969177088/windows-x64/cli_windows_x64.exe",
-      "sha512": "d36b8104371fc07b6850f064f882e1ff4851d511305cc540178627884546de54f7a665903376a7e61e2df78741837dba96af280b99e0b747ed5a1d036ca8fde7"
+      "version": "1.4.11",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.11-5180209989812224/windows-x64/cli_windows_x64.exe",
+      "sha512": "a70660e829da409d10906fa6120ed79e3dc44a9afde7be6c6b28a10c2cee32e6216cfa49f2c1c8d81d7656df61dcd185b4dd808ca8a65042af4a6e9110b9d604"
     },
     "linux_amd64": {
-      "version": "1.4.9",
-      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.9-4962164969177088/linux-x64/cli_linux_x64.tar.gz",
-      "sha512": "96a259b7475ae70a5b002ea8a83b804bba9b6ad2171af0cd0839b3959d9e6046ba36e181bc2d5597522aeceaacc06023564c46232fdb958f26f8c72267d9f0fd"
+      "version": "1.4.11",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.11-5180209989812224/linux-x64/cli_linux_x64.tar.gz",
+      "sha512": "2935601efa745ed6e314d32b415c71f44d9d455f0e6a2583372584be5a9074c28154cf81d5eec65b4416579453a3b3b05d3abe4d4f176754d5ef93a84af6cf28"
     },
     "darwin_arm64": {
-      "version": "1.4.9",
-      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.9-4962164969177088/darwin-arm/cli_mac_arm64.tar.gz",
-      "sha512": "d7d83634b0c236659ee530f448e9aa1c5dc00a010631edd72bf11a920006892b319be7e51c8defae226f204660544e4d915bb5e733f1ceb50c065f4cbe45d3d0"
+      "version": "1.4.11",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.11-5180209989812224/darwin-arm/cli_mac_arm64.tar.gz",
+      "sha512": "ff94cda02d46864950243d3c7b497fc13d8d5036f47e02099d3112228a841f1e8298cf37fbfd3f70b25c264b79400600932b2599f9aba649bc6c7cf3c867fd1e"
     },
     "darwin_amd64": {
-      "version": "1.4.9",
-      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.9-4962164969177088/darwin-x64/cli_mac_x64.tar.gz",
-      "sha512": "cd4df27844a6585da9af155fef02b344deb18213910cff27ddb7ea54411358318a50901a3d348997f67744c31e64fdda7ead3ab48e2c66fc10510b4d8ae9843f"
+      "version": "1.4.11",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.4.11-5180209989812224/darwin-x64/cli_mac_x64.tar.gz",
+      "sha512": "543975f3c141dc88da947d06c036c43ae163ad16e59531812c346299105f0c555cd0ac01a868846dbab37104217fdb50d812d0241a8dbe45edb28b70544da246"
     }
   },
   "source": "https://antigravity.google/download",
-  "app": "2.28.0"
+  "app": "2.28.1",
+  "app_asar_sha256": "cec1039f841be1976dfeef6a9fdb6e71c6981e6857c222430105e3b6979612af"
 }

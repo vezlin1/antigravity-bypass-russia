@@ -399,9 +399,9 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
                 return false;
             }
             println!("  \x1b[96mВыберите действие\x1b[0m");
-            #[cfg(any(windows, target_os = "macos"))]
+            #[cfg(any(windows, unix))]
             println!("  \x1b[1m[1]\x1b[0m  Закрыть Antigravity и продолжить: {action}");
-            #[cfg(not(any(windows, target_os = "macos")))]
+            #[cfg(not(any(windows, unix)))]
             println!("  \x1b[1m[1]\x1b[0m  Я закрыл Antigravity — проверить и продолжить");
             println!("  \x1b[1m[0]\x1b[0m  Отмена — вернуться в меню\n");
             loop {
@@ -414,14 +414,14 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
                     _ => println!("  Введите номер действия: 1 — продолжить, 0 — отмена."),
                 }
             }
-            #[cfg(any(windows, target_os = "macos"))]
+            #[cfg(any(windows, unix))]
             println!("\n  Закрываем Antigravity…");
-            #[cfg(not(any(windows, target_os = "macos")))]
+            #[cfg(not(any(windows, unix)))]
             println!("\n  Проверяем открытые файлы…");
             if let Err(error) = crate::system::file_lock::close_application(paths) {
-                #[cfg(any(windows, target_os = "macos"))]
+                #[cfg(any(windows, unix))]
                 let message = "Не удалось закрыть приложение. Закройте его вручную";
-                #[cfg(not(any(windows, target_os = "macos")))]
+                #[cfg(not(any(windows, unix)))]
                 let message = "Не удалось подтвердить, что файлы Antigravity свободны";
                 operation_error(message, &error);
                 print_error_details();
@@ -529,6 +529,7 @@ pub fn handle_diagnostics() -> bool {
         let label = match report.host.as_str() {
             "cloudcode-pa.googleapis.com" => "Основной сервер",
             "daily-cloudcode-pa.googleapis.com" => "Резервный сервер",
+            "aicode.googleapis.com" => "Eligibility сервер (CLI)",
             _ => "Gemini",
         };
         if let Some(error) = &report.error {

@@ -10,7 +10,9 @@ use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 pub const LISTEN_IP: &str = "127.0.0.1";
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub const LISTEN_IP: &str = "127.0.0.55";
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub const LISTEN_IP: &str = "127.0.0.53";
 pub const LISTEN_PORT: u16 = 53;
 pub const HEALTH_PORT: u16 = 15353;
@@ -326,6 +328,8 @@ pub fn run() -> Result<(), String> {
     let addr = format!("{}:{}", LISTEN_IP, LISTEN_PORT);
     let socket =
         UdpSocket::bind(&addr).map_err(|e| format!("Не удалось занять {}: {}", addr, e))?;
+    #[cfg(target_os = "linux")]
+    start_tcp_listener(&addr)?;
     let _ = crate::net::socket::set_socket_buffers(&socket, 512 * 1024);
     log_line(&format!("start {}", addr));
     // Local readiness responds only when requested; it does not probe the Internet.
@@ -398,6 +402,13 @@ fn answered_locally(qtype: Option<u16>) -> bool {
 }
 
 fn relay(query: &[u8]) -> Option<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    if !super::linux_dns::is_target(&question_name(query)?) {
+        return Some(
+            super::linux_dns::passthrough(query)
+                .unwrap_or_else(|| crate::net::client::servfail_response(query)),
+        );
+    }
     if answered_locally(question_type(query)) {
         return Some(nodata_response(query));
     }
@@ -415,6 +426,45 @@ fn relay(query: &[u8]) -> Option<Vec<u8>> {
         }
         None => Some(crate::net::client::servfail_response(query)),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn start_tcp_listener(addr: &str) -> Result<(), String> {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind(addr).map_err(|e| format!("TCP DNS {addr}: {e}"))?;
+    let (tx, rx) = mpsc::sync_channel::<std::net::TcpStream>(32);
+    let rx = Arc::new(Mutex::new(rx));
+    for _ in 0..8 {
+        let rx = Arc::clone(&rx);
+        thread::spawn(move || loop {
+            let Ok(mut stream) = rx.lock().unwrap().recv() else {
+                break;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+            let mut length = [0; 2];
+            if stream.read_exact(&mut length).is_err() {
+                continue;
+            }
+            let mut query = vec![0; u16::from_be_bytes(length) as usize];
+            if query.len() < 12 || stream.read_exact(&mut query).is_err() {
+                continue;
+            }
+            if let Some(reply) = relay(&query) {
+                if let Ok(length) = u16::try_from(reply.len()) {
+                    let _ = stream
+                        .write_all(&length.to_be_bytes())
+                        .and_then(|_| stream.write_all(&reply));
+                }
+            }
+        });
+    }
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let _ = tx.try_send(stream);
+        }
+    });
+    Ok(())
 }
 
 pub fn log_event(msg: &str) {

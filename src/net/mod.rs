@@ -7,6 +7,8 @@ pub mod doh;
 pub mod egress;
 pub mod health;
 pub mod hosts;
+#[cfg(any(target_os = "linux", test))]
+pub mod linux_dns;
 pub mod nrpt;
 pub mod provider;
 pub mod rank;
@@ -104,10 +106,7 @@ mod tests {
             format!("{};1.2.3.4", super::LISTEN_IP)
         );
         assert_eq!(super::assemble_nameservers(false, &["1.2.3.4"]), "1.2.3.4");
-        assert_eq!(
-            super::assemble_nameservers(false, &[]),
-            "45.155.204.190"
-        );
+        assert_eq!(super::assemble_nameservers(false, &[]), "45.155.204.190");
     }
 
     #[test]
@@ -333,14 +332,32 @@ pub(super) fn flush_dns_cache() -> Result<(), String> {
         ("dscacheutil", &["-flushcache"]),
         ("killall", &["-HUP", "mDNSResponder"]),
     ];
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    let commands: &[(&str, &[&str])] = &[
+        ("resolvectl", &["flush-caches"]),
+        ("systemd-resolve", &["--flush-caches"]),
+    ];
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     let commands: &[(&str, &[&str])] = &[];
-    let mut errors = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
     for (program, args) in commands {
         match crate::system::command::output(program, *args) {
-            Ok(out) if out.status.success() => {}
-            Ok(out) => errors.push(format!("{program}: {}", out.status)),
-            Err(error) => errors.push(format!("{program}: {error}")),
+            Ok(out) if out.status.success() => {
+                #[cfg(target_os = "linux")]
+                return Ok(());
+            }
+            Ok(out) => {
+                #[cfg(not(target_os = "linux"))]
+                errors.push(format!("{program}: {}", out.status));
+                #[cfg(target_os = "linux")]
+                let _ = out;
+            }
+            Err(error) => {
+                #[cfg(not(target_os = "linux"))]
+                errors.push(format!("{program}: {error}"));
+                #[cfg(target_os = "linux")]
+                let _ = error;
+            }
         }
     }
     if errors.is_empty() {
@@ -514,6 +531,8 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     if if_index > 0 {
         crate::net::relay::save_if_index(if_index);
     }
+    #[cfg(target_os = "linux")]
+    linux_dns::prepare(if_index)?;
 
     crate::net::relay::clear_custom_mode();
     let ips: Vec<String> = resolvers::all_provider_v4()
@@ -562,6 +581,8 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
             sub_notes.push(format!("Studio/Gemini: {}", studio_subs.join(", ")));
         }
     }
+    let _ = (&agent_rules, &studio_subs);
+    #[cfg(not(target_os = "linux"))]
     let agent_rules: Vec<_> = agent_rules
         .iter()
         .map(|(name, servers)| {
@@ -571,6 +592,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
             )
         })
         .collect();
+    #[cfg(not(target_os = "linux"))]
     let studio_subs: Vec<_> = studio_subs.iter().map(String::as_str).collect();
     // Reject invalid or conflicting resolver plans before ranking writes hosts
     // or setup changes the service. Applying later rechecks file ownership.
@@ -586,7 +608,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     }
     let mut relay_ok = false;
     let mut relay_note = String::new();
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     {
         step("Запускаем DNS-обход");
         match crate::system::service::enable() {
@@ -606,6 +628,10 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         relay_ok = false;
         relay_note =
             "процесс запущен, но DNS-проверка не прошла; сохранены резервные адреса".into();
+    }
+    #[cfg(target_os = "linux")]
+    if !relay_ok {
+        return Err(format!("DNS Linux не переключён: {relay_note}"));
     }
     if !relay_ok && resolvers::fallback_v4().is_empty() {
         #[cfg(not(windows))]
@@ -685,12 +711,17 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         split_dns::apply(std::path::Path::new("/etc/resolver"), &rules)?;
     }
     #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    linux_dns::apply()?;
+    #[cfg(not(windows))]
     flush_dns_cache()?;
 
     let mut msg = if relay_ok {
         format!("Сеть настроена (релей {}:{})", LISTEN_IP, LISTEN_PORT)
     } else if cfg!(target_os = "macos") {
         "Сеть настроена (/etc/resolver, без фона)".to_string()
+    } else if cfg!(target_os = "linux") {
+        "Сеть настроена (hosts)".to_string()
     } else if relay_note.is_empty() {
         "Сеть настроена".to_string()
     } else {
@@ -723,7 +754,7 @@ fn relay_answers() -> bool {
     .is_ok_and(|reply| client::is_successful_response(&reply))
 }
 
-fn relay_ready(timeout: Duration) -> bool {
+pub(crate) fn relay_ready(timeout: Duration) -> bool {
     let query = client::build_query(relay::HEALTH_NAME, 0xA652);
     client::query_raw_to(
         &query,
@@ -736,7 +767,7 @@ fn relay_ready(timeout: Duration) -> bool {
     })
 }
 
-fn wait_for_ready(budget: Duration, mut probe: impl FnMut(Duration) -> bool) -> bool {
+pub(crate) fn wait_for_ready(budget: Duration, mut probe: impl FnMut(Duration) -> bool) -> bool {
     let deadline = std::time::Instant::now() + budget;
     while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
         if left.is_zero() {
@@ -785,6 +816,9 @@ fn remove_dns_configuration(restore_tcp: bool) -> Result<(), String> {
     let mut errors = Vec::new();
     let _configuration = configuration_lock()?;
     // Stop the background writer, but retain its directory and every backup.
+    // Restore the system resolver while its DNS worker is still answering.
+    #[cfg(target_os = "linux")]
+    linux_dns::remove()?;
     crate::system::service::disable()?;
     // Remove only the obsolete marker from the experimental TUN mode.
     let legacy_mode = relay::log_dir().join("hosts-mode");

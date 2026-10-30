@@ -2,9 +2,9 @@ use std::path::{Path, PathBuf};
 
 /// Public command arguments, excluding the validated elevation handoff.
 pub fn args() -> std::vec::IntoIter<String> {
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(any(windows, unix))]
     return super::user_context::args();
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(not(any(windows, unix)))]
     std::env::args().collect::<Vec<_>>().into_iter()
 }
 
@@ -73,26 +73,20 @@ pub fn expand_env_vars(input: &str) -> PathBuf {
     {
         if input.starts_with("~/") || input == "~" {
             let subpath = if input.len() > 2 { &input[2..] } else { "" };
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             {
                 if let Ok(home) = super::user_context::home() {
                     return home.join(subpath);
                 }
-                // Never silently write a failed user lookup into root's HOME.
-                return PathBuf::from(input);
             }
-            #[cfg(all(unix, not(target_os = "macos")))]
-            {
-                if let Ok(sudo_user) = std::env::var("SUDO_USER") {
-                    if !sudo_user.is_empty() && sudo_user != "root" {
-                        let user_home = PathBuf::from(format!("/home/{}", sudo_user));
-                        if user_home.exists() {
-                            return user_home.join(subpath);
-                        }
+            if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+                if !sudo_user.is_empty() && sudo_user != "root" {
+                    let user_home = PathBuf::from(format!("/home/{}", sudo_user));
+                    if user_home.exists() {
+                        return user_home.join(subpath);
                     }
                 }
             }
-            #[cfg(not(target_os = "macos"))]
             if let Ok(home) = std::env::var("HOME") {
                 return PathBuf::from(home).join(subpath);
             }
@@ -137,24 +131,20 @@ pub fn get_user_homes() -> Vec<PathBuf> {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         {
             if let Ok(home) = super::user_context::home() {
                 homes.push(home);
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            if let Ok(sudo_user) = std::env::var("SUDO_USER") {
-                if !sudo_user.is_empty() && sudo_user != "root" {
-                    let p = PathBuf::from(format!("/home/{}", sudo_user));
-                    if p.exists() {
-                        homes.push(p);
-                    }
+        if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+            if !sudo_user.is_empty() && sudo_user != "root" {
+                let p = PathBuf::from(format!("/home/{}", sudo_user));
+                if p.exists() && !homes.contains(&p) {
+                    homes.push(p);
                 }
             }
         }
-        #[cfg(not(target_os = "macos"))]
         if let Ok(h) = std::env::var("HOME") {
             let p = PathBuf::from(h);
             if !homes.contains(&p) && p != PathBuf::from("/var/root") && p != PathBuf::from("/root")
