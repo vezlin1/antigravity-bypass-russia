@@ -529,6 +529,7 @@ pub fn handle_diagnostics() -> bool {
         let label = match report.host.as_str() {
             "cloudcode-pa.googleapis.com" => "Основной сервер",
             "daily-cloudcode-pa.googleapis.com" => "Резервный сервер",
+            "aicode.googleapis.com" => "Eligibility сервер (CLI)",
             _ => "Gemini",
         };
         if let Some(error) = &report.error {

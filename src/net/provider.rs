@@ -51,10 +51,14 @@ pub const NRPT_STUDIO: &[&str] = &[
 
 /// Agent Cloud Code & Gemini API hosts. Each gets its own NRPT nameserver list —
 /// only providers that actually substitute *this* name, with fallback to ranked SNI proxies.
+/// aicode.googleapis.com serves CLI 1.4.11+ eligibility/entitlement checks
+/// (ManagementService/GetUserInfo, entitlement.userTier); routing it directly
+/// fails the check even with the local gate patched.
 pub const NRPT_AGENT: &[&str] = &[
     "daily-cloudcode-pa.googleapis.com",
     "cloudcode-pa.googleapis.com",
     "generativelanguage.googleapis.com",
+    "aicode.googleapis.com",
 ];
 
 /// Geohide HTTP/SNI frontends. Used when VPN makes SmartDNS skip substitution:

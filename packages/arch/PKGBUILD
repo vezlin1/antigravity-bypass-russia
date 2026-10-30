@@ -1,6 +1,6 @@
 # Maintainer: animesao <175932616+animesao@users.noreply.github.com>
 pkgname=antigravity-bypass-russia-bin
-pkgver=2.6.2
+pkgver=2.6.3
 pkgrel=1
 pkgdesc="Google Antigravity & Gemini bypass in Russia (No VPN, SmartDNS & SIMD Binary Patcher)"
 arch=('x86_64' 'aarch64')
