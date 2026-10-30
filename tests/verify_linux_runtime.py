@@ -54,9 +54,10 @@ hosts = Path('/etc/hosts')
 original_hosts = hosts.read_bytes()
 domains = ['daily-cloudcode-pa.googleapis.com', 'cloudcode-pa.googleapis.com', 'generativelanguage.googleapis.com', 'aicode.googleapis.com']
 
-def dns_server(address, smart):
-    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    server.bind((address, 53))
+def dns_server(address, smart, scope=0):
+    ipv6=':' in address
+    server = socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET, socket.SOCK_DGRAM)
+    server.bind((address,53,0,scope) if ipv6 else (address,53))
     def serve():
         while True:
             data, peer = server.recvfrom(65535)
@@ -191,7 +192,7 @@ if args.resolved_binary:
     subprocess.run(['resolvectl','dns','agtest0','127.0.0.1'],check=True)
     subprocess.run(['resolvectl','domain','agtest0','corp.test'],check=True)
     plan=Path('/var/lib/antigravity_bypass_russia/linux-dns.json')
-    plan.write_text(json.dumps({'servers':['127.0.0.1'],'backend':{'Resolved':{'interface':'agtest0','domains':['corp.test']}}}))
+    plan.write_text(json.dumps({'servers':['127.0.0.1'],'backend':{'Resolved':{'interface':'agtest0','domains':['corp.test'],'default_route':False}}}))
     worker=subprocess.Popen([str(binary),'--dns-forwarder'],env=environment,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     time.sleep(.3)
     run('--linux-dns-apply')
@@ -200,7 +201,39 @@ if args.resolved_binary:
     run('rollback')
     assert '127.0.0.1' in subprocess.check_output(['resolvectl','dns','agtest0'],text=True)
     assert subprocess.check_output(['resolvectl','domain','agtest0'],text=True).strip().endswith('corp.test')
+    subprocess.run(['ip','-6','addr','add','fe80::53/64','dev','agtest0','nodad'],check=True)
+    dns_server('fe80::53',False,socket.if_nametoindex('agtest0'))
+    subprocess.run(['resolvectl','dns','agtest0','fe80::53'],check=True)
+    plan.write_text(json.dumps({'servers':['fe80::53'],'backend':{'Resolved':{'interface':'agtest0','domains':['corp.test'],'default_route':False}}}))
+    run('--linux-dns-apply')
+    assert query('private.corp.test').endswith(socket.inet_aton('192.0.2.123')), 'Original link-local IPv6 DNS must retain its interface scope'
+    run('rollback')
+    assert 'fe80::53' in subprocess.check_output(['resolvectl','dns','agtest0'],text=True)
+    print('PASS: original link-local IPv6 DNS remains reachable through its interface',flush=True)
     worker.terminate();worker.wait(timeout=5)
+    Path('/run/systemd/system').rmdir()
+    subprocess.run(['resolvectl','dns','agtest0','127.0.0.1'],check=True)
+    subprocess.run(['resolvectl','domain','agtest0',''],check=True)
+    subprocess.run(['ip','route','add','8.8.8.8/32','dev','agtest0'],check=True)
+    dns_server('198.51.100.1',True)
+    network=json.loads((config/'network.json').read_text())
+    network['extra_udp'][0]['addresses']=['198.51.100.1']
+    (config/'network.json').write_text(json.dumps(network))
+    resolv.write_text('nameserver 127.0.0.53\n')
+    run('dns')
+    prepared=json.loads(plan.read_text())
+    assert prepared['backend']['Resolved']['interface']=='agtest0'
+    assert prepared['backend']['Resolved']['domains']==[]
+    assert prepared['backend']['Resolved']['default_route'] is True
+    assert {x[4][0] for x in socket.getaddrinfo('fresh.aistudio.google.com',443,socket.AF_INET)}=={'127.0.0.2'}
+    ordinary=subprocess.run(['resolvectl','query','-4','public.example.com'],capture_output=True,text=True,timeout=12)
+    assert ordinary.returncode==0 and '192.0.2.123' in ordinary.stdout,(ordinary.stdout,ordinary.stderr)
+    run('dns')
+    assert json.loads(plan.read_text())==prepared
+    run('rollback')
+    assert subprocess.check_output(['resolvectl','domain','agtest0'],text=True).strip().endswith(':')
+    resolv.write_bytes(original)
+    print('PASS: full systemd-resolved setup detects an empty-domain interface and keeps ordinary DNS available',flush=True)
     resolved.terminate();resolved.wait(timeout=5)
     bus.terminate();bus.wait(timeout=5)
     print('PASS: real systemd-resolved routing, per-link settings and exact DNS/domain rollback',flush=True)
@@ -212,4 +245,5 @@ failed=work/'failed-systemctl';failed.write_text('#!/bin/sh\necho test-manager-f
 subprocess.run(['mount','--bind',str(failed),shutil.which('systemctl')],check=True)
 run('dns',success=False)
 assert resolv.read_bytes()==original
+subprocess.run(['systemd-analyze','verify','--man=no','/etc/systemd/system/antigravity-bypass-russia.service'],check=True,capture_output=True)
 print('PASS: systemd failure is reported without switching DNS or starting a fallback worker',flush=True)

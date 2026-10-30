@@ -16,6 +16,7 @@ enum Backend {
     Resolved {
         interface: String,
         domains: Vec<String>,
+        default_route: bool,
     },
 }
 
@@ -80,8 +81,14 @@ fn set_values(kind: &str, link: impl ToString, values: &[String]) -> Result<(), 
     run(&args).map(|_| ())
 }
 
-fn routed_domains(original: &[String]) -> Vec<String> {
+fn routed_domains(original: &[String], default_route: bool) -> Vec<String> {
     let mut domains = original.to_vec();
+    // Adding a route-only suffix makes resolved's automatic DefaultRoute false.
+    // Preserve the original default path explicitly; ordinary queries are then
+    // passed through to the saved DNS servers. Rollback removes this domain.
+    if default_route && !domains.iter().any(|domain| domain == "~.") {
+        domains.push("~.".into());
+    }
     for name in super::provider::nrpt_domains() {
         let name = format!("~{}", name.trim_start_matches('.'));
         if !domains.contains(&name) {
@@ -149,12 +156,22 @@ pub fn prepare(if_index: u32) -> Result<(), String> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         validate_servers(&servers)?;
+        let default_route = match values("default-route", if_index)?.as_slice() {
+            [value] if value == "yes" => true,
+            [value] if value == "no" => false,
+            _ => {
+                return Err(
+                    "Неизвестная настройка default-route systemd-resolved; DNS сохранён".into(),
+                )
+            }
+        };
         Plan {
             servers,
             backend: Backend::Resolved {
                 // Interface indices can change at boot or after a reconnect.
                 interface: interface_name(if_index)?,
                 domains: values("domain", if_index)?,
+                default_route,
             },
         }
     } else {
@@ -176,20 +193,32 @@ pub fn prepare(if_index: u32) -> Result<(), String> {
 }
 
 fn interface_name(index: u32) -> Result<String, String> {
-    for entry in fs::read_dir("/sys/class/net")
-        .map_err(|e| e.to_string())?
-        .flatten()
+    #[cfg(target_os = "linux")]
     {
-        if fs::read_to_string(entry.path().join("ifindex"))
-            .is_ok_and(|s| s.trim().parse::<u32>() == Ok(index))
-        {
-            return entry
-                .file_name()
-                .into_string()
+        let mut name = [0 as libc::c_char; libc::IF_NAMESIZE];
+        if !unsafe { libc::if_indextoname(index, name.as_mut_ptr()) }.is_null() {
+            return unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) }
+                .to_str()
+                .map(str::to_owned)
                 .map_err(|_| "Некорректное имя интерфейса".into());
         }
     }
+    let _ = index;
     Err("Сетевой интерфейс уже изменился; повторите настройку".into())
+}
+
+fn interface_index(interface: &str) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        let name = std::ffi::CString::new(interface).ok()?;
+        let index = unsafe { libc::if_nametoindex(name.as_ptr()) };
+        return (index > 0).then_some(index);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = interface;
+        None
+    }
 }
 
 fn original_dns(plan: &Plan) -> Vec<String> {
@@ -207,11 +236,16 @@ fn validate_current(plan: &Plan) -> Result<(), String> {
                 );
             }
         }
-        Backend::Resolved { interface, domains } => {
+        Backend::Resolved {
+            interface,
+            domains,
+            default_route,
+        } => {
             let dns = values("dns", interface)?;
             let current_domains = values("domain", interface)?;
             if (dns != original_dns(plan) && dns != [super::relay::LISTEN_IP])
-                || (current_domains != *domains && current_domains != routed_domains(domains))
+                || (current_domains != *domains
+                    && current_domains != routed_domains(domains, *default_route))
             {
                 return Err("DNS интерфейса изменён другой программой; настройки и резервная копия сохранены".into());
             }
@@ -243,9 +277,17 @@ pub fn apply() -> Result<(), String> {
             }
             Ok(())
         }
-        Backend::Resolved { interface, domains } => {
+        Backend::Resolved {
+            interface,
+            domains,
+            default_route,
+        } => {
             set_values("dns", interface, &[super::relay::LISTEN_IP.into()])?;
-            if let Err(error) = set_values("domain", interface, &routed_domains(domains)) {
+            if let Err(error) = set_values(
+                "domain",
+                interface,
+                &routed_domains(domains, *default_route),
+            ) {
                 let restore = set_values("dns", interface, &original_dns(&plan));
                 return Err(format!("{error}; восстановление DNS: {restore:?}"));
             }
@@ -268,7 +310,9 @@ pub fn remove() -> Result<(), String> {
                 );
             }
         }
-        Backend::Resolved { interface, domains } => {
+        Backend::Resolved {
+            interface, domains, ..
+        } => {
             set_values("domain", interface, domains)?;
             set_values("dns", interface, &original_dns(&plan))?;
         }
@@ -279,8 +323,20 @@ pub fn remove() -> Result<(), String> {
 /// Preserve ordinary DNS, including private names and AAAA/SVCB queries.
 pub fn passthrough(query: &[u8]) -> Option<Vec<u8>> {
     let plan = read_plan().ok()??;
-    for server in plan.servers {
-        if let Some(reply) = forward(query, SocketAddr::new(server, 53)) {
+    for server in &plan.servers {
+        let address = match server {
+            IpAddr::V6(ip) if ip.is_unicast_link_local() => {
+                let Backend::Resolved { interface, .. } = &plan.backend else {
+                    continue;
+                };
+                let Some(scope) = interface_index(interface) else {
+                    continue;
+                };
+                SocketAddr::V6(std::net::SocketAddrV6::new(*ip, 53, 0, scope))
+            }
+            _ => SocketAddr::new(*server, 53),
+        };
+        if let Some(reply) = forward(query, address) {
             return Some(reply);
         }
     }
@@ -373,12 +429,14 @@ mod tests {
         ] {
             assert!(!is_target(host), "{host}");
         }
-        let domains = routed_domains(&["corp.test".into()]);
+        let domains = routed_domains(&["corp.test".into()], true);
         assert!(
             domains.contains(&"corp.test".into())
                 && domains.contains(&"~aicode.googleapis.com".into())
         );
-        assert_eq!(routed_domains(&domains), domains);
+        assert!(domains.contains(&"~.".into()));
+        assert!(!routed_domains(&["corp.test".into()], false).contains(&"~.".into()));
+        assert_eq!(routed_domains(&domains, true), domains);
     }
     #[test]
     fn passthrough_keeps_non_ai_aaaa_answers_unchanged() {
