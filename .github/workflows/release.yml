@@ -221,7 +221,6 @@ jobs:
             dist/unlock_and_restore.ps1
             dist/unlock_and_restore.sh
             dist/install.sh
-            dist/SHA256SUMS.txt
           body_path: docs/releases/${{ github.ref_name }}.md
           draft: true
           generate_release_notes: false
