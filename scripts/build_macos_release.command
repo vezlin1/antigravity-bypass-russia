@@ -10,12 +10,15 @@ export PATH="$HOME/.cargo/bin:$PATH"
 for tool in cargo rustup python3; do
   command -v "$tool" >/dev/null || { echo "Builder prerequisite missing: $tool" >&2; exit 1; }
 done
-export MACOSX_DEPLOYMENT_TARGET=12.0
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
 cargo test --locked --bin antigravity-bypass-russia --test socket_tests
 python3 tests/verify_macos_bundle.py
 python3 tests/verify_wrappers.py
 for target in aarch64-apple-darwin x86_64-apple-darwin; do
+  case "$target" in
+    aarch64-*) export MACOSX_DEPLOYMENT_TARGET=11.0 ;;
+    *) export MACOSX_DEPLOYMENT_TARGET=10.12 ;;
+  esac
   cargo build --release --locked --target "$target"
   case "$target" in aarch64-*) arch=arm64 ;; *) arch=x86_64 ;; esac
   lipo -verify_arch "$arch" "target/$target/release/antigravity-bypass-russia"
