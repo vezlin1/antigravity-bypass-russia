@@ -287,6 +287,7 @@ fn query(paths: &[PathBuf]) -> Result<Vec<String>, String> {
             output.status.code(),
             &String::from_utf8_lossy(&output.stdout),
             &String::from_utf8_lossy(&output.stderr),
+            paths,
         )
     }
     #[cfg(not(any(windows, unix)))]
@@ -297,8 +298,20 @@ fn query(paths: &[PathBuf]) -> Result<Vec<String>, String> {
 }
 
 #[cfg(any(unix, test))]
-fn parse_lsof(code: Option<i32>, stdout: &str, stderr: &str) -> Result<Vec<String>, String> {
-    if !matches!(code, Some(0 | 1)) || !stderr.trim().is_empty() {
+fn parse_lsof(
+    code: Option<i32>,
+    stdout: &str,
+    stderr: &str,
+    paths: &[PathBuf],
+) -> Result<Vec<String>, String> {
+    #[cfg(target_os = "linux")]
+    let safe_stderr = linux_lsof_stderr_is_safe(stderr, paths);
+    #[cfg(not(target_os = "linux"))]
+    let safe_stderr = {
+        let _ = paths;
+        stderr.trim().is_empty()
+    };
+    if !matches!(code, Some(0 | 1)) || !safe_stderr {
         return Err(format!(
             "Проверка открытых файлов: код {code:?}; {}",
             stderr.trim()
@@ -327,9 +340,61 @@ fn parse_lsof(code: Option<i32>, stdout: &str, stderr: &str) -> Result<Vec<Strin
     Ok(result)
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_lsof_stderr_is_safe(stderr: &str, paths: &[PathBuf]) -> bool {
+    let mut incomplete_expected = false;
+    for line in stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line == "Output information may be incomplete." && incomplete_expected {
+            incomplete_expected = false;
+            continue;
+        }
+        let Some((filesystem, mount)) = line
+            .strip_prefix("lsof: WARNING: can't stat() ")
+            .and_then(|text| text.split_once(" file system "))
+        else {
+            return false;
+        };
+        let directory = match filesystem {
+            "fuse.portal" => "doc",
+            "fuse.gvfsd-fuse" => "gvfs",
+            _ => return false,
+        };
+        let Some(uid) = mount
+            .strip_prefix("/run/user/")
+            .and_then(|path| path.strip_suffix(&format!("/{directory}")))
+        else {
+            return false;
+        };
+        if uid.is_empty() || !uid.bytes().all(|b| b.is_ascii_digit()) || uid.parse::<u32>().is_err()
+        {
+            return false;
+        }
+        // These desktop mounts are unrelated only when every target can be
+        // resolved outside them. Preserve errors for targets reached via links.
+        let mount = std::path::Path::new(mount);
+        if paths.is_empty()
+            || paths.iter().any(|path| {
+                path.starts_with(mount)
+                    || path
+                        .canonicalize()
+                        .map_or(true, |resolved| resolved.starts_with(mount))
+            })
+        {
+            return false;
+        }
+        incomplete_expected = true;
+    }
+    true
+}
+
 #[cfg(test)]
 mod mac_lock_tests {
     use super::wait_for_holders_to_exit;
+    use std::path::PathBuf;
     use std::time::Duration;
 
     #[test]
@@ -430,14 +495,71 @@ mod mac_lock_tests {
     #[test]
     fn lsof_partial_match_is_busy_and_empty_exit_one_is_free() {
         assert_eq!(
-            super::parse_lsof(Some(1), "p123\ncAntigravity Helper\np456\ncagy\n", "")
+            super::parse_lsof(Some(1), "p123\ncAntigravity Helper\np456\ncagy\n", "", &[])
                 .unwrap()
                 .len(),
             2
         );
-        assert!(super::parse_lsof(Some(1), "", "").unwrap().is_empty());
-        assert!(super::parse_lsof(Some(1), "", "permission denied").is_err());
-        assert!(super::parse_lsof(Some(0), "unexpected output", "").is_err());
+        assert!(super::parse_lsof(Some(1), "", "", &[]).unwrap().is_empty());
+        assert!(super::parse_lsof(Some(1), "", "permission denied", &[]).is_err());
+        assert!(super::parse_lsof(Some(0), "unexpected output", "", &[]).is_err());
+    }
+
+    #[test]
+    fn only_unrelated_desktop_fuse_warnings_are_safe() {
+        let target = tempfile::NamedTempFile::new().unwrap();
+        let paths = [target.path().to_path_buf()];
+        let warnings = "lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n\
+                        Output information may be incomplete.\n\
+                        lsof: WARNING: can't stat() fuse.gvfsd-fuse file system /run/user/1000/gvfs\n\
+                        Output information may be incomplete.";
+        assert!(super::linux_lsof_stderr_is_safe(warnings, &paths));
+        for stderr in [
+            "lsof: WARNING: can't stat() ext4 file system /opt",
+            "lsof: WARNING: can't stat() fuse.sshfs file system /run/user/1000/gvfs",
+            "lsof: WARNING: can't stat() fuse.portal file system /opt/doc",
+            "lsof: WARNING: can't stat() fuse.portal file system /run/user/invalid/doc",
+            "lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc/subdir",
+            "lsof: WARNING: permission denied",
+            "Output information may be incomplete.",
+        ] {
+            assert!(
+                !super::linux_lsof_stderr_is_safe(stderr, &paths),
+                "{stderr}"
+            );
+        }
+        assert!(!super::linux_lsof_stderr_is_safe(
+            &format!("{warnings}\nlsof: fatal: permission denied"),
+            &paths
+        ));
+        assert!(!super::linux_lsof_stderr_is_safe(warnings, &[]));
+        assert!(!super::linux_lsof_stderr_is_safe(
+            warnings,
+            &[PathBuf::from("/run/user/1000/doc/agy")]
+        ));
+        assert!(!super::linux_lsof_stderr_is_safe(
+            warnings,
+            &[target.path().join("missing")]
+        ));
+        #[cfg(target_os = "linux")]
+        {
+            assert!(super::parse_lsof(Some(1), "", warnings, &paths)
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                super::parse_lsof(Some(0), "p123\ncagy\n", warnings, &paths).unwrap(),
+                ["agy (PID 123)"]
+            );
+            assert!(super::parse_lsof(Some(2), "", warnings, &paths).is_err());
+            assert!(super::parse_lsof(None, "", warnings, &paths).is_err());
+            assert!(super::parse_lsof(Some(0), "unparseable", warnings, &paths).is_err());
+            let link = target.path().with_extension("link");
+            std::os::unix::fs::symlink("/run/user/1000/doc/agy", &link).unwrap();
+            assert!(!super::linux_lsof_stderr_is_safe(warnings, &[link.clone()]));
+            std::fs::remove_file(link).unwrap();
+        }
+        #[cfg(not(target_os = "linux"))]
+        assert!(super::parse_lsof(Some(1), "", warnings, &paths).is_err());
     }
 
     #[cfg(target_os = "macos")]

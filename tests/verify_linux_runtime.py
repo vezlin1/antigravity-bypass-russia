@@ -151,6 +151,23 @@ if args.cli_fixture:
     run('patch-files',str(cli),success=False)
     assert hashlib.sha256(cli.read_bytes()).digest()==stock
     subprocess.run(['umount',lsof],check=True)
+    real_lsof=work/'real-lsof'
+    shutil.copyfile(lsof,real_lsof);real_lsof.chmod(0o755)
+    fake.write_text('#!/missing-lsof-interpreter\n')
+    subprocess.run(['mount','--bind',str(fake),lsof],check=True)
+    run('patch-files',str(cli),success=False)
+    assert hashlib.sha256(cli.read_bytes()).digest()==stock
+    subprocess.run(['umount',lsof],check=True)
+    fake.write_text('#!/bin/sh\necho "lsof: WARNING: can\'t stat() ext4 file system /opt" >&2\nexit 1\n')
+    subprocess.run(['mount','--bind',str(fake),lsof],check=True)
+    run('patch-files',str(cli),success=False)
+    assert hashlib.sha256(cli.read_bytes()).digest()==stock
+    subprocess.run(['umount',lsof],check=True)
+    fake.write_text('#!/bin/sh\necho "lsof: WARNING: can\'t stat() fuse.portal file system /run/user/1000/doc" >&2\necho "    Output information may be incomplete." >&2\necho "lsof: WARNING: can\'t stat() fuse.gvfsd-fuse file system /run/user/1000/gvfs" >&2\necho "    Output information may be incomplete." >&2\nexec "'+str(real_lsof)+'" "$@"\n')
+    subprocess.run(['mount','--bind',str(fake),lsof],check=True)
+    with cli.open('rb'):
+        run('patch-files',str(cli),success=False)
+        assert hashlib.sha256(cli.read_bytes()).digest()==stock
     run('patch-files',str(cli))
     assert hashlib.sha256(cli.read_bytes()).digest()!=stock
     version=subprocess.run([str(cli),'--version'],env=environment,capture_output=True,text=True,timeout=20)
@@ -158,7 +175,9 @@ if args.cli_fixture:
     run('patch-files',str(cli))
     run('rollback',str(cli))
     assert hashlib.sha256(cli.read_bytes()).digest()==stock
-    print('PASS: lsof failure blocks writes; native CLI 1.4.11 patch, execution, repeat patch and exact rollback',flush=True)
+    subprocess.run(['umount',lsof],check=True)
+    print('PASS: missing/failed lsof and unknown warnings block writes; unrelated desktop FUSE warnings allow patching but preserve real holders',flush=True)
+    print('PASS: native CLI 1.4.11 patch, execution, repeat patch and exact rollback with desktop FUSE warnings',flush=True)
 if args.resolved_binary:
     with Path('/etc/passwd').open('a') as file: file.write('systemd-resolve:x:991:991::/run/systemd/resolve:/usr/sbin/nologin\n')
     with Path('/etc/group').open('a') as file: file.write('systemd-resolve:x:991:\n')

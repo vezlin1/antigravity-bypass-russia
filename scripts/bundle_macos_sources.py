@@ -6,7 +6,6 @@ import hashlib
 import io
 from pathlib import Path
 import tarfile
-import textwrap
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,7 +32,9 @@ def source_archive(root=ROOT):
 
 def bundle(payload):
     digest = hashlib.sha256(payload).hexdigest()
-    encoded = "\n".join(textwrap.wrap(base64.b64encode(payload).decode("ascii"), 76))
+    base64_text = base64.b64encode(payload).decode("ascii")
+    # Base64 has no word boundaries; fixed-width slices avoid quadratic wrapping.
+    encoded = "\n".join(base64_text[i:i + 76] for i in range(0, len(base64_text), 76))
     script = r'''#!/bin/bash
 # Current Rust sources included; first launch builds natively on this Mac.
 set -euo pipefail
