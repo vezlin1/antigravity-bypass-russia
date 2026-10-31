@@ -18,6 +18,7 @@ import threading
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('binary', type=Path)
 parser.add_argument('--cli-fixture', type=Path)
+parser.add_argument('--cli-version', help='Expected CLI fixture version (default: pinned Linux CLI)')
 parser.add_argument('--resolved-binary', type=Path)
 parser.add_argument('--dbus-daemon', type=Path)
 parser.add_argument('--inside', action='store_true', help=argparse.SUPPRESS)
@@ -25,9 +26,12 @@ args = parser.parse_args()
 binary = args.binary.resolve()
 if sys.platform != 'linux' or os.geteuid() != 0:
     raise SystemExit('Run as root on Linux; all runtime mutations occur in private namespaces.')
+if args.cli_fixture and not args.cli_version:
+    pinned=json.loads((Path(__file__).resolve().parent/'upstream-versions.json').read_text())
+    args.cli_version=pinned['cli']['linux_amd64']['version']
 if not args.inside:
     command=['unshare', '--mount', '--net', '--pid', '--fork', '--mount-proc', sys.executable, str(Path(__file__).resolve()), str(binary), '--inside']
-    if args.cli_fixture: command.extend(['--cli-fixture',str(args.cli_fixture.resolve())])
+    if args.cli_fixture: command.extend(['--cli-fixture',str(args.cli_fixture.resolve()),'--cli-version',args.cli_version])
     if args.resolved_binary: command.extend(['--resolved-binary',str(args.resolved_binary.resolve()),'--dbus-daemon',str(args.dbus_daemon.resolve())])
     subprocess.run(command, check=True, timeout=180)
     raise SystemExit(0)
@@ -171,13 +175,13 @@ if args.cli_fixture:
     run('patch-files',str(cli))
     assert hashlib.sha256(cli.read_bytes()).digest()!=stock
     version=subprocess.run([str(cli),'--version'],env=environment,capture_output=True,text=True,timeout=20)
-    assert version.returncode==0 and '1.4.11' in version.stdout,version
+    assert version.returncode==0 and args.cli_version in version.stdout,version
     run('patch-files',str(cli))
     run('rollback',str(cli))
     assert hashlib.sha256(cli.read_bytes()).digest()==stock
     subprocess.run(['umount',lsof],check=True)
     print('PASS: missing/failed lsof and unknown warnings block writes; unrelated desktop FUSE warnings allow patching but preserve real holders',flush=True)
-    print('PASS: native CLI 1.4.11 patch, execution, repeat patch and exact rollback with desktop FUSE warnings',flush=True)
+    print(f'PASS: native CLI {args.cli_version} patch, execution, repeat patch and exact rollback with desktop FUSE warnings',flush=True)
 if args.resolved_binary:
     with Path('/etc/passwd').open('a') as file: file.write('systemd-resolve:x:991:991::/run/systemd/resolve:/usr/sbin/nologin\n')
     with Path('/etc/group').open('a') as file: file.write('systemd-resolve:x:991:\n')

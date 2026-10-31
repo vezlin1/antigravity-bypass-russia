@@ -29,7 +29,7 @@ payload_names = {
 if args.macos_only:
     payload_names = {"antigravity-bypass-russia-macos-arm64", "antigravity-bypass-russia-macos-x64", "unlock_and_restore.sh"}
 elif args.linux_only:
-    payload_names = {"antigravity-bypass-russia-linux-x64", "antigravity-bypass-russia-linux-arm64", "unlock_and_restore.sh", "install.sh"}
+    payload_names = {"antigravity-bypass-russia-linux-x64", "antigravity-bypass-russia-linux-arm64", "antigravity-bypass-russia-linux-x64.deb", "unlock_and_restore.sh", "install.sh"}
 assert {p.name for p in directory.iterdir()} == payload_names | {"SHA256SUMS.txt"}, "Unexpected or missing distribution files"
 
 checksums = {}
@@ -77,4 +77,4 @@ if not args.linux_only:
 bash = str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe") if os.name == "nt" else shutil.which("bash")
 assert bash, "Bash is required for launcher syntax validation"
 subprocess.run([bash, "-n", str(launcher.resolve())], check=True, timeout=10)
-print("PASS: exact distribution, SHA-256, native Intel/Apple Silicon payloads and shell syntax")
+print("PASS: exact distribution, SHA-256, native engine payloads and shell syntax")
