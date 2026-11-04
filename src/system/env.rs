@@ -81,7 +81,11 @@ pub fn expand_env_vars(input: &str) -> PathBuf {
             }
             if let Ok(sudo_user) = std::env::var("SUDO_USER") {
                 if !sudo_user.is_empty() && sudo_user != "root" {
-                    let user_home = PathBuf::from(format!("/home/{}", sudo_user));
+                    let user_home = if cfg!(target_os = "macos") {
+                        PathBuf::from(format!("/Users/{}", sudo_user))
+                    } else {
+                        PathBuf::from(format!("/home/{}", sudo_user))
+                    };
                     if user_home.exists() {
                         return user_home.join(subpath);
                     }
@@ -139,7 +143,11 @@ pub fn get_user_homes() -> Vec<PathBuf> {
         }
         if let Ok(sudo_user) = std::env::var("SUDO_USER") {
             if !sudo_user.is_empty() && sudo_user != "root" {
-                let p = PathBuf::from(format!("/home/{}", sudo_user));
+                let p = if cfg!(target_os = "macos") {
+                    PathBuf::from(format!("/Users/{}", sudo_user))
+                } else {
+                    PathBuf::from(format!("/home/{}", sudo_user))
+                };
                 if p.exists() && !homes.contains(&p) {
                     homes.push(p);
                 }
@@ -154,6 +162,18 @@ pub fn get_user_homes() -> Vec<PathBuf> {
         }
     }
     homes
+}
+
+#[cfg(all(test, unix))]
+mod unix_tests {
+    use super::*;
+
+    #[test]
+    fn expands_tilde_with_home_env() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let expanded = expand_env_vars("~/test/sub");
+        assert_eq!(expanded, PathBuf::from(&home).join("test/sub"));
+    }
 }
 
 #[cfg(all(test, windows))]
