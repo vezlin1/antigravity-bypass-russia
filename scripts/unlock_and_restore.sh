@@ -38,7 +38,7 @@ for engine in "$repo_root/target/release/antigravity-bypass-russia" "$script_dir
   if [[ -x "$engine" ]]; then exec "$engine" "$@"; fi
 done
 printf '%s\n' 'Rust engine not found. Download the standalone release for your platform:' >&2
-printf '%s\n' '  Linux:  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia' >&2
-printf '%s\n' '  macOS:  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh' >&2
+printf '%s\n' '  Linux:  curl -fsSL https://github.com/animesao/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia' >&2
+printf '%s\n' '  macOS:  curl -fsSL https://github.com/animesao/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh' >&2
 printf '%s\n' 'Or install Rust (https://rustup.rs) and run this repository script without sudo. The engine requests administrator privileges when needed.' >&2
 exit 1

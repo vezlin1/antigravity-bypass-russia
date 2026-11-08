@@ -165,7 +165,7 @@ jobs:
 
           # Build .deb package for x86_64
           mkdir -p dist/deb/DEBIAN dist/deb/usr/bin
-          python -c 'import tomllib; v = tomllib.loads(open("Cargo.toml").read())["package"]["version"]; open("dist/deb/DEBIAN/control", "w").write(f"Package: antigravity-bypass-russia\nVersion: {v}\nSection: utils\nPriority: optional\nArchitecture: amd64\nDepends: libc6 (>= 2.35), libssl3 | libssl3t64, iproute2, procps, psmisc, lsof, sudo\nMaintainer: Antigravity Contributors\nHomepage: https://github.com/vezlin1/antigravity-bypass-russia\nDescription: Google Antigravity & Gemini bypass in Russia (No VPN, SmartDNS & SIMD Binary Patcher)\n")'
+          python -c 'import tomllib; v = tomllib.loads(open("Cargo.toml").read())["package"]["version"]; open("dist/deb/DEBIAN/control", "w").write(f"Package: antigravity-bypass-russia\nVersion: {v}\nSection: utils\nPriority: optional\nArchitecture: amd64\nDepends: libc6 (>= 2.35), libssl3 | libssl3t64, iproute2, procps, psmisc, lsof, sudo\nMaintainer: Antigravity Contributors\nHomepage: https://github.com/animesao/antigravity-bypass-russia\nDescription: Google Antigravity & Gemini bypass in Russia (No VPN, SmartDNS & SIMD Binary Patcher)\n")'
           cp dist/raw/antigravity-bypass-russia-linux-x64 dist/deb/usr/bin/antigravity-bypass-russia
           chmod 755 dist/deb/usr/bin/antigravity-bypass-russia
           ln -sf /usr/bin/antigravity-bypass-russia dist/deb/usr/bin/ag-bypass
