@@ -74,7 +74,28 @@ if not args.linux_only:
         assert struct.unpack_from("<II", engine) == (0xFEEDFACF, cpu), f"Wrong Mach-O architecture: {arch}"
         assert engine == (args.engines / f"antigravity-bypass-russia-macos-{arch}").read_bytes(), f"Embedded engine differs: {arch}"
 
-bash = str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe") if os.name == "nt" else shutil.which("bash")
+def find_bash():
+    if os.name != "nt":
+        return shutil.which("bash")
+    for candidate in [
+        Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe",
+        Path(os.environ.get("USERPROFILE", "")) / "scoop/apps/git/current/bin/bash.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/Git/bin/bash.exe",
+    ]:
+        if candidate.is_file():
+            return str(candidate)
+    which = shutil.which("bash")
+    if which:
+        return which
+    git = shutil.which("git")
+    if git:
+        for sub in ["bin/bash.exe", "usr/bin/bash.exe"]:
+            candidate = Path(git).resolve().parent.parent / sub
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+bash = find_bash()
 assert bash, "Bash is required for launcher syntax validation"
 subprocess.run([bash, "-n", str(launcher.resolve())], check=True, timeout=10)
 print("PASS: exact distribution, SHA-256, native engine payloads and shell syntax")

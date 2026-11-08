@@ -8,7 +8,28 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-bash = str(Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Git/bin/bash.exe') if os.name == 'nt' else shutil.which('bash')
+def find_bash():
+    if os.name != "nt":
+        return shutil.which("bash")
+    for candidate in [
+        Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe",
+        Path(os.environ.get("USERPROFILE", "")) / "scoop/apps/git/current/bin/bash.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/Git/bin/bash.exe",
+    ]:
+        if candidate.is_file():
+            return str(candidate)
+    which = shutil.which("bash")
+    if which:
+        return which
+    git = shutil.which("git")
+    if git:
+        for sub in ["bin/bash.exe", "usr/bin/bash.exe"]:
+            candidate = Path(git).resolve().parent.parent / sub
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+bash = find_bash()
 with tempfile.TemporaryDirectory(prefix='mac-build-kit-') as temp:
     archive = Path(temp) / 'builder.zip'
     subprocess.run([sys.executable, str(ROOT / 'scripts/package_macos_build_kit.py'), '--output', str(archive)], check=True)

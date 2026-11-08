@@ -9,7 +9,7 @@
 
 [![Платформы](https://img.shields.io/badge/Платформа-Windows_•_macOS_•_Linux-0078D4.svg?style=flat-square&logo=linux&logoColor=white)](README.md)
 [![Сеть](https://img.shields.io/badge/Сеть-VPN_не_нужен-2ea44f.svg?style=flat-square&logo=shield&logoColor=white)](README.md)
-[![Размер](https://img.shields.io/badge/Размер-1.08_МБ_(Rust)-8A2BE2.svg?style=flat-square&logo=rust&logoColor=white)](https://github.com/vezlin1/antigravity-bypass-russia/releases)
+[![Размер](https://img.shields.io/badge/Размер-1.08_МБ_(Rust)-8A2BE2.svg?style=flat-square&logo=rust&logoColor=white)](https://github.com/animesao/antigravity-bypass-russia/releases)
 [![Лицензия](https://img.shields.io/badge/Лицензия-MIT-informational.svg?style=flat-square)](LICENSE)
 
 <p align="center">
@@ -57,7 +57,7 @@
 ### 🪟 Windows 10 / 11
 
 #### Вариант 1: Готовый файл (Рекомендуется)
-1. Скачайте [**`antigravity-bypass-russia.exe`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest) из раздела релизов.
+1. Скачайте [**`antigravity-bypass-russia.exe`**](https://github.com/animesao/antigravity-bypass-russia/releases/latest) из раздела релизов.
 2. Запустите файл двойным кликом (при запросе подтвердите запуск от имени Администратора).
 3. В появившемся меню введите **`1`** (**`Полная разблокировка`**) и нажмите **Enter**.
 4. После сообщения «Готово!» запустите Antigravity и войдите в свой Google-аккаунт.
@@ -70,7 +70,7 @@
 <details>
 <summary><b>Инструкция для PowerShell</b></summary>
 
-1. Скачайте архив проекта: **[Download ZIP](https://github.com/vezlin1/antigravity-bypass-russia/archive/refs/heads/main.zip)** и распакуйте папку.
+1. Скачайте архив проекта: **[Download ZIP](https://github.com/animesao/antigravity-bypass-russia/archive/refs/heads/main.zip)** и распакуйте папку.
 2. Запустите **PowerShell от имени администратора**, перейдите в папку проекта и выполните:
    ```powershell
    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
@@ -86,12 +86,12 @@
 #### Вариант 1: Быстрый запуск в Терминале (Рекомендуется)
 1. Откройте **Терминал** и выполните команду для скачивания и запуска готовой утилиты:
    ```bash
-   curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh
+   curl -fsSL https://github.com/animesao/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh
    ```
 2. В интерактивном меню введите **`1`** (**`Полная разблокировка`**) и нажмите **Enter**. Скрипт настроит системный резолвер и снимет региональные ограничения (при необходимости запросит пароль администратора).
 
 > [!TIP]
-> Вы также можете вручную скачать [**`unlock_and_restore.sh`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest) из раздела релизов и запустить его через Терминал (`chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh`).
+> Вы также можете вручную скачать [**`unlock_and_restore.sh`**](https://github.com/animesao/antigravity-bypass-russia/releases/latest) из раздела релизов и запустить его через Терминал (`chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh`).
 
 #### Вариант 2: Запуск из исходников (Для разработчиков)
 <details>
@@ -99,7 +99,7 @@
 
 Если у вас установлен **Rust** (`cargo`), вы можете запустить утилиту прямо из клонированного репозитория:
 ```bash
-git clone https://github.com/vezlin1/antigravity-bypass-russia.git
+git clone https://github.com/animesao/antigravity-bypass-russia.git
 cd antigravity-bypass-russia
 chmod +x scripts/unlock_and_restore.sh
 ./scripts/unlock_and_restore.sh
@@ -120,7 +120,7 @@ chmod +x scripts/unlock_and_restore.sh
 #### Вариант 1: Установка в один клик (Рекомендуется)
 Выполните команду автоматической установки в терминале:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vezlin1/antigravity-bypass-russia/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/animesao/antigravity-bypass-russia/main/scripts/install.sh | bash
 ```
 Скрипт автоматически определит вашу архитектуру (**x86_64** или **ARM64**), установит утилиту в систему и создаст команды:
 * `antigravity-bypass-russia`
@@ -130,17 +130,17 @@ curl -fsSL https://raw.githubusercontent.com/vezlin1/antigravity-bypass-russia/m
 
 #### Вариант 2: Готовый пакет .deb или бинарный файл
 * **Пакет `.deb` (Ubuntu / Debian / Linux Mint):**
-  Скачайте [**`antigravity-bypass-russia-linux-x64.deb`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest) и установите:
+  Скачайте [**`antigravity-bypass-russia-linux-x64.deb`**](https://github.com/animesao/antigravity-bypass-russia/releases/latest) и установите:
   ```bash
   sudo dpkg -i antigravity-bypass-russia-linux-x64.deb
   ```
 * **Прямой запуск бинарного файла:**
   ```bash
   # Для 64-битных ПК (x86_64):
-  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
+  curl -fsSL https://github.com/animesao/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
 
   # Для ARM64 (Raspberry Pi, Asahi Linux, ARM-серверы):
-  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-arm64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
+  curl -fsSL https://github.com/animesao/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-arm64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
   ```
 * **Arch Linux / Manjaro:**
   В репозитории доступен [`packages/arch/PKGBUILD`](packages/arch/PKGBUILD) для быстрой сборки и установки через `makepkg -si`.
@@ -163,7 +163,7 @@ sudo pacman -S base-devel openssl lsof iproute2 procps-ng psmisc
 
 Склонируйте репозиторий и запустите скрипт:
 ```bash
-git clone https://github.com/vezlin1/antigravity-bypass-russia.git
+git clone https://github.com/animesao/antigravity-bypass-russia.git
 cd antigravity-bypass-russia
 chmod +x scripts/unlock_and_restore.sh
 ./scripts/unlock_and_restore.sh
@@ -265,7 +265,7 @@ chmod +x scripts/unlock_and_restore.sh
 
 ```bash
 # Клонирование репозитория
-git clone https://github.com/vezlin1/antigravity-bypass-russia.git
+git clone https://github.com/animesao/antigravity-bypass-russia.git
 cd antigravity-bypass-russia
 
 # Сборка релизной версии с максимальной оптимизацией (Fat LTO)

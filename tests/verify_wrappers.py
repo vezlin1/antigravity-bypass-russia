@@ -48,7 +48,28 @@ with tempfile.TemporaryDirectory(prefix="ag wrapper ") as temporary:
             assert result.stdout.splitlines() == [a.encode("utf-8").hex() for a in ARGUMENTS], (shell_name, result.stdout)
             print(f"PASS: {shell_name} preserves arguments and failure exit code")
 
-    bash = str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe") if os.name == "nt" else shutil.which("bash")
+    def find_bash():
+        if os.name != "nt":
+            return shutil.which("bash")
+        for candidate in [
+            Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe",
+            Path(os.environ.get("USERPROFILE", "")) / "scoop/apps/git/current/bin/bash.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/Git/bin/bash.exe",
+        ]:
+            if candidate.is_file():
+                return str(candidate)
+        which = shutil.which("bash")
+        if which:
+            return which
+        git = shutil.which("git")
+        if git:
+            for sub in ["bin/bash.exe", "usr/bin/bash.exe"]:
+                candidate = Path(git).resolve().parent.parent / sub
+                if candidate.is_file():
+                    return str(candidate)
+        return None
+
+    bash = find_bash()
     if bash and Path(bash).is_file():
         wrapper = folder / "unlock_and_restore.sh"
         shutil.copyfile(ROOT / "scripts" / wrapper.name, wrapper)

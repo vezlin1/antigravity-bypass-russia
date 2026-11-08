@@ -18,7 +18,28 @@ x64 = arm.replace(b"arm64", b"x86_64")
 script = bundle(arm, x64)
 payloads = re.findall(r"<<'ANTIGRAVITY_ENGINE'[^\n]*\n(.*?)\nANTIGRAVITY_ENGINE", script, re.S)
 assert [gzip.decompress(base64.b64decode(p)) for p in payloads] == [arm, x64]
-bash = str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe") if os.name == "nt" else shutil.which("bash")
+def find_bash():
+    if os.name != "nt":
+        return shutil.which("bash")
+    for candidate in [
+        Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe",
+        Path(os.environ.get("USERPROFILE", "")) / "scoop/apps/git/current/bin/bash.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/Git/bin/bash.exe",
+    ]:
+        if candidate.is_file():
+            return str(candidate)
+    which = shutil.which("bash")
+    if which:
+        return which
+    git = shutil.which("git")
+    if git:
+        for sub in ["bin/bash.exe", "usr/bin/bash.exe"]:
+            candidate = Path(git).resolve().parent.parent / sub
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+bash = find_bash()
 assert bash and Path(bash).is_file(), "Bash is required to verify the release launcher"
 with tempfile.TemporaryDirectory(prefix="ag-bundle-test-") as temp:
     root = Path(temp)

@@ -71,6 +71,27 @@ pub fn discover_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
         routes::sync_physical_hosts(&addresses)?;
         let mut ips = resolvers::rank_tls_v4(&candidates, &host);
         if ips.is_empty() {
+            // Fallback: if no proxy candidate yielded a verified route, probe standard resolved addresses
+            use std::net::ToSocketAddrs;
+            if let Ok(addrs) = (host.as_str(), 443).to_socket_addrs() {
+                let direct_candidates: Vec<IpAddr> = addrs
+                    .map(|s| s.ip())
+                    .filter(|a| a.is_ipv4())
+                    .collect();
+                if !direct_candidates.is_empty() {
+                    let direct_v4: Vec<_> = direct_candidates
+                        .iter()
+                        .filter_map(|ip| match ip {
+                            IpAddr::V4(ip) => Some(*ip),
+                            _ => None,
+                        })
+                        .collect();
+                    let _ = routes::sync_physical_hosts(&direct_v4);
+                    ips = resolvers::rank_tls_v4(&direct_candidates, &host);
+                }
+            }
+        }
+        if ips.is_empty() {
             continue;
         }
         if ips.len() > MAX_FALLBACKS {

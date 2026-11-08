@@ -30,7 +30,28 @@ with tarfile.open(fileobj=io.BytesIO(gzip.decompress(payload))) as archive:
 script = bundle(payload)
 encoded = re.search(r"<<'ANTIGRAVITY_SOURCES'[^\n]*\n(.*?)\nANTIGRAVITY_SOURCES", script, re.S).group(1)
 assert base64.b64decode(encoded) == payload
-bash = str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe") if os.name == "nt" else shutil.which("bash")
+def find_bash():
+    if os.name != "nt":
+        return shutil.which("bash")
+    for candidate in [
+        Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe",
+        Path(os.environ.get("USERPROFILE", "")) / "scoop/apps/git/current/bin/bash.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/Git/bin/bash.exe",
+    ]:
+        if candidate.is_file():
+            return str(candidate)
+    which = shutil.which("bash")
+    if which:
+        return which
+    git = shutil.which("git")
+    if git:
+        for sub in ["bin/bash.exe", "usr/bin/bash.exe"]:
+            candidate = Path(git).resolve().parent.parent / sub
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+bash = find_bash()
 assert bash and Path(bash).is_file(), "Bash is required"
 with tempfile.TemporaryDirectory(prefix="ag source bundle ") as temporary:
     root = Path(temporary)

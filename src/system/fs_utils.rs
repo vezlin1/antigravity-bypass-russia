@@ -19,6 +19,9 @@ pub fn robust_write_file(path: &Path, data: &[u8]) -> Result<(), String> {
 
 pub(super) fn prepared_file(path: &Path, data: &[u8]) -> Result<tempfile::NamedTempFile, String> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        create_private_directory(parent)?;
+    }
     let mut temp =
         tempfile::NamedTempFile::new_in(parent).map_err(|e| format!("Временный файл: {e}"))?;
     temp.write_all(data).map_err(|e| e.to_string())?;
@@ -51,14 +54,21 @@ pub(super) fn prepared_file(path: &Path, data: &[u8]) -> Result<tempfile::NamedT
             {
                 use std::os::unix::{fs::MetadataExt, io::AsRawFd};
                 let metadata = fs::metadata(parent).map_err(|e| e.to_string())?;
-                if unsafe {
-                    libc::fchown(temp.as_file().as_raw_fd(), metadata.uid(), metadata.gid())
-                } != 0
-                {
-                    return Err(format!(
-                        "Не сохранить владельца нового файла: {}",
-                        std::io::Error::last_os_error()
-                    ));
+                let temp_meta = temp.as_file().metadata().map_err(|e| e.to_string())?;
+                if temp_meta.uid() != metadata.uid() || temp_meta.gid() != metadata.gid() {
+                    if unsafe {
+                        libc::fchown(temp.as_file().as_raw_fd(), metadata.uid(), metadata.gid())
+                    } != 0
+                    {
+                        let err = std::io::Error::last_os_error();
+                        if err.raw_os_error() != Some(libc::EPERM)
+                            || temp_meta.uid() != unsafe { libc::geteuid() }
+                        {
+                            return Err(format!(
+                                "Не сохранить владельца нового файла: {err}"
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -96,11 +106,19 @@ pub(super) fn inherit_directory_owner(path: &Path) -> Result<(), String> {
             .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
             .open(path)
             .map_err(|e| e.to_string())?;
-        if unsafe { libc::fchown(file.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0 {
-            return Err(format!(
-                "Не сохранить владельца каталога: {}",
-                std::io::Error::last_os_error()
-            ));
+        let file_meta = file.metadata().map_err(|e| e.to_string())?;
+        if file_meta.uid() != metadata.uid() || file_meta.gid() != metadata.gid() {
+            if unsafe { libc::fchown(file.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::EPERM)
+                    || file_meta.uid() != unsafe { libc::geteuid() }
+                {
+                    return Err(format!(
+                        "Не сохранить владельца каталога: {}",
+                        err
+                    ));
+                }
+            }
         }
     }
     #[cfg(not(unix))]
@@ -109,9 +127,8 @@ pub(super) fn inherit_directory_owner(path: &Path) -> Result<(), String> {
 }
 
 pub(super) fn create_private_directory(path: &Path) -> Result<(), String> {
-    let builder = fs::DirBuilder::new();
-    #[cfg(unix)]
-    let mut builder = builder;
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
@@ -181,4 +198,25 @@ pub fn post_write_hook(path: &Path) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     let _ = path;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepared_file_creates_missing_parent_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let deep_target = temp
+            .path()
+            .join("sub")
+            .join("dir.ag-backups")
+            .join("target.bin");
+        assert!(!deep_target.parent().unwrap().exists());
+
+        let file = prepared_file(&deep_target, b"test-content").unwrap();
+        assert!(deep_target.parent().unwrap().exists());
+        file.persist(&deep_target).unwrap();
+        assert_eq!(fs::read(&deep_target).unwrap(), b"test-content");
+    }
 }
