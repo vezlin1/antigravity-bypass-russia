@@ -1,9 +1,9 @@
 #!/bin/bash
 # Antigravity Bypass Russia: Automated One-Line Installer for Linux and macOS.
-# Usage: curl -fsSL https://raw.githubusercontent.com/vezlin1/antigravity-bypass-russia/main/scripts/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/animesao/antigravity-bypass-russia/main/scripts/install.sh | bash
 set -euo pipefail
 
-REPO="vezlin1/antigravity-bypass-russia"
+REPO="animesao/antigravity-bypass-russia"
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
