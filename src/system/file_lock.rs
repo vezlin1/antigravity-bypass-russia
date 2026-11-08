@@ -358,22 +358,20 @@ fn linux_lsof_stderr_is_safe(stderr: &str, paths: &[PathBuf]) -> bool {
         else {
             return false;
         };
-        let directory = match filesystem {
-            "fuse.portal" => "doc",
-            "fuse.gvfsd-fuse" => "gvfs",
-            _ => return false,
+        let is_desktop_fuse = match filesystem {
+            "fuse.portal" => is_user_desktop_mount(mount, "doc"),
+            "fuse.gvfsd-fuse" => is_user_desktop_mount(mount, "gvfs"),
+            _ => false,
         };
-        let Some(uid) = mount
-            .strip_prefix("/run/user/")
-            .and_then(|path| path.strip_suffix(&format!("/{directory}")))
-        else {
-            return false;
-        };
-        if uid.is_empty() || !uid.bytes().all(|b| b.is_ascii_digit()) || uid.parse::<u32>().is_err()
-        {
+        let is_container_storage = mount.starts_with("/var/lib/containers/")
+            || mount.starts_with("/var/lib/docker/")
+            || mount.starts_with("/run/containers/")
+            || mount.starts_with("/run/docker/");
+
+        if !is_desktop_fuse && !is_container_storage {
             return false;
         }
-        // These desktop mounts are unrelated only when every target can be
+        // These mounts are unrelated only when every target can be
         // resolved outside them. Preserve errors for targets reached via links.
         let mount = std::path::Path::new(mount);
         if paths.is_empty()
@@ -389,6 +387,17 @@ fn linux_lsof_stderr_is_safe(stderr: &str, paths: &[PathBuf]) -> bool {
         incomplete_expected = true;
     }
     true
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn is_user_desktop_mount(mount: &str, directory: &str) -> bool {
+    let Some(uid) = mount
+        .strip_prefix("/run/user/")
+        .and_then(|path| path.strip_suffix(&format!("/{directory}")))
+    else {
+        return false;
+    };
+    !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()) && uid.parse::<u32>().is_ok()
 }
 
 #[cfg(test)]
@@ -514,6 +523,16 @@ mod mac_lock_tests {
                         lsof: WARNING: can't stat() fuse.gvfsd-fuse file system /run/user/1000/gvfs\n\
                         Output information may be incomplete.";
         assert!(super::linux_lsof_stderr_is_safe(warnings, &paths));
+        let container_warning = "lsof: WARNING: can't stat() ext4 file system /var/lib/containers/storage/overlay\n\
+                                 Output information may be incomplete.";
+        assert!(super::linux_lsof_stderr_is_safe(container_warning, &paths));
+        let docker_warning = "lsof: WARNING: can't stat() overlay file system /var/lib/docker/overlay2\n\
+                              Output information may be incomplete.";
+        assert!(super::linux_lsof_stderr_is_safe(docker_warning, &paths));
+        assert!(!super::linux_lsof_stderr_is_safe(
+            container_warning,
+            &[PathBuf::from("/var/lib/containers/storage/overlay/agy")]
+        ));
         for stderr in [
             "lsof: WARNING: can't stat() ext4 file system /opt",
             "lsof: WARNING: can't stat() fuse.sshfs file system /run/user/1000/gvfs",

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,24 +35,35 @@ def fixture(root, version, arch, expected):
     folder.mkdir(parents=True, exist_ok=True)
     url = ("https://github.com/google-antigravity/antigravity-cli/releases/download/"
            f"{version}/agy_cli_mac_{arch}.tar.gz")
-    print(f"Download official CLI {version} macOS {arch}", flush=True)
     request = urllib.request.Request(url, headers={"User-Agent": "antigravity-profile-regression"})
-    with tempfile.TemporaryFile() as download:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            shutil.copyfileobj(response, download)
-        download.seek(0)
-        with tarfile.open(fileobj=download, mode="r:gz") as archive:
-            members = [m for m in archive.getmembers()
-                       if m.isfile() and Path(m.name).name == "antigravity"]
-            if len(members) != 1:
-                raise RuntimeError("Expected exactly one CLI executable in the archive")
-            # Read one regular member; never extract archive paths or symlinks.
-            with archive.extractfile(members[0]) as source, binary.open("wb") as output:
-                shutil.copyfileobj(source, output)
-    if digest(binary) != expected:
-        binary.unlink()
-        raise RuntimeError(f"Official CLI checksum mismatch: {version} {arch}")
-    return binary
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            print(f"Download official CLI {version} macOS {arch} (attempt {attempt}/{attempts})", flush=True)
+            with tempfile.TemporaryFile() as download:
+                with urllib.request.urlopen(request, timeout=180) as response:
+                    shutil.copyfileobj(response, download)
+                download.seek(0)
+                with tarfile.open(fileobj=download, mode="r:gz") as archive:
+                    members = [m for m in archive.getmembers()
+                               if m.isfile() and Path(m.name).name == "antigravity"]
+                    if len(members) != 1:
+                        raise RuntimeError("Expected exactly one CLI executable in the archive")
+                    # Read one regular member; never extract archive paths or symlinks.
+                    with archive.extractfile(members[0]) as source, binary.open("wb") as output:
+                        shutil.copyfileobj(source, output)
+            if digest(binary) != expected:
+                if binary.is_file():
+                    binary.unlink()
+                raise RuntimeError(f"Official CLI checksum mismatch: {version} {arch}")
+            return binary
+        except Exception as e:
+            if binary.is_file():
+                binary.unlink()
+            if attempt == attempts:
+                raise
+            print(f"Download attempt {attempt} failed: {e}. Retrying in 5s...", flush=True)
+            time.sleep(5)
 
 
 def main():
