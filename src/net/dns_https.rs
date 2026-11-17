@@ -113,6 +113,52 @@ fn exchange_until(
 /// stayed silent for this long. A healthy bootstrap keeps priority and the
 /// endpoint name is not leaked to the system resolver on every query.
 const SYSTEM_DNS_DELAY: Duration = Duration::from_millis(750);
+const ANSWER_GRACE: Duration = Duration::from_millis(300);
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AnswerQuality {
+    DnsError,
+    NoAddress,
+    Ordinary,
+    Preferred,
+}
+
+// The TLS probe during route setup verifies each candidate. Here we can only
+// distinguish DNS evidence, using the same Google ranges as the provider race.
+fn answer_quality(answer: &[u8]) -> AnswerQuality {
+    if !client::is_successful_response(answer) {
+        return AnswerQuality::DnsError;
+    }
+    let Some(qtype @ (1 | 28)) = client::question_type(answer) else {
+        return AnswerQuality::Preferred;
+    };
+    let agent = client::question_name(answer).is_some_and(|name| {
+        super::provider::NRPT_AGENT
+            .iter()
+            .any(|host| host.eq_ignore_ascii_case(&name))
+    });
+    let mut quality = AnswerQuality::NoAddress;
+    for ip in client::answer_addrs(answer) {
+        if ip.is_ipv4() != (qtype == 1) {
+            continue;
+        }
+        if !agent {
+            return AnswerQuality::Preferred;
+        }
+        if ip.is_unspecified()
+            || ip.is_loopback()
+            || ip.is_multicast()
+            || matches!(ip, IpAddr::V4(v4) if v4.is_broadcast())
+        {
+            continue;
+        }
+        if !super::resolvers::looks_google(&ip) {
+            return AnswerQuality::Preferred;
+        }
+        quality = AnswerQuality::Ordinary;
+    }
+    quality
+}
 
 pub fn query(provider: &DohProvider, query: &[u8], if_index: u32) -> Result<Vec<u8>, String> {
     let source = source_address(if_index)?;
@@ -163,11 +209,17 @@ fn race_exchanges(
     }
     let mut bootstrap_error = None;
     let mut system_error = None;
+    let mut best: Option<(AnswerQuality, Vec<u8>)> = None;
+    let mut settle_at = deadline;
     loop {
-        if Instant::now() >= deadline {
+        if Instant::now() >= settle_at {
             break;
         }
-        if !system_started && (bootstrap_pending == 0 || Instant::now() >= fallback_at) {
+        let may_start_system = !system_started
+            && best
+                .as_ref()
+                .is_none_or(|(quality, _)| *quality < AnswerQuality::Ordinary);
+        if may_start_system && (bootstrap_pending == 0 || Instant::now() >= fallback_at) {
             // Fast failures need no artificial delay; silent addresses still
             // get the bootstrap preference window. All attempts share a deadline.
             start(Attempt::System, system.clone());
@@ -177,26 +229,42 @@ fn race_exchanges(
         if bootstrap_pending == 0 && !system_pending {
             break;
         }
-        let until = if system_started {
-            deadline
+        let until = if may_start_system && !system_started {
+            settle_at.min(fallback_at)
         } else {
-            deadline.min(fallback_at)
+            settle_at
         };
         match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
-            Ok((_, Ok(answer))) => return Ok(answer),
-            Ok((attempt, Err(failure))) => match attempt {
-                Attempt::Bootstrap => {
-                    bootstrap_pending -= 1;
-                    bootstrap_error = Some(failure);
+            Ok((attempt, result)) => {
+                match attempt {
+                    Attempt::Bootstrap => bootstrap_pending -= 1,
+                    Attempt::System => system_pending = false,
                 }
-                Attempt::System => {
-                    system_pending = false;
-                    system_error = Some(failure);
+                match result {
+                    Ok(answer) => {
+                        let quality = answer_quality(&answer);
+                        if quality == AnswerQuality::Preferred {
+                            return Ok(answer);
+                        }
+                        if best.as_ref().is_none_or(|(old, _)| quality > *old) {
+                            best = Some((quality, answer));
+                            if quality == AnswerQuality::Ordinary {
+                                settle_at = deadline.min(Instant::now() + ANSWER_GRACE);
+                            }
+                        }
+                    }
+                    Err(error) => match attempt {
+                        Attempt::Bootstrap => bootstrap_error = Some(error),
+                        Attempt::System => system_error = Some(error),
+                    },
                 }
-            },
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+    }
+    if let Some((_, answer)) = best {
+        return Ok(answer);
     }
     let timeout = "DoH: deadline expired";
     if provider.bootstrap.is_empty() {
@@ -276,6 +344,51 @@ mod tests {
         }
     }
 
+    fn a_reply(host: &str, ip: [u8; 4]) -> Vec<u8> {
+        client::address_response(&client::build_query(host, 71), &[ip.into()]).unwrap()
+    }
+
+    #[test]
+    fn unusable_agent_addresses_rank_below_a_normal_google_reply() {
+        let host = "cloudcode-pa.googleapis.com";
+        for ip in [[0, 0, 0, 0], [127, 0, 0, 1], [255; 4], [224, 0, 0, 1]] {
+            assert!(
+                answer_quality(&a_reply(host, ip))
+                    < answer_quality(&a_reply(host, [142, 250, 1, 1]))
+            );
+        }
+        assert!(
+            answer_quality(&a_reply("other.test", [142, 250, 1, 1])) == AnswerQuality::Preferred
+        );
+    }
+
+    #[test]
+    fn agent_bootstraps_prefer_the_slower_route_over_passthrough_or_empty_dns() {
+        let host = "daily-cloudcode-pa.googleapis.com";
+        let query = client::build_query(host, 71);
+        let mut p = provider(true);
+        p.bootstrap.push("192.0.2.2".parse().unwrap());
+        let route = a_reply(host, [203, 0, 113, 9]);
+        for first in [
+            a_reply(host, [172, 217, 1, 1]),
+            client::nodata_response(&query),
+            client::servfail_response(&query),
+        ] {
+            let second = route.clone();
+            let answer = race_exchanges(&p, TIMEOUT, SYSTEM_DNS_DELAY, move |candidate, _| {
+                if candidate.bootstrap == ["192.0.2.1".parse::<IpAddr>().unwrap()] {
+                    Ok(first.clone())
+                } else {
+                    assert!(!candidate.bootstrap.is_empty());
+                    std::thread::sleep(Duration::from_millis(25));
+                    Ok(second.clone())
+                }
+            })
+            .unwrap();
+            assert_eq!(answer, route);
+        }
+    }
+
     #[test]
     fn healthy_bootstrap_does_not_start_a_system_lookup() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -287,12 +400,38 @@ mod tests {
             move |candidate, _| {
                 assert!(!candidate.bootstrap.is_empty());
                 worker_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(vec![1, 2, 3])
+                Ok(a_reply("example.test", [192, 0, 2, 1]))
             },
         )
         .unwrap();
-        assert_eq!(answer, [1, 2, 3]);
+        assert_eq!(answer, a_reply("example.test", [192, 0, 2, 1]));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn keeps_the_passthrough_answer_when_the_other_bootstrap_stalls() {
+        let host = "cloudcode-pa.googleapis.com";
+        let mut p = provider(true);
+        p.bootstrap.push("192.0.2.2".parse().unwrap());
+        let (finished, wait) = mpsc::channel();
+        let wait = Mutex::new(wait);
+        let answer = race_exchanges(
+            &p,
+            Duration::from_secs(3),
+            Duration::from_secs(2),
+            move |candidate, _| {
+                if candidate.bootstrap == ["192.0.2.1".parse::<IpAddr>().unwrap()] {
+                    Ok(a_reply(host, [142, 250, 1, 1]))
+                } else {
+                    // A regression waiting for the whole budget selects this later answer.
+                    let _ = wait.lock().unwrap().recv_timeout(Duration::from_secs(1));
+                    Ok(a_reply(host, [203, 0, 113, 9]))
+                }
+            },
+        )
+        .unwrap();
+        let _ = finished.send(());
+        assert_eq!(answer, a_reply(host, [142, 250, 1, 1]));
     }
 
     #[test]
@@ -303,14 +442,14 @@ mod tests {
             Duration::from_secs(2),
             |candidate, _| {
                 if candidate.bootstrap.is_empty() {
-                    Ok(vec![4, 5, 6])
+                    Ok(a_reply("example.test", [192, 0, 2, 2]))
                 } else {
                     Err("retired bootstrap".into())
                 }
             },
         )
         .unwrap();
-        assert_eq!(answer, [4, 5, 6]);
+        assert_eq!(answer, a_reply("example.test", [192, 0, 2, 2]));
     }
 
     #[test]
@@ -331,12 +470,12 @@ mod tests {
                         deadline.saturating_duration_since(Instant::now())
                             < Duration::from_millis(290)
                     );
-                    Ok(vec![7, 8, 9])
+                    Ok(a_reply("example.test", [192, 0, 2, 3]))
                 }
             },
         )
         .unwrap();
-        assert_eq!(answer, [7, 8, 9]);
+        assert_eq!(answer, a_reply("example.test", [192, 0, 2, 3]));
         assert!(started.elapsed() < Duration::from_millis(400));
     }
 

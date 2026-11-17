@@ -53,17 +53,15 @@ pub struct ResolveHit {
 }
 
 pub fn all_provider_v4() -> Vec<String> {
-    resolver_pool::load()
-        .unwrap_or_default()
-        .iter()
-        .flat_map(|p| p.udp_addresses().iter().map(ToString::to_string))
-        .collect()
+    configured_udp_v4(&resolver_pool::load().unwrap_or_default())
 }
-pub fn fallback_v4() -> Vec<String> {
-    resolver_pool::load()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|p| p.udp_addresses().first().map(ToString::to_string))
+
+pub(super) fn configured_udp_v4(pool: &[ActiveProvider]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    pool.iter()
+        .flat_map(|p| p.udp_addresses())
+        .filter(|ip| seen.insert(**ip))
+        .map(ToString::to_string)
         .collect()
 }
 
@@ -587,18 +585,32 @@ pub fn substituting_addrs(name: &str, interface: u32) -> Vec<String> {
         return vec![];
     };
     let (hits, reference) = race_providers(&pool, &build_query(name, 0x5355), interface, false);
-    let mut ips = Vec::new();
+    substituting_udp_servers(&pool, &hits, &reference)
+}
+
+fn substituting_udp_servers(
+    pool: &[ActiveProvider],
+    hits: &[RaceResult],
+    reference: &[IpAddr],
+) -> Vec<String> {
+    let mut confirmed = Vec::new();
+    let mut backups = Vec::new();
     for hit in hits {
-        if classify(&hit.addrs, &reference, &[]) == Verdict::Substituted {
-            // Use the endpoint that actually answered, never a DoH bootstrap IP.
-            if let Some(ip) = hit.server {
-                if !ips.contains(&ip.to_string()) {
-                    ips.push(ip.to_string());
-                }
+        if let Some(server) = hit.server {
+            if classify(&hit.addrs, reference, &[]) == Verdict::Substituted {
+                confirmed.push(server);
+                backups.extend_from_slice(pool[hit.idx].udp_addresses());
             }
         }
     }
-    ips
+    // Try every confirmed server before any sibling which has not answered.
+    let mut seen = std::collections::HashSet::new();
+    confirmed
+        .into_iter()
+        .chain(backups)
+        .filter(|ip| seen.insert(*ip))
+        .map(|ip| ip.to_string())
+        .collect()
 }
 
 #[derive(serde::Serialize)]
@@ -712,6 +724,29 @@ mod tests {
 
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn udp_rules_put_responding_servers_first_and_keep_their_other_addresses_once() {
+        let first = Ipv4Addr::new(192, 0, 2, 1);
+        let second = Ipv4Addr::new(192, 0, 2, 2);
+        let third = Ipv4Addr::new(192, 0, 2, 3);
+        let udp = |name: &str, ips| ActiveProvider {
+            name: name.into(),
+            transport: resolver_pool::Transport::Udp(ips),
+        };
+        let pool = [udp("a", vec![first, second]), udp("b", vec![first, third])];
+        let hit = |idx, server| RaceResult {
+            idx,
+            server,
+            addrs: vec![v4(203, 0, 113, 9)],
+            reply: vec![],
+        };
+        let hits = [hit(0, Some(second)), hit(1, Some(third))];
+        assert_eq!(
+            substituting_udp_servers(&pool, &hits, &[v4(142, 250, 1, 1)]),
+            [second, third, first].map(|ip| ip.to_string())
+        );
     }
 
     #[test]

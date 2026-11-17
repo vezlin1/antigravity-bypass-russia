@@ -34,21 +34,18 @@ use routes::{add_static_routes, remove_static_routes};
 use std::thread;
 use std::time::Duration;
 
-fn assemble_nameservers(via_relay: bool, substituters: &[&str]) -> String {
-    let mut servers: Vec<String> = Vec::new();
-    if via_relay {
-        servers.push(LISTEN_IP.to_string());
-    }
-    if substituters.is_empty() {
-        for s in resolvers::fallback_v4() {
-            servers.push(s.to_string());
-        }
+fn assemble_nameservers(via_relay: bool, substituters: &[&str], fallback: &[&str]) -> String {
+    let servers = if substituters.is_empty() {
+        fallback
     } else {
-        for s in substituters {
-            servers.push((*s).to_string());
-        }
-    }
-    servers.join(";")
+        substituters
+    };
+    via_relay
+        .then_some(LISTEN_IP)
+        .into_iter()
+        .chain(servers.iter().copied())
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 fn assemble_dns_rules(
@@ -57,6 +54,8 @@ fn assemble_dns_rules(
     via_relay: bool,
     use_split_dns: bool,
 ) -> Vec<(String, String)> {
+    let fallback = resolvers::all_provider_v4();
+    let fallback: Vec<_> = fallback.iter().map(String::as_str).collect();
     let namespace = |name: &str| {
         if use_split_dns {
             name.trim_start_matches('.').to_ascii_lowercase()
@@ -68,12 +67,20 @@ fn assemble_dns_rules(
     // also covers that domain; macOS maps exact and suffix names to one file.
     let mut rules: Vec<_> = agent_rules
         .iter()
-        .map(|(name, servers)| (namespace(name), assemble_nameservers(via_relay, servers)))
+        .map(|(name, servers)| {
+            (
+                namespace(name),
+                assemble_nameservers(via_relay, servers, &fallback),
+            )
+        })
         .collect();
     for name in NRPT_STUDIO {
         let name = namespace(name);
         if !rules.iter().any(|(existing, _)| *existing == name) {
-            rules.push((name, assemble_nameservers(via_relay, studio_servers)));
+            rules.push((
+                name,
+                assemble_nameservers(via_relay, studio_servers, &fallback),
+            ));
         }
     }
     rules
@@ -101,17 +108,32 @@ mod tests {
 
     #[test]
     fn classic_mode_keeps_external_dns_fallbacks_alongside_the_relay() {
+        let pool = super::resolver_pool::from_config(&super::config::Config::default()).unwrap();
+        let fallback = super::resolvers::configured_udp_v4(&pool);
+        let servers: Vec<_> = fallback.iter().map(String::as_str).collect();
         assert_eq!(
-            super::assemble_nameservers(true, &["1.2.3.4"]),
+            super::assemble_nameservers(true, &["1.2.3.4"], &servers),
             format!("{};1.2.3.4", super::LISTEN_IP)
         );
-        assert_eq!(super::assemble_nameservers(false, &["1.2.3.4"]), "1.2.3.4");
-        assert_eq!(super::assemble_nameservers(false, &[]), "193.233.112.67");
+        assert_eq!(
+            super::assemble_nameservers(false, &["1.2.3.4"], &servers),
+            "1.2.3.4"
+        );
+        assert_eq!(
+            super::assemble_nameservers(false, &[], &servers),
+            "193.233.112.67;193.233.112.68"
+        );
+        assert_eq!(
+            super::assemble_nameservers(true, &[], &servers),
+            format!("{};193.233.112.67;193.233.112.68", super::LISTEN_IP)
+        );
     }
 
     #[test]
     fn macos_rules_keep_agent_dns_when_studio_results_differ() {
         use super::*;
+        let fallback = resolvers::all_provider_v4();
+        let fallback: Vec<_> = fallback.iter().map(String::as_str).collect();
         let cases: &[(&[&str], &[&str])] = &[
             (&["45.155.204.190"], &["111.88.96.50", "45.155.204.190"]),
             (
@@ -143,7 +165,7 @@ mod tests {
             for host in NRPT_AGENT {
                 assert_eq!(
                     rules.iter().find(|(name, _)| name == host).unwrap().1,
-                    assemble_nameservers(false, agent_servers)
+                    assemble_nameservers(false, agent_servers, &fallback)
                 );
             }
             assert_eq!(
@@ -152,7 +174,7 @@ mod tests {
                     .find(|(name, _)| name == "aistudio.google.com")
                     .unwrap()
                     .1,
-                assemble_nameservers(false, studio_servers)
+                assemble_nameservers(false, studio_servers, &fallback)
             );
             let dir = tempfile::tempdir().unwrap();
             let resolver_dir = dir.path().join("resolver");
@@ -168,7 +190,7 @@ mod tests {
                 .collect();
             assert_eq!(
                 servers.join(";"),
-                assemble_nameservers(false, agent_servers)
+                assemble_nameservers(false, agent_servers, &fallback)
             );
             assert!(split_dns::remove(&resolver_dir, &nrpt_domains()).is_empty());
             for domain in &expected_domains {
@@ -201,7 +223,7 @@ mod tests {
             for host in NRPT_AGENT {
                 assert_eq!(
                     rules.iter().find(|(name, _)| name == host).unwrap().1,
-                    assemble_nameservers(via_relay, &agent_servers)
+                    assemble_nameservers(via_relay, &agent_servers, &[])
                 );
             }
             assert_eq!(
@@ -210,7 +232,7 @@ mod tests {
                     .find(|(name, _)| name == ".generativelanguage.googleapis.com")
                     .unwrap()
                     .1,
-                assemble_nameservers(via_relay, &studio_servers)
+                assemble_nameservers(via_relay, &studio_servers, &[])
             );
         }
     }
@@ -560,7 +582,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
             let subs = resolvers::substituting_addrs(host, if_index);
             if subs.is_empty() {
                 sub_notes.push(format!("{host}: подмена через прямой UDP не подтверждена"));
-                agent_rules.push(((*name).to_string(), resolvers::fallback_v4()));
+                agent_rules.push(((*name).to_string(), resolvers::all_provider_v4()));
             } else {
                 sub_notes.push(format!("{host}: {}", subs.join(", ")));
                 agent_rules.push(((*name).to_string(), subs));
@@ -575,8 +597,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
             }
         }
         if studio_subs.is_empty() {
-            sub_notes
-                .push("Studio/Gemini: подмена через прямой UDP не подтверждена".into());
+            sub_notes.push("Studio/Gemini: подмена через прямой UDP не подтверждена".into());
         } else {
             sub_notes.push(format!("Studio/Gemini: {}", studio_subs.join(", ")));
         }
@@ -637,7 +658,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     if !relay_ok {
         return Err(format!("DNS Linux не переключён: {relay_note}"));
     }
-    if !relay_ok && resolvers::fallback_v4().is_empty() {
+    if !relay_ok && resolvers::all_provider_v4().is_empty() {
         #[cfg(not(windows))]
         return Err("Включены только DoH-провайдеры, но локальный DNS не запустился".into());
         #[cfg(windows)]
