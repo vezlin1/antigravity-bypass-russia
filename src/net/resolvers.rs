@@ -12,16 +12,6 @@ use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub struct Provider {
-    pub name: &'static str,
-    pub v4: &'static [&'static str],
-}
-
-pub const PROVIDERS: &[Provider] = &[Provider {
-    name: "geohide.ru",
-    v4: &["193.233.112.67", "193.233.112.68"],
-}];
-
 const REFERENCE_V4: &[&str] = &["8.8.8.8", "1.1.1.1"];
 const REFERENCE_STUBS: [Ipv4Addr; 2] = [Ipv4Addr::new(8, 6, 112, 0), Ipv4Addr::new(8, 47, 69, 0)];
 
@@ -581,9 +571,13 @@ fn resolve_uncached(pool: &[ActiveProvider], query: &[u8], interface: u32) -> Op
 
 /// Only UDP addresses belong in NRPT/resolver files. DoH is served by the local worker.
 pub fn substituting_addrs(name: &str, interface: u32) -> Vec<String> {
-    let Ok(pool) = resolver_pool::load() else {
+    let Ok(mut pool) = resolver_pool::load() else {
         return vec![];
     };
+    pool.retain(|provider| !provider.udp_addresses().is_empty());
+    if pool.is_empty() {
+        return vec![];
+    }
     let (hits, reference) = race_providers(&pool, &build_query(name, 0x5355), interface, false);
     substituting_udp_servers(&pool, &hits, &reference)
 }
@@ -1076,7 +1070,7 @@ mod tests {
         config.doh[0].url = "https://another.test/dns-query".into();
         assert!(key != cache_key(&resolver_pool::from_config(&config).unwrap(), &query, 0));
         config = super::super::config::Config::default();
-        config.provider_order = vec!["geohide.ru".into(), "dns-ai.ru".into()];
+        config.provider_order = vec!["eu.geohide.ru".into(), "dns-ai.ru".into()];
         assert!(key != cache_key(&resolver_pool::from_config(&config).unwrap(), &query, 0));
         config.disabled_providers.push("dns-ai.ru".into());
         assert!(key != cache_key(&resolver_pool::from_config(&config).unwrap(), &query, 0));

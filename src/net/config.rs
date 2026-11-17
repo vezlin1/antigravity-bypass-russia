@@ -50,7 +50,7 @@ impl Default for Config {
                 },
                 DohProvider {
                     name: "eu.geohide.ru".into(),
-                    url: "https://eu.geohide.ru/dns-query".into(),
+                    url: super::provider::GEOHIDE_EU_DOH.into(),
                     bootstrap: vec![
                         "217.60.245.219".parse().unwrap(),
                         "217.60.245.233".parse().unwrap(),
@@ -221,12 +221,7 @@ fn upgrade_builtin_defaults(config: &mut Config) {
         }
     }
     for retired in ["xbox-dns.ru", "comss.one"] {
-        let custom = config.extra_udp.iter().any(|p| p.name == retired)
-            || config.doh.iter().any(|p| p.name == retired);
-        if !custom {
-            config.disabled_providers.retain(|name| name != retired);
-            config.provider_order.retain(|name| name != retired);
-        }
+        forget_retired_provider(config, retired);
     }
     if config.provider_defaults_version < defaults.provider_defaults_version {
         // Only extend the old stock pool. Explicit UDP-only, exclusions, custom
@@ -240,14 +235,27 @@ fn upgrade_builtin_defaults(config: &mut Config) {
         }
         config.provider_defaults_version = defaults.provider_defaults_version;
     }
+    // Keep an explicit GeoHide exclusion or ordering relevant to the older DoH
+    // migration above, then discard references to the removed built-in UDP.
+    forget_retired_provider(config, "geohide.ru");
+}
+
+fn forget_retired_provider(config: &mut Config, name: &str) {
+    let custom = config.extra_udp.iter().any(|p| p.name == name)
+        || config.doh.iter().any(|p| p.name == name);
+    if !custom {
+        config
+            .disabled_providers
+            .retain(|provider| provider != name);
+        config.provider_order.retain(|provider| provider != name);
+    }
 }
 
 pub fn validate(config: &Config) -> Result<(), String> {
     if config.doh.len() > 8 || config.extra_udp.len() > 8 || config.log_roots.len() > 16 {
         return Err("Слишком много провайдеров/каталогов в network.json".into());
     }
-    let mut names: std::collections::HashSet<&str> =
-        super::resolvers::PROVIDERS.iter().map(|p| p.name).collect();
+    let mut names = std::collections::HashSet::new();
     for provider in &config.extra_udp {
         if provider.addresses.is_empty()
             || provider.addresses.len() > 8
@@ -290,7 +298,7 @@ pub fn validate(config: &Config) -> Result<(), String> {
         }
     }
     if config.disabled_providers.len() == names.len() {
-        return Err("Нужен хотя бы один включённый DNS-провайдер".into());
+        return Err("Нужен хотя бы один включённый DNS-провайдер. Проверьте doh, extra_udp и disabled_providers в network.json".into());
     }
     Ok(())
 }
@@ -346,13 +354,13 @@ mod tests {
         let pool = super::super::resolver_pool::from_config(&config).unwrap();
         assert_eq!(
             pool.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            ["dns-ai.ru", "geohide.ru", "eu.geohide.ru"]
+            ["dns-ai.ru", "eu.geohide.ru"]
         );
-        config.provider_order = vec!["geohide.ru".into(), "dns-ai.ru".into()];
+        config.provider_order = vec!["eu.geohide.ru".into(), "dns-ai.ru".into()];
         let pool = super::super::resolver_pool::from_config(&config).unwrap();
         assert_eq!(
             pool.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            ["geohide.ru", "dns-ai.ru", "eu.geohide.ru"]
+            ["eu.geohide.ru", "dns-ai.ru"]
         );
     }
 
@@ -370,7 +378,13 @@ mod tests {
             config.provider_defaults_version = 0;
             config.doh.truncate(1);
             match edit {
-                "udp_only" => config.doh.clear(),
+                "udp_only" => {
+                    config.doh.clear();
+                    config.extra_udp.push(UdpProvider {
+                        name: "my-udp".into(),
+                        addresses: vec!["192.0.2.53".parse().unwrap()],
+                    });
+                }
                 "custom_bootstrap" => config.doh[0].bootstrap.clear(),
                 "disabled" => config.disabled_providers.push("geohide.ru".into()),
                 "ordered" => config.provider_order.push("geohide.ru".into()),
@@ -388,8 +402,38 @@ mod tests {
     }
 
     #[test]
+    fn removed_default_geohide_is_pruned_from_saved_provider_lists() {
+        let mut config = Config {
+            disabled_providers: vec!["geohide.ru".into()],
+            provider_order: vec![
+                "geohide.ru".into(),
+                "eu.geohide.ru".into(),
+                "dns-ai.ru".into(),
+            ],
+            ..Config::default()
+        };
+        upgrade_builtin_defaults(&mut config);
+        assert!(config.disabled_providers.is_empty());
+        let pool = super::super::resolver_pool::from_config(&config).unwrap();
+        assert_eq!(
+            pool.iter()
+                .map(|provider| provider.name.as_str())
+                .collect::<Vec<_>>(),
+            ["eu.geohide.ru", "dns-ai.ru"]
+        );
+    }
+
+    #[test]
+    fn old_implicit_udp_only_requires_an_explicit_provider_after_removal() {
+        let mut config: Config = serde_json::from_str(r#"{"doh":[]}"#).unwrap();
+        upgrade_builtin_defaults(&mut config);
+        assert!(validate(&config).unwrap_err().contains("extra_udp"));
+        assert!(config.doh.is_empty());
+    }
+
+    #[test]
     fn retired_provider_names_preserve_explicit_custom_definitions() {
-        for name in ["xbox-dns.ru", "comss.one"] {
+        for name in ["xbox-dns.ru", "comss.one", "geohide.ru"] {
             for use_doh in [false, true] {
                 let mut config = Config::default();
                 if use_doh {

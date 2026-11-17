@@ -1,5 +1,5 @@
 //! One configuration snapshot for both UDP and RFC 8484 exchanges.
-use super::{client, config, dns_https, resolvers};
+use super::{client, config, dns_https};
 use std::{net::Ipv4Addr, sync::mpsc, time::Duration};
 
 pub const UDP_TIMEOUT: Duration = Duration::from_millis(800);
@@ -72,17 +72,14 @@ impl Provider {
 
 pub fn from_config(config: &config::Config) -> Result<Vec<Provider>, String> {
     config::validate(config)?;
-    let mut providers: Vec<_> = resolvers::PROVIDERS
+    let mut providers: Vec<_> = config
+        .extra_udp
         .iter()
         .map(|p| Provider {
-            name: p.name.into(),
-            transport: Transport::Udp(p.v4.iter().filter_map(|s| s.parse().ok()).collect()),
+            name: p.name.clone(),
+            transport: Transport::Udp(p.addresses.clone()),
         })
         .collect();
-    providers.extend(config.extra_udp.iter().map(|p| Provider {
-        name: p.name.clone(),
-        transport: Transport::Udp(p.addresses.clone()),
-    }));
     providers.extend(config.doh.iter().map(|p| Provider {
         name: p.name.clone(),
         transport: Transport::Doh(p.clone()),
@@ -136,8 +133,7 @@ mod tests {
             name: "custom".into(),
             addresses: vec!["192.0.2.1".parse().unwrap()],
         });
-        c.disabled_providers = vec!["geohide.ru".into()];
-        c.disabled_providers.push("eu.geohide.ru".into());
+        c.disabled_providers = vec!["eu.geohide.ru".into()];
         c.provider_order = vec!["dns-ai.ru".into(), "custom".into()];
         let pool = from_config(&c).unwrap();
         assert_eq!(
@@ -156,9 +152,9 @@ mod tests {
         assert!(from_config(&c).is_err());
     }
     #[test]
-    fn names_cannot_shadow_builtins_and_all_disabled_is_invalid() {
+    fn duplicate_provider_names_and_all_disabled_are_invalid() {
         let mut c = config::Config::default();
-        c.doh[0].name = "geohide.ru".into();
+        c.doh[0].name = c.doh[1].name.clone();
         assert!(from_config(&c).is_err());
         c = config::Config::default();
         c.disabled_providers = from_config(&c)
@@ -180,10 +176,6 @@ mod tests {
         );
         let mut config = config::Config::default();
         config.doh.truncate(1);
-        config.disabled_providers = resolvers::PROVIDERS
-            .iter()
-            .map(|p| p.name.to_string())
-            .collect();
         config.doh[0].url = format!("https://localhost:{}/dns-query", addr.port());
         config.doh[0].bootstrap = vec![addr.ip()];
         let pool = from_config(&config).unwrap();

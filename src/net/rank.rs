@@ -9,8 +9,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::net::hosts::write_entries as write_hosts_entries;
-use crate::net::provider::{NRPT_AGENT, PRIMARY_CLOUD_CODE};
+use crate::net::provider::{GEOHIDE_EU_DOH, GEOHIDE_PROXY_V4, NRPT_AGENT, PRIMARY_CLOUD_CODE};
 use crate::net::relay;
+use crate::net::resolver_pool::{self, Provider, Transport};
 use crate::net::resolvers;
 use crate::net::routes;
 
@@ -26,14 +27,22 @@ pub fn rank_path() -> PathBuf {
     relay::log_dir().join("proxy_rank.conf")
 }
 
+fn geohide_proxy_seeds(pool: &[Provider]) -> &'static [&'static str] {
+    if pool.iter().any(
+        |provider| matches!(&provider.transport, Transport::Doh(doh) if doh.url == GEOHIDE_EU_DOH),
+    ) {
+        GEOHIDE_PROXY_V4
+    } else {
+        &[]
+    }
+}
+
 pub(super) fn discover_agent(
     if_index: u32,
     prepare_routes: &mut dyn FnMut(&[Ipv4Addr]) -> Result<(), String>,
 ) -> Result<Vec<RankedHost>, String> {
     let previous = load();
-    let geohide_enabled = super::resolver_pool::load()?
-        .iter()
-        .any(|p| p.name == "geohide.ru");
+    let geohide_seeds = geohide_proxy_seeds(&resolver_pool::load()?);
     let mut host_candidates = Vec::new();
     let mut addresses = std::collections::BTreeSet::new();
     for name in NRPT_AGENT {
@@ -47,10 +56,7 @@ pub(super) fn discover_agent(
                 }
             }
         }
-        for seed in crate::net::provider::GEOHIDE_PROXY_V4
-            .iter()
-            .filter(|_| geohide_enabled)
-        {
+        for seed in geohide_seeds {
             if let Ok(v4) = seed.parse::<Ipv4Addr>() {
                 let a = IpAddr::V4(v4);
                 if !candidates.contains(&a) {
@@ -240,6 +246,20 @@ fn load() -> Vec<RankedHost> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geohide_proxy_seeds_follow_its_doh_endpoint_independently_of_udp() {
+        let mut config = super::super::config::Config::default();
+        let pool = resolver_pool::from_config(&config).unwrap();
+        assert!(pool
+            .iter()
+            .all(|provider| provider.udp_addresses().is_empty()));
+        let seeds = geohide_proxy_seeds(&pool);
+        assert!(seeds.contains(&"5.175.161.3"));
+        assert!(seeds.contains(&"5.175.161.40"));
+        config.disabled_providers.push("eu.geohide.ru".into());
+        assert!(geohide_proxy_seeds(&resolver_pool::from_config(&config).unwrap()).is_empty());
+    }
 
     fn complete_ranking() -> Vec<RankedHost> {
         NRPT_AGENT

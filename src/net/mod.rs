@@ -51,11 +51,10 @@ fn assemble_nameservers(via_relay: bool, substituters: &[&str], fallback: &[&str
 fn assemble_dns_rules(
     agent_rules: &[(String, Vec<&str>)],
     studio_servers: &[&str],
+    udp_fallback: &[&str],
     via_relay: bool,
     use_split_dns: bool,
 ) -> Vec<(String, String)> {
-    let fallback = resolvers::all_provider_v4();
-    let fallback: Vec<_> = fallback.iter().map(String::as_str).collect();
     let namespace = |name: &str| {
         if use_split_dns {
             name.trim_start_matches('.').to_ascii_lowercase()
@@ -70,7 +69,7 @@ fn assemble_dns_rules(
         .map(|(name, servers)| {
             (
                 namespace(name),
-                assemble_nameservers(via_relay, servers, &fallback),
+                assemble_nameservers(via_relay, servers, udp_fallback),
             )
         })
         .collect();
@@ -79,7 +78,7 @@ fn assemble_dns_rules(
         if !rules.iter().any(|(existing, _)| *existing == name) {
             rules.push((
                 name,
-                assemble_nameservers(via_relay, studio_servers, &fallback),
+                assemble_nameservers(via_relay, studio_servers, udp_fallback),
             ));
         }
     }
@@ -108,32 +107,68 @@ mod tests {
 
     #[test]
     fn classic_mode_keeps_external_dns_fallbacks_alongside_the_relay() {
-        let pool = super::resolver_pool::from_config(&super::config::Config::default()).unwrap();
-        let fallback = super::resolvers::configured_udp_v4(&pool);
+        use super::*;
+        let config = config::Config {
+            extra_udp: vec![config::UdpProvider {
+                name: "my-udp".into(),
+                addresses: vec!["192.0.2.53".parse().unwrap(), "192.0.2.54".parse().unwrap()],
+            }],
+            ..config::Config::default()
+        };
+        let pool = resolver_pool::from_config(&config).unwrap();
+        let fallback = resolvers::configured_udp_v4(&pool);
         let servers: Vec<_> = fallback.iter().map(String::as_str).collect();
         assert_eq!(
-            super::assemble_nameservers(true, &["1.2.3.4"], &servers),
-            format!("{};1.2.3.4", super::LISTEN_IP)
+            assemble_nameservers(true, &["192.0.2.80"], &servers),
+            format!("{LISTEN_IP};192.0.2.80")
         );
         assert_eq!(
-            super::assemble_nameservers(false, &["1.2.3.4"], &servers),
-            "1.2.3.4"
+            assemble_nameservers(false, &["192.0.2.80"], &servers),
+            "192.0.2.80"
         );
         assert_eq!(
-            super::assemble_nameservers(false, &[], &servers),
-            "193.233.112.67;193.233.112.68"
+            assemble_nameservers(false, &[], &servers),
+            "192.0.2.53;192.0.2.54"
         );
         assert_eq!(
-            super::assemble_nameservers(true, &[], &servers),
-            format!("{};193.233.112.67;193.233.112.68", super::LISTEN_IP)
+            assemble_nameservers(true, &[], &servers),
+            format!("{LISTEN_IP};192.0.2.53;192.0.2.54")
+        );
+    }
+
+    #[test]
+    fn default_doh_rules_use_only_the_relay_or_require_agent_hosts_on_windows() {
+        use super::*;
+        let pool = resolver_pool::from_config(&config::Config::default()).unwrap();
+        let fallback = resolvers::configured_udp_v4(&pool);
+        assert!(fallback.is_empty());
+        let agent_rules: Vec<_> = NRPT_AGENT
+            .iter()
+            .map(|host| (host.to_string(), vec![]))
+            .collect();
+        let inventory = nrpt::NrptInventory::default();
+
+        let desired = assemble_dns_rules(&agent_rules, &[], &[], true, false);
+        let plan = inventory.plan(&desired);
+        assert_eq!(plan.rules, desired);
+        assert!(plan.rules.iter().all(|(_, servers)| servers == LISTEN_IP));
+        assert!(compatibility_coverage(&plan, &[], false)
+            .agent_hosts
+            .is_empty());
+
+        let desired = assemble_dns_rules(&agent_rules, &[], &[], false, false);
+        let plan = inventory.plan(&desired);
+        assert!(plan.rules.is_empty());
+        assert_eq!(
+            compatibility_coverage(&plan, &[], false).agent_hosts,
+            NRPT_AGENT
         );
     }
 
     #[test]
     fn macos_rules_keep_agent_dns_when_studio_results_differ() {
         use super::*;
-        let fallback = resolvers::all_provider_v4();
-        let fallback: Vec<_> = fallback.iter().map(String::as_str).collect();
+        let fallback = ["192.0.2.53"];
         let cases: &[(&[&str], &[&str])] = &[
             (&["45.155.204.190"], &["111.88.96.50", "45.155.204.190"]),
             (
@@ -153,7 +188,7 @@ mod tests {
                 .iter()
                 .map(|name| (name.to_string(), agent_servers.to_vec()))
                 .collect();
-            let rules = assemble_dns_rules(&agent_rules, studio_servers, false, true);
+            let rules = assemble_dns_rules(&agent_rules, studio_servers, &fallback, false, true);
             assert_eq!(rules.len(), expected_domains.len());
             assert_eq!(
                 rules
@@ -209,7 +244,7 @@ mod tests {
             .map(|name| (name.to_string(), agent_servers.clone()))
             .collect();
         for via_relay in [false, true] {
-            let rules = assemble_dns_rules(&agent_rules, &studio_servers, via_relay, false);
+            let rules = assemble_dns_rules(&agent_rules, &studio_servers, &[], via_relay, false);
             let expected_names: std::collections::BTreeSet<_> =
                 nrpt_domains().into_iter().collect();
             assert_eq!(rules.len(), expected_names.len());
@@ -582,26 +617,24 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     linux_dns::prepare(if_index)?;
 
     crate::net::relay::clear_custom_mode();
-    let ips: Vec<String> = resolvers::all_provider_v4()
-        .into_iter()
-        .map(|s| s.to_string())
-        .collect();
-    crate::net::relay::save_upstream_config(&ips);
+    let udp_ips = resolvers::all_provider_v4();
+    crate::net::relay::save_upstream_config(&udp_ips);
 
     let mut sub_notes = Vec::new();
-    let mut agent_rules: Vec<(String, Vec<String>)> = Vec::new();
+    let mut agent_rules: Vec<_> = NRPT_AGENT
+        .iter()
+        .map(|name| (name.to_string(), Vec::new()))
+        .collect();
     let mut studio_subs: Vec<String> = Vec::new();
-    step("Проверяем доступные серверы");
-    {
-        for name in NRPT_AGENT {
+    if !udp_ips.is_empty() {
+        step("Проверяем доступные серверы");
+        for (name, subs) in &mut agent_rules {
             let host = name.trim_start_matches('.');
-            let subs = resolvers::substituting_addrs(host, if_index);
+            *subs = resolvers::substituting_addrs(host, if_index);
             if subs.is_empty() {
                 sub_notes.push(format!("{host}: подмена через прямой UDP не подтверждена"));
-                agent_rules.push(((*name).to_string(), resolvers::all_provider_v4()));
             } else {
                 sub_notes.push(format!("{host}: {}", subs.join(", ")));
-                agent_rules.push(((*name).to_string(), subs));
             }
         }
         for name in SUBSTITUTION_CANARIES {
@@ -631,12 +664,14 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         .collect();
     #[cfg(not(target_os = "linux"))]
     let studio_subs: Vec<_> = studio_subs.iter().map(String::as_str).collect();
+    #[cfg(not(target_os = "linux"))]
+    let udp_fallback: Vec<_> = udp_ips.iter().map(String::as_str).collect();
     // Reject invalid or conflicting resolver plans before ranking writes hosts
     // or setup changes the service. Applying later rechecks file ownership.
     #[cfg(target_os = "macos")]
     let _prepared = split_dns::prepare(
         std::path::Path::new("/etc/resolver"),
-        &assemble_dns_rules(&agent_rules, &studio_subs, true, true),
+        &assemble_dns_rules(&agent_rules, &studio_subs, &udp_fallback, true, true),
     )?;
     for note in crate::net::rank::format_notes(&ranked) {
         sub_notes.push(note);
@@ -654,15 +689,14 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
                 }
             }
             Err(e) => {
-                relay_note = format!("релей не установлен ({e}), используются прямые UDP DNS");
+                relay_note = format!("релей не установлен ({e})");
             }
         }
     }
     // Readiness is local; separately verify that the DNS data path answers.
     if relay_ok && !relay_answers() {
         relay_ok = false;
-        relay_note =
-            "процесс запущен, но DNS-проверка не прошла; сохранены резервные адреса".into();
+        relay_note = "процесс запущен, но DNS-проверка не прошла".into();
         #[cfg(windows)]
         if matches!(relay::local_dns_available(), Ok(false)) {
             relay_note = "локальный UDP-порт 53 недоступен даже для тестового пакета. Для доменов Agent используются проверенные записи hosts. DNS для браузера требует отдельной проверки".into();
@@ -672,7 +706,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     if !relay_ok {
         return Err(format!("DNS Linux не переключён: {relay_note}"));
     }
-    if !relay_ok && resolvers::all_provider_v4().is_empty() {
+    if !relay_ok && udp_ips.is_empty() {
         #[cfg(not(windows))]
         return Err("Включены только DoH-провайдеры, но локальный DNS не запустился".into());
         #[cfg(windows)]
@@ -688,11 +722,11 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     #[cfg(target_os = "macos")]
     let rules = split_dns::prepare(
         std::path::Path::new("/etc/resolver"),
-        &assemble_dns_rules(&agent_rules, &studio_subs, relay_ok, true),
+        &assemble_dns_rules(&agent_rules, &studio_subs, &udp_fallback, relay_ok, true),
     )?;
     #[cfg(windows)]
     let (inventory, plan) = {
-        let rules = assemble_dns_rules(&agent_rules, &studio_subs, relay_ok, false);
+        let rules = assemble_dns_rules(&agent_rules, &studio_subs, &udp_fallback, relay_ok, false);
         let inventory = nrpt::inventory()?;
         let plan = inventory.plan(&rules);
         let coverage = compatibility_coverage(&plan, &[], skip_primary);
