@@ -54,6 +54,32 @@ def fixture(root, version, arch, expected):
     return binary
 
 
+def verified_distribution(root, platform, manifest):
+    expected = manifest["sha512"]
+    directory = root / "distributions"
+    directory.mkdir(parents=True, exist_ok=True)
+    archive = directory / expected
+
+    def verify(path):
+        with path.open("rb") as source:
+            actual = hashlib.file_digest(source, "sha512").hexdigest()
+        if actual != expected:
+            raise RuntimeError(f"Official CLI distribution checksum mismatch: {platform}")
+
+    if archive.is_file():
+        verify(archive)
+        return archive
+
+    request = urllib.request.Request(manifest["url"], headers={"User-Agent": "antigravity-profile-regression"})
+    with tempfile.TemporaryDirectory(dir=directory) as staging:
+        download = Path(staging) / "download"
+        with urllib.request.urlopen(request, timeout=90) as response, download.open("wb") as output:
+            shutil.copyfileobj(response, output)
+        verify(download)
+        download.replace(archive)
+    return archive
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture-dir", type=Path, help="Optional verified fixture cache")
@@ -80,17 +106,12 @@ def main():
             # The Windows CI job covers those formats as well as both Mach-O builds.
             if sys.platform == "darwin" and not platform.startswith("darwin"):
                 continue
-            folder = root / (manifest["version"] + "-" + platform)
+            folder = Path(temporary) / (manifest["version"] + "-" + platform)
             folder.mkdir(parents=True, exist_ok=True)
             binary = folder / ("agy.exe" if platform.startswith("windows") else "agy")
             # Verify the complete official distribution before reading its executable.
-            with tempfile.TemporaryFile() as download:
-                request = urllib.request.Request(manifest["url"], headers={"User-Agent": "antigravity-profile-regression"})
-                with urllib.request.urlopen(request, timeout=90) as response:
-                    shutil.copyfileobj(response, download)
-                download.seek(0)
-                assert hashlib.file_digest(download, "sha512").hexdigest() == manifest["sha512"], platform
-                download.seek(0)
+            archive_path = verified_distribution(root, platform, manifest)
+            with archive_path.open("rb") as download:
                 if platform.startswith("windows"):
                     with binary.open("wb") as output:
                         shutil.copyfileobj(download, output)
