@@ -83,7 +83,7 @@ jobs:
           key: cli-fixtures-v1-${{ matrix.target }}-${{ hashFiles('tests/verify_cli_profiles.py', 'tests/upstream-versions.json') }}
       - name: Official CLI profiles and rollback
         if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: python tests/verify_cli_profiles.py --target ${{ matrix.target }} --fixture-dir "${{ runner.temp }}/ag-cli-fixtures"
+        run: python tests/verify_cli_profiles.py --target ${{ matrix.target }} --fixture-dir "${{ runner.temp }}/ag-cli-fixtures" --parallel
       - name: Save verified official CLI fixtures
         if: >-
           matrix.target != 'aarch64-unknown-linux-gnu' &&

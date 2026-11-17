@@ -1,5 +1,6 @@
 """Check pinned official CLI fixtures; only disposable copies are patched."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -80,57 +81,69 @@ def verified_distribution(root, platform, manifest):
     return archive
 
 
+def check_profile(binary, arch, target, label):
+    environment = dict(os.environ)
+    environment[f"AGY_{arch.upper()}_FIXTURE"] = str(binary)
+    environment["AGY_X64_GATE_COUNT"] = "1"
+    command = ["cargo", "test", "--locked", "--bin", "antigravity-bypass-russia"]
+    if target:
+        command.extend(["--target", target])
+    command.extend([f"official_{arch}_cli_fixture", "--", "--ignored", "--nocapture"])
+    print(f"Official CLI {label}", flush=True)
+    subprocess.run(command, cwd=ROOT, env=environment, check=True, timeout=300)
+    print(f"PASS: official CLI {label}", flush=True)
+
+
+def check_historical(root, target, version, arch, expected):
+    binary = fixture(root, version, arch, expected)
+    check_profile(binary, arch, target, f"{version} macOS {arch}")
+
+
+def check_distribution(root, temporary, target, platform, manifest):
+    folder = temporary / (manifest["version"] + "-" + platform)
+    folder.mkdir(parents=True, exist_ok=True)
+    binary = folder / ("agy.exe" if platform.startswith("windows") else "agy")
+    # Verify the complete official distribution before reading its executable.
+    archive_path = verified_distribution(root, platform, manifest)
+    with archive_path.open("rb") as download:
+        if platform.startswith("windows"):
+            with binary.open("wb") as output:
+                shutil.copyfileobj(download, output)
+        else:
+            with tarfile.open(fileobj=download, mode="r:gz") as archive:
+                members = [m for m in archive.getmembers() if m.isfile() and Path(m.name).name in {"agy", "antigravity"}]
+                assert len(members) == 1, platform
+                with archive.extractfile(members[0]) as source, binary.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+    arch = "arm64" if platform.endswith("arm64") else "x64"
+    check_profile(binary, arch, target, f"{manifest['version']} {platform}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture-dir", type=Path, help="Optional verified fixture cache")
     parser.add_argument("--target", help="Cargo target used by CI")
+    parser.add_argument("--parallel", action="store_true", help="Check two fixture groups concurrently")
     args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix="ag-cli-fixtures-") as temporary:
-        root = (args.fixture_dir or Path(temporary)).resolve()
-        for version, arch, expected in FIXTURES:
-            binary = fixture(root, version, arch, expected)
-            environment = dict(os.environ)
-            environment[f"AGY_{arch.upper()}_FIXTURE"] = str(binary)
-            environment["AGY_X64_GATE_COUNT"] = "1"
-            command = ["cargo", "test", "--locked", "--bin", "antigravity-bypass-russia"]
-            if args.target:
-                command.extend(["--target", args.target])
-            test = "official_arm64_cli_fixture" if arch == "arm64" else "official_x64_cli_fixture"
-            command.extend([test, "--", "--ignored", "--nocapture"])
-            subprocess.run(command, cwd=ROOT, env=environment, check=True, timeout=300)
-            print(f"PASS: official CLI {version} macOS {arch}", flush=True)
-
+    with tempfile.TemporaryDirectory(prefix="ag-cli-fixtures-") as directory:
+        temporary = Path(directory)
+        root = (args.fixture_dir or temporary).resolve()
         pinned = json.loads((ROOT / "tests/upstream-versions.json").read_text())
+        checks = [(check_historical, (root, args.target, *item)) for item in FIXTURES]
         for platform, manifest in pinned["previous"]["cli"].items():
             # macOS transaction tests invoke codesign, which cannot sign PE/ELF.
             # The Windows CI job covers those formats as well as both Mach-O builds.
-            if sys.platform == "darwin" and not platform.startswith("darwin"):
-                continue
-            folder = Path(temporary) / (manifest["version"] + "-" + platform)
-            folder.mkdir(parents=True, exist_ok=True)
-            binary = folder / ("agy.exe" if platform.startswith("windows") else "agy")
-            # Verify the complete official distribution before reading its executable.
-            archive_path = verified_distribution(root, platform, manifest)
-            with archive_path.open("rb") as download:
-                if platform.startswith("windows"):
-                    with binary.open("wb") as output:
-                        shutil.copyfileobj(download, output)
-                else:
-                    with tarfile.open(fileobj=download, mode="r:gz") as archive:
-                        members = [m for m in archive.getmembers() if m.isfile() and Path(m.name).name in {"agy", "antigravity"}]
-                        assert len(members) == 1, platform
-                        with archive.extractfile(members[0]) as source, binary.open("wb") as output:
-                            shutil.copyfileobj(source, output)
-            arch = "arm64" if platform.endswith("arm64") else "x64"
-            environment = dict(os.environ)
-            environment[f"AGY_{arch.upper()}_FIXTURE"] = str(binary)
-            environment["AGY_X64_GATE_COUNT"] = "1"
-            command = ["cargo", "test", "--locked", "--bin", "antigravity-bypass-russia"]
-            if args.target:
-                command.extend(["--target", args.target])
-            command.extend([f"official_{arch}_cli_fixture", "--", "--ignored", "--nocapture"])
-            subprocess.run(command, cwd=ROOT, env=environment, check=True, timeout=300)
-            print(f"PASS: official CLI {manifest['version']} {platform}", flush=True)
+            if sys.platform != "darwin" or platform.startswith("darwin"):
+                checks.append((check_distribution, (root, temporary, args.target, platform, manifest)))
+
+        if args.parallel and (os.cpu_count() or 1) >= 2 and "AGY_X64_PATCH_OUTPUT" not in os.environ:
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                results = [workers.submit(check, *params) for check, params in checks]
+                for result in results:
+                    result.result()
+        else:
+            for check, params in checks:
+                check(*params)
 
 
 if __name__ == "__main__":
