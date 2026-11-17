@@ -19,7 +19,7 @@ pub struct Provider {
 
 pub const PROVIDERS: &[Provider] = &[Provider {
     name: "geohide.ru",
-    v4: &["45.155.204.190", "37.230.192.51"],
+    v4: &["193.233.112.67", "193.233.112.68"],
 }];
 
 const REFERENCE_V4: &[&str] = &["8.8.8.8", "1.1.1.1"];
@@ -644,26 +644,47 @@ pub fn capabilities(interface: u32) -> Result<Vec<Capability>, String> {
             names.push(name);
         }
     }
-    for name in names {
-        let host = name.trim_start_matches('.');
-        let (hits, reference) = race_providers(&pool, &build_query(host, 0x4341), interface, false);
-        for (idx, provider) in pool.iter().enumerate() {
-            let hit = hits.iter().find(|h| h.idx == idx);
-            out.push(Capability {
-                provider: idx + 1,
-                transport: provider.kind(),
-                host: host.into(),
-                status: hit
-                    .map(|h| {
-                        if h.addrs.is_empty() {
-                            "no_addresses"
-                        } else {
-                            verdict_tag(classify(&h.addrs, &reference, &[]))
-                        }
+    // Sequential timeouts for seven names could exhaust the entire report's
+    // 20-second deadline and hide even the providers which did answer.
+    for batch in names.chunks(3) {
+        let results = thread::scope(|scope| {
+            let workers: Vec<_> = batch
+                .iter()
+                .map(|name| {
+                    let host = name.trim_start_matches('.');
+                    let pool = &pool;
+                    scope.spawn(move || {
+                        (
+                            host,
+                            race_providers(pool, &build_query(host, 0x4341), interface, false),
+                        )
                     })
-                    .unwrap_or("timeout_or_error"),
-                addresses: hit.map(|h| h.addrs.clone()).unwrap_or_default(),
-            });
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().map_err(|_| "Ошибка проверки DNS".to_string()))
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        for (host, (hits, reference)) in results {
+            for (idx, provider) in pool.iter().enumerate() {
+                let hit = hits.iter().find(|h| h.idx == idx);
+                out.push(Capability {
+                    provider: idx + 1,
+                    transport: provider.kind(),
+                    host: host.into(),
+                    status: hit
+                        .map(|h| {
+                            if h.addrs.is_empty() {
+                                "no_addresses"
+                            } else {
+                                verdict_tag(classify(&h.addrs, &reference, &[]))
+                            }
+                        })
+                        .unwrap_or("timeout_or_error"),
+                    addresses: hit.map(|h| h.addrs.clone()).unwrap_or_default(),
+                });
+            }
         }
     }
     Ok(out)

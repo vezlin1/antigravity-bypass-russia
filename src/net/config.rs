@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, net::IpAddr, path::PathBuf};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DohProvider {
     pub name: String,
@@ -21,6 +21,8 @@ pub struct UdpProvider {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    #[serde(default)]
+    pub provider_defaults_version: u8,
     pub doh: Vec<DohProvider>,
     pub extra_udp: Vec<UdpProvider>,
     pub disabled_providers: Vec<String>,
@@ -32,18 +34,29 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            provider_defaults_version: 2,
             // HTTPS hostname verification still applies to every bootstrap IP.
             // Keep these in sync with the current A records of dns.dns-ai.ru:
             // the endpoint is HTTP/2-only, so a retired address fails the
             // whole provider even though the service itself is healthy.
-            doh: vec![DohProvider {
-                name: "dns-ai.ru".into(),
-                url: "https://dns.dns-ai.ru/dns-query".into(),
-                bootstrap: vec![
-                    "45.151.102.219".parse().unwrap(),
-                    "194.87.196.13".parse().unwrap(),
-                ],
-            }],
+            doh: vec![
+                DohProvider {
+                    name: "dns-ai.ru".into(),
+                    url: "https://dns.dns-ai.ru/dns-query".into(),
+                    bootstrap: vec![
+                        "45.151.102.219".parse().unwrap(),
+                        "194.87.196.13".parse().unwrap(),
+                    ],
+                },
+                DohProvider {
+                    name: "eu.geohide.ru".into(),
+                    url: "https://eu.geohide.ru/dns-query".into(),
+                    bootstrap: vec![
+                        "217.60.245.219".parse().unwrap(),
+                        "217.60.245.233".parse().unwrap(),
+                    ],
+                },
+            ],
             extra_udp: vec![],
             disabled_providers: vec![],
             provider_order: vec![],
@@ -190,7 +203,8 @@ pub fn load() -> Result<Config, String> {
 // Old network.json files contain the previous defaults explicitly. Upgrade only
 // those exact bootstrap lists; custom endpoints/address lists remain user-owned.
 fn upgrade_builtin_defaults(config: &mut Config) {
-    let current = Config::default().doh[0].bootstrap.clone();
+    let defaults = Config::default();
+    let current = &defaults.doh[0].bootstrap;
     let legacy: Vec<Vec<IpAddr>> = [
         &["192.144.59.14", "186.246.49.127"][..],
         &["192.144.59.14", "186.246.49.127", "94.232.43.149"][..],
@@ -213,6 +227,18 @@ fn upgrade_builtin_defaults(config: &mut Config) {
             config.disabled_providers.retain(|name| name != retired);
             config.provider_order.retain(|name| name != retired);
         }
+    }
+    if config.provider_defaults_version < defaults.provider_defaults_version {
+        // Only extend the old stock pool. Explicit UDP-only, exclusions, custom
+        // endpoints and ordered configurations keep their transport choices.
+        if config.doh == defaults.doh[..1]
+            && config.extra_udp.is_empty()
+            && config.disabled_providers.is_empty()
+            && config.provider_order.is_empty()
+        {
+            config.doh = defaults.doh;
+        }
+        config.provider_defaults_version = defaults.provider_defaults_version;
     }
 }
 
@@ -320,14 +346,45 @@ mod tests {
         let pool = super::super::resolver_pool::from_config(&config).unwrap();
         assert_eq!(
             pool.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            ["dns-ai.ru", "geohide.ru"]
+            ["dns-ai.ru", "geohide.ru", "eu.geohide.ru"]
         );
         config.provider_order = vec!["geohide.ru".into(), "dns-ai.ru".into()];
         let pool = super::super::resolver_pool::from_config(&config).unwrap();
         assert_eq!(
             pool.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
-            ["geohide.ru", "dns-ai.ru"]
+            ["geohide.ru", "dns-ai.ru", "eu.geohide.ru"]
         );
+    }
+
+    #[test]
+    fn new_doh_is_only_added_to_the_old_unmodified_pool() {
+        for edit in [
+            "udp_only",
+            "custom_bootstrap",
+            "disabled",
+            "ordered",
+            "custom_udp",
+            "current",
+        ] {
+            let mut config = Config::default();
+            config.provider_defaults_version = 0;
+            config.doh.truncate(1);
+            match edit {
+                "udp_only" => config.doh.clear(),
+                "custom_bootstrap" => config.doh[0].bootstrap.clear(),
+                "disabled" => config.disabled_providers.push("geohide.ru".into()),
+                "ordered" => config.provider_order.push("geohide.ru".into()),
+                "custom_udp" => config.extra_udp.push(UdpProvider {
+                    name: "custom".into(),
+                    addresses: vec!["192.0.2.10".parse().unwrap()],
+                }),
+                _ => config.provider_defaults_version = 2,
+            }
+            let before = config.doh.clone();
+            upgrade_builtin_defaults(&mut config);
+            assert_eq!(config.doh, before, "{edit}");
+            validate(&config).unwrap();
+        }
     }
 
     #[test]

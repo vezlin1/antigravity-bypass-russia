@@ -21,6 +21,8 @@ pub enum State {
     StreamStarted,
     RegionBlocked,
     VerificationRequired,
+    LicenseRequired,
+    RateLimited,
     RequestFailed,
 }
 
@@ -60,6 +62,8 @@ impl Observation {
             State::StreamStarted => "В журнале: начало ответа",
             State::RegionBlocked => "В журнале: отказ по региону",
             State::VerificationRequired => "В журнале: нужна верификация",
+            State::LicenseRequired => "В журнале: требуется лицензия аккаунта",
+            State::RateLimited => "В журнале: достигнут лимит запросов",
             State::RequestFailed => "В журнале: ошибка запроса",
         }
     }
@@ -69,6 +73,8 @@ impl Observation {
             State::Unreadable
                 | State::RegionBlocked
                 | State::VerificationRequired
+                | State::LicenseRequired
+                | State::RateLimited
                 | State::RequestFailed
         )
     }
@@ -250,6 +256,15 @@ fn event(line: &str, now: i64, offset: time::UtcOffset) -> Option<Event> {
             || message.contains("validation_required"))
     {
         State::VerificationRequired
+    } else if rpc && error && message.contains("do not have a valid license") {
+        State::LicenseRequired
+    } else if rpc
+        && error
+        && (message.contains("quota exceeded")
+            || message.contains("rate limit exceeded")
+            || message.contains("too many requests"))
+    {
+        State::RateLimited
     } else if rpc && error {
         State::RequestFailed
     } else if message.contains("streamgeneratecontent") && message.contains("responseid") {
@@ -426,6 +441,11 @@ mod tests {
         );
         assert_eq!(
             parse("2026-09-26T11:59:00Z [error] StreamGenerateContent: quota exceeded"),
+            Some(State::RateLimited)
+        );
+        assert_eq!(parse("2026-09-26T11:59:00Z [error] Cascade: You do not have a valid license of this product (#3501)"), Some(State::LicenseRequired));
+        assert_eq!(
+            parse("2026-09-26T11:59:00Z [error] Cascade: unexpected EOF"),
             Some(State::RequestFailed)
         );
         for s in [

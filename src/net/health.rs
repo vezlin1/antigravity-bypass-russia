@@ -5,7 +5,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-pub const PROBE_BUDGET: Duration = Duration::from_millis(2500);
+pub const PROBE_BUDGET: Duration = Duration::from_millis(4500);
 
 /// The same certificate/HTTP probe is used by the resolver and the CONNECT proxy.
 /// The socket is consumed: the real client always receives a fresh, unmodified tunnel.

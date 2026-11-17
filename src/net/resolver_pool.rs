@@ -137,6 +137,7 @@ mod tests {
             addresses: vec!["192.0.2.1".parse().unwrap()],
         });
         c.disabled_providers = vec!["geohide.ru".into()];
+        c.disabled_providers.push("eu.geohide.ru".into());
         c.provider_order = vec!["dns-ai.ru".into(), "custom".into()];
         let pool = from_config(&c).unwrap();
         assert_eq!(
@@ -178,6 +179,7 @@ mod tests {
             Duration::ZERO,
         );
         let mut config = config::Config::default();
+        config.doh.truncate(1);
         config.disabled_providers = resolvers::PROVIDERS
             .iter()
             .map(|p| p.name.to_string())

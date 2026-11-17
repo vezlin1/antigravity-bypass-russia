@@ -31,7 +31,8 @@ pub fn discover_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
     let geohide_enabled = super::resolver_pool::load()?
         .iter()
         .any(|p| p.name == "geohide.ru");
-    let mut ranked = Vec::new();
+    let mut host_candidates = Vec::new();
+    let mut addresses = std::collections::BTreeSet::new();
     for name in NRPT_AGENT {
         let host = name.trim_start_matches('.').to_string();
         let mut candidates = resolvers::candidate_addrs(&host, if_index)?;
@@ -61,14 +62,18 @@ pub fn discover_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
             .filter(IpAddr::is_ipv4)
             .take(32)
             .collect();
-        let addresses: Vec<_> = candidates
-            .iter()
-            .filter_map(|ip| match ip {
-                IpAddr::V4(ip) => Some(*ip),
-                _ => None,
-            })
-            .collect();
-        routes::sync_physical_hosts(&addresses)?;
+        addresses.extend(candidates.iter().filter_map(|ip| match ip {
+            IpAddr::V4(ip) => Some(*ip),
+            _ => None,
+        }));
+        host_candidates.push((host, candidates));
+    }
+
+    // The same relay often serves several names. Inspect its OS route once
+    // before probing TLS separately with each host's SNI.
+    routes::sync_physical_hosts(&addresses.into_iter().collect::<Vec<_>>())?;
+    let mut ranked = Vec::new();
+    for (host, candidates) in host_candidates {
         let mut ips = resolvers::rank_tls_v4(&candidates, &host);
         if ips.is_empty() {
             continue;

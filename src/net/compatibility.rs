@@ -11,9 +11,9 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 const DNS_BUDGET: Duration = Duration::from_secs(3);
-// Every health probe has its own 2.5 s deadline. Keep the caller bounded too,
-// including thread startup and resolver/trust-store platform overhead.
-const HTTP_BUDGET: Duration = Duration::from_secs(3);
+// Include thread startup and trust-store overhead in the outer deadline.
+const HTTP_BUDGET: Duration =
+    super::health::PROBE_BUDGET.saturating_add(Duration::from_millis(500));
 
 /// Check fallback coverage before changing hosts or retiring obsolete own rules.
 pub fn require_agent_pins(required: &[String], ranked: &[RankedHost]) -> Result<(), String> {

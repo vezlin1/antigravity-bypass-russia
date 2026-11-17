@@ -106,7 +106,7 @@ mod tests {
             format!("{};1.2.3.4", super::LISTEN_IP)
         );
         assert_eq!(super::assemble_nameservers(false, &["1.2.3.4"]), "1.2.3.4");
-        assert_eq!(super::assemble_nameservers(false, &[]), "45.155.204.190");
+        assert_eq!(super::assemble_nameservers(false, &[]), "193.233.112.67");
     }
 
     #[test]
@@ -559,7 +559,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
             let host = name.trim_start_matches('.');
             let subs = resolvers::substituting_addrs(host, if_index);
             if subs.is_empty() {
-                sub_notes.push(format!("{host}: нет"));
+                sub_notes.push(format!("{host}: подмена через прямой UDP не подтверждена"));
                 agent_rules.push(((*name).to_string(), resolvers::fallback_v4()));
             } else {
                 sub_notes.push(format!("{host}: {}", subs.join(", ")));
@@ -576,7 +576,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         }
         if studio_subs.is_empty() {
             sub_notes
-                .push("Studio/Gemini: подмена не подтверждена, оставлены все резервные DNS".into());
+                .push("Studio/Gemini: подмена через прямой UDP не подтверждена".into());
         } else {
             sub_notes.push(format!("Studio/Gemini: {}", studio_subs.join(", ")));
         }
@@ -628,6 +628,10 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         relay_ok = false;
         relay_note =
             "процесс запущен, но DNS-проверка не прошла; сохранены резервные адреса".into();
+        #[cfg(windows)]
+        if matches!(relay::local_dns_available(), Ok(false)) {
+            relay_note = "локальный UDP-порт 53 недоступен даже для тестового пакета. Для доменов Agent используются проверенные записи hosts. DNS для браузера требует отдельной проверки".into();
+        }
     }
     #[cfg(target_os = "linux")]
     if !relay_ok {

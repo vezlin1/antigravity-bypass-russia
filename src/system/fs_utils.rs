@@ -19,8 +19,8 @@ pub fn robust_write_file(path: &Path, data: &[u8]) -> Result<(), String> {
 
 pub(super) fn prepared_file(path: &Path, data: &[u8]) -> Result<tempfile::NamedTempFile, String> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut temp =
-        tempfile::NamedTempFile::new_in(parent).map_err(|e| format!("Временный файл: {e}"))?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| format!("Временный файл в {}: {e}", parent.display()))?;
     temp.write_all(data).map_err(|e| e.to_string())?;
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -32,16 +32,7 @@ pub(super) fn prepared_file(path: &Path, data: &[u8]) -> Result<tempfile::NamedT
                 .map_err(|e| e.to_string())?;
             #[cfg(unix)]
             {
-                use std::os::unix::{fs::MetadataExt, io::AsRawFd};
-                if unsafe {
-                    libc::fchown(temp.as_file().as_raw_fd(), metadata.uid(), metadata.gid())
-                } != 0
-                {
-                    return Err(format!(
-                        "Не сохранить владельца: {}",
-                        std::io::Error::last_os_error()
-                    ));
-                }
+                match_owner(temp.as_file(), &metadata)?;
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -49,17 +40,8 @@ pub(super) fn prepared_file(path: &Path, data: &[u8]) -> Result<tempfile::NamedT
             // inherits its parent's owner, while NamedTempFile keeps mode 0600.
             #[cfg(unix)]
             {
-                use std::os::unix::{fs::MetadataExt, io::AsRawFd};
                 let metadata = fs::metadata(parent).map_err(|e| e.to_string())?;
-                if unsafe {
-                    libc::fchown(temp.as_file().as_raw_fd(), metadata.uid(), metadata.gid())
-                } != 0
-                {
-                    return Err(format!(
-                        "Не сохранить владельца нового файла: {}",
-                        std::io::Error::last_os_error()
-                    ));
-                }
+                match_owner(temp.as_file(), &metadata)?;
             }
         }
         Err(error) => return Err(error.to_string()),
@@ -82,13 +64,25 @@ pub fn recover_pending(path: &Path) -> Result<(), String> {
     super::guarded_io::recover_pending(path)
 }
 
+#[cfg(unix)]
+fn match_owner(file: &fs::File, owner: &fs::Metadata) -> Result<(), String> {
+    use std::os::unix::{fs::MetadataExt, io::AsRawFd};
+    let actual = file.metadata().map_err(|e| e.to_string())?;
+    if (actual.uid(), actual.gid()) != (owner.uid(), owner.gid())
+        && unsafe { libc::fchown(file.as_raw_fd(), owner.uid(), owner.gid()) } != 0
+    {
+        return Err(format!(
+            "Не сохранить владельца: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn inherit_directory_owner(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
-        use std::os::unix::{
-            fs::{MetadataExt, OpenOptionsExt},
-            io::AsRawFd,
-        };
+        use std::os::unix::fs::OpenOptionsExt;
         let metadata = fs::metadata(path.parent().ok_or("Нет родителя каталога")?)
             .map_err(|e| e.to_string())?;
         let file = fs::OpenOptions::new()
@@ -96,12 +90,7 @@ pub(super) fn inherit_directory_owner(path: &Path) -> Result<(), String> {
             .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
             .open(path)
             .map_err(|e| e.to_string())?;
-        if unsafe { libc::fchown(file.as_raw_fd(), metadata.uid(), metadata.gid()) } != 0 {
-            return Err(format!(
-                "Не сохранить владельца каталога: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        match_owner(&file, &metadata)?;
     }
     #[cfg(not(unix))]
     let _ = path;
