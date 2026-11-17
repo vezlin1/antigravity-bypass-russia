@@ -63,10 +63,8 @@ fn refresh_windows_network(state: &mut NetworkRefresh) -> Result<(), String> {
         // prepared the routes before launching us; retry after it releases it.
         let _configuration = super::configuration_lock()?;
         super::routes::restore_recorded_routes(interface, gateway)?;
-        save_if_index(interface);
-        if let Ok(mut cache) = UPSTREAM_CACHE.write() {
-            *cache = None;
-        }
+        save_if_index(interface)?;
+        clear_upstream_cache();
         resolvers::invalidate_network_caches();
         Ok(())
     })
@@ -198,28 +196,42 @@ pub fn iface_conf_path() -> PathBuf {
     log_dir().join("iface.conf")
 }
 
-fn mode_conf_path() -> PathBuf {
+pub(super) fn mode_conf_path() -> PathBuf {
     log_dir().join("mode.conf")
 }
 
-pub fn save_upstream_config(servers: &[String]) {
-    let dir = log_dir();
-    let _ = fs::create_dir_all(&dir);
-    let _ = fs::write(upstream_conf_path(), servers.join("\n"));
+pub fn save_upstream_config(servers: &[String]) -> Result<(), String> {
+    crate::system::fs_utils::robust_write_file(
+        &upstream_conf_path(),
+        servers.join("\n").as_bytes(),
+    )?;
+    clear_upstream_cache();
+    Ok(())
+}
+
+fn clear_upstream_cache() {
     if let Ok(mut lock) = UPSTREAM_CACHE.write() {
         *lock = None;
     }
 }
 
-pub fn clear_custom_mode() {
-    let _ = fs::remove_file(mode_conf_path());
+pub(super) fn clear_settings_cache() {
+    IF_INDEX_CACHE.store(0, std::sync::atomic::Ordering::SeqCst);
+    clear_upstream_cache();
 }
 
-pub fn save_if_index(idx: u32) {
-    let dir = log_dir();
-    let _ = fs::create_dir_all(&dir);
-    let _ = fs::write(iface_conf_path(), idx.to_string());
+pub fn clear_custom_mode() -> Result<(), String> {
+    match fs::remove_file(mode_conf_path()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Не удалось сбросить mode.conf: {error}")),
+    }
+}
+
+pub fn save_if_index(idx: u32) -> Result<(), String> {
+    crate::system::fs_utils::robust_write_file(&iface_conf_path(), idx.to_string().as_bytes())?;
     IF_INDEX_CACHE.store(idx, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
 }
 
 pub fn load_if_index() -> u32 {

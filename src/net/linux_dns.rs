@@ -26,7 +26,7 @@ struct Plan {
     backend: Backend,
 }
 
-fn state_path() -> std::path::PathBuf {
+pub(super) fn state_path() -> std::path::PathBuf {
     super::relay::log_dir().join("linux-dns.json")
 }
 

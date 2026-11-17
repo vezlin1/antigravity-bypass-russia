@@ -76,14 +76,9 @@ pub(super) fn with_probe_routes<T>(
         let mut changes = Vec::new();
         let result = probe(&mut |ips| prepare_probe_routes(ips, &mut changes));
         if let Err(error) = result {
-            let rollback = undo_probe_routes(&changes, |script| powershell(script).map(|_| ()))
-                .and_then(|()| match previous {
-                    Some(bytes) if fs::read(&path).ok().as_ref() != Some(&bytes) => {
-                        crate::system::fs_utils::robust_write_file(&path, &bytes)
-                    }
-                    None if path.exists() => fs::remove_file(&path).map_err(|e| e.to_string()),
-                    _ => Ok(()),
-                });
+            let rollback = restore_probe_routes(&path, previous, &changes, |script| {
+                powershell(script).map(|_| ())
+            });
             return match rollback {
                 Ok(()) => Err(error),
                 Err(rollback_error) => Err(format!(
@@ -101,6 +96,27 @@ pub(super) fn with_probe_routes<T>(
 enum RouteChange {
     Added(OwnedRoute),
     Removed(OwnedRoute),
+}
+
+#[cfg(windows)]
+fn restore_probe_routes(
+    journal: &std::path::Path,
+    previous: Option<Vec<u8>>,
+    changes: &[RouteChange],
+    run: impl FnMut(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    undo_probe_routes(changes, run)?;
+    match previous {
+        Some(bytes) if fs::read(journal).ok().as_ref() != Some(&bytes) => {
+            crate::system::fs_utils::robust_write_file(journal, &bytes)
+        }
+        None => match fs::remove_file(journal) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        },
+        _ => Ok(()),
+    }
 }
 
 #[cfg(windows)]
@@ -394,16 +410,25 @@ function Remove-NetRoute {{ [CmdletBinding(SupportsShouldProcess)]param([Paramet
             ..old.clone()
         };
         let changes = [RouteChange::Removed(old), RouteChange::Added(new)];
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("owned_routes.json");
+        fs::write(&journal, b"updated journal").unwrap();
         let mut scripts = Vec::new();
-        undo_probe_routes(&changes, |script| {
-            scripts.push(script.to_owned());
-            Ok(())
-        })
+        restore_probe_routes(
+            &journal,
+            Some(b"previous journal".to_vec()),
+            &changes,
+            |script| {
+                scripts.push(script.to_owned());
+                Ok(())
+            },
+        )
         .unwrap();
         assert!(scripts[0].contains("InterfaceIndex -eq 9"));
         assert!(scripts[0].contains("Remove-NetRoute"));
         assert!(scripts[1].contains("InterfaceIndex -eq 7"));
         assert!(scripts[1].contains("New-NetRoute"));
+        assert_eq!(fs::read(journal).unwrap(), b"previous journal");
     }
 
     #[test]

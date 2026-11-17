@@ -13,6 +13,7 @@ pub mod nrpt;
 pub mod provider;
 pub mod rank;
 pub mod relay;
+mod relay_update;
 pub mod resolver_pool;
 pub mod resolvers;
 pub mod route_health;
@@ -540,12 +541,27 @@ impl Drop for ConfigurationLock {
 }
 
 pub(super) fn configuration_lock() -> Result<ConfigurationLock, String> {
-    let dir = relay::log_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    lock_configuration_file(&dir.join("network-update.lock"))
+    try_configuration_lock()?.ok_or_else(configuration_busy)
 }
 
+fn try_configuration_lock() -> Result<Option<ConfigurationLock>, String> {
+    let dir = relay::log_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    try_lock_configuration_file(&dir.join("network-update.lock"))
+}
+
+fn configuration_busy() -> String {
+    "Настройки сети уже обновляются другим процессом. Повторите после завершения обновления.".into()
+}
+
+#[cfg(test)]
 fn lock_configuration_file(path: &std::path::Path) -> Result<ConfigurationLock, String> {
+    try_lock_configuration_file(path)?.ok_or_else(configuration_busy)
+}
+
+fn try_lock_configuration_file(
+    path: &std::path::Path,
+) -> Result<Option<ConfigurationLock>, String> {
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -553,12 +569,11 @@ fn lock_configuration_file(path: &std::path::Path) -> Result<ConfigurationLock, 
         .write(true)
         .open(path)
         .map_err(|e| format!("Блокировка настройки сети: {e}"))?;
-    file.try_lock().map_err(|e| match e {
-        std::fs::TryLockError::WouldBlock =>
-            "Настройки сети уже обновляются другим процессом. Повторите после завершения обновления.".to_string(),
-        other => format!("Блокировка настройки сети: {other}"),
-    })?;
-    Ok(ConfigurationLock(file))
+    match file.try_lock() {
+        Ok(()) => Ok(Some(ConfigurationLock(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(error) => Err(format!("Блокировка настройки сети: {error}")),
+    }
 }
 
 pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
@@ -578,6 +593,9 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     // that DNS is safe to overwrite. Re-read before applying the final plan.
     #[cfg(windows)]
     let initial_inventory = nrpt::inventory()?;
+    let previously_configured = nrpt::get_nrpt_status_info().0 > 0;
+    let pool = resolver_pool::load()?;
+    let udp_ips = resolvers::configured_udp_v4(&pool);
     let mut compatibility_notes = Vec::new();
     #[cfg(windows)]
     let hosts_fallback;
@@ -593,7 +611,8 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     }
 
     step("Выбираем подходящее подключение");
-    let (ranked, skip_primary) = routes::with_probe_routes(|prepare_routes| {
+    let mut update = None;
+    let staged = routes::with_probe_routes(|prepare_routes| {
         // DNS probes need the same physical provider routes as the relay.
         prepare_routes(&[])?;
         #[cfg(windows)]
@@ -601,24 +620,57 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         let ranked = rank::discover_agent(if_index, prepare_routes)?;
         let skip_primary =
             rank::check_agent_routes(&ranked, crate::core::endpoint::daily_configured)?;
-        Ok((ranked, skip_primary))
-    })?;
+
+        let update = update.insert(relay_update::RelayUpdate::capture()?);
+        config::prepare_service()?;
+        if if_index > 0 {
+            relay::save_if_index(if_index)?;
+        }
+        #[cfg(target_os = "linux")]
+        linux_dns::prepare(if_index)?;
+        relay::clear_custom_mode()?;
+        relay::save_upstream_config(&udp_ips)?;
+
+        step("Запускаем DNS-релей");
+        let mut browser_missing = Vec::new();
+        let startup = update.start().and_then(|()| {
+            if !wait_for_ready(Duration::from_secs(4), relay_ready) {
+                return Err("DNS-релей не подтвердил готовность за 4с".into());
+            }
+            let answers = relay_answers(skip_primary, relay_returns_address);
+            browser_missing = answers.browser_missing;
+            if !answers.agent_missing.is_empty() {
+                #[cfg(windows)]
+                if matches!(relay::local_dns_available(), Ok(false)) {
+                    return Err("Локальный UDP-порт 53 недоступен даже для тестового пакета".into());
+                }
+                return Err(format!(
+                    "Релей не вернул пригодный A-ответ для Agent ({})",
+                    answers.agent_missing.join(", ")
+                ));
+            }
+            if previously_configured && !browser_missing.is_empty() {
+                return Err(format!(
+                    "Релей не вернул пригодный A-ответ для браузерных доменов ({})",
+                    browser_missing.join(", ")
+                ));
+            }
+            Ok(())
+        });
+        let fallback_supported =
+            cfg!(windows) || (cfg!(target_os = "macos") && !udp_ips.is_empty());
+        let relay_error =
+            relay_update::allow_relay_fallback(startup, previously_configured, fallback_supported)?;
+        config::keep_downgrade_compatible()?;
+        Ok((ranked, skip_primary, relay_error, browser_missing))
+    });
+    let (ranked, skip_primary, relay_error, browser_missing) =
+        relay_update::finish_staging(staged, || update.map_or(Ok(()), |update| update.rollback()))?;
     if skip_primary {
         compatibility_notes.push(format!(
             "{PRIMARY_CLOUD_CODE}: закрепление пропущено. В настройках клиента подтверждён daily"
         ));
     }
-
-    config::prepare_service()?;
-    if if_index > 0 {
-        crate::net::relay::save_if_index(if_index);
-    }
-    #[cfg(target_os = "linux")]
-    linux_dns::prepare(if_index)?;
-
-    crate::net::relay::clear_custom_mode();
-    let udp_ips = resolvers::all_provider_v4();
-    crate::net::relay::save_upstream_config(&udp_ips);
 
     let mut sub_notes = Vec::new();
     let mut agent_rules: Vec<_> = NRPT_AGENT
@@ -666,55 +718,24 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     let studio_subs: Vec<_> = studio_subs.iter().map(String::as_str).collect();
     #[cfg(not(target_os = "linux"))]
     let udp_fallback: Vec<_> = udp_ips.iter().map(String::as_str).collect();
-    // Reject invalid or conflicting resolver plans before ranking writes hosts
-    // or setup changes the service. Applying later rechecks file ownership.
-    #[cfg(target_os = "macos")]
-    let _prepared = split_dns::prepare(
-        std::path::Path::new("/etc/resolver"),
-        &assemble_dns_rules(&agent_rules, &studio_subs, &udp_fallback, true, true),
-    )?;
     for note in crate::net::rank::format_notes(&ranked) {
         sub_notes.push(note);
     }
-    let mut relay_ok = false;
-    let mut relay_note = String::new();
-    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-    {
-        step("Запускаем DNS-обход");
-        match crate::system::service::enable() {
-            Ok(()) => {
-                relay_ok = wait_for_ready(Duration::from_secs(4), relay_ready);
-                if !relay_ok {
-                    relay_note = "фоновый процесс не подтвердил готовность за 4с".into();
-                }
-            }
-            Err(e) => {
-                relay_note = format!("релей не установлен ({e})");
-            }
-        }
-    }
-    // Readiness is local; separately verify that the DNS data path answers.
-    if relay_ok && !relay_answers() {
-        relay_ok = false;
-        relay_note = "процесс запущен, но DNS-проверка не прошла".into();
-        #[cfg(windows)]
-        if matches!(relay::local_dns_available(), Ok(false)) {
-            relay_note = "локальный UDP-порт 53 недоступен даже для тестового пакета. Для доменов Agent используются проверенные записи hosts. DNS для браузера требует отдельной проверки".into();
-        }
-    }
-    #[cfg(target_os = "linux")]
-    if !relay_ok {
-        return Err(format!("DNS Linux не переключён: {relay_note}"));
+    let relay_ok = relay_error.is_none();
+    let relay_note = relay_error.unwrap_or_default();
+    if !browser_missing.is_empty() {
+        compatibility_notes.push(format!(
+            "Gemini/AI Studio: релей не вернул пригодный A-ответ для {}",
+            browser_missing.join(", ")
+        ));
     }
     if !relay_ok && udp_ips.is_empty() {
-        #[cfg(not(windows))]
-        return Err("Включены только DoH-провайдеры, но локальный DNS не запустился".into());
         #[cfg(windows)]
-        compatibility_notes.push(
-            "Локальный DNS не запустился; подключение Antigravity проверяется через hosts".into(),
-        );
+        compatibility_notes.push(format!(
+            "{relay_note}. Подключение Antigravity проверяется через hosts"
+        ));
     }
-    if !relay_ok && resolver_pool::load()?.iter().any(|p| p.kind() == "doh") {
+    if !relay_ok && pool.iter().any(|p| p.kind() == "doh") {
         sub_notes.push(
             "DoH доступен при подборе IP; для текущих DNS-запросов нужна работающая служба".into(),
         );
@@ -816,15 +837,85 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     })
 }
 
-fn relay_answers() -> bool {
-    let query = client::build_query("daily-cloudcode-pa.googleapis.com", 0xA651);
+struct RelayAnswers {
+    agent_missing: Vec<&'static str>,
+    browser_missing: Vec<&'static str>,
+}
+
+fn relay_answers(skip_primary: bool, probe: impl Fn(&str) -> bool + Sync) -> RelayAnswers {
+    let agent: Vec<_> = NRPT_AGENT
+        .iter()
+        .copied()
+        .filter(|host| !skip_primary || *host != PRIMARY_CLOUD_CODE)
+        .collect();
+    let hosts: std::collections::BTreeSet<_> =
+        agent.iter().chain(SUBSTITUTION_CANARIES).copied().collect();
+    let missing: std::collections::BTreeSet<_> = thread::scope(|scope| {
+        let checks: Vec<_> = hosts
+            .into_iter()
+            .map(|host| {
+                let probe = &probe;
+                (host, scope.spawn(move || probe(host)))
+            })
+            .collect();
+        checks
+            .into_iter()
+            .filter_map(|(host, result)| (!result.join().unwrap_or(false)).then_some(host))
+            .collect()
+    });
+    RelayAnswers {
+        agent_missing: agent
+            .into_iter()
+            .filter(|host| missing.contains(host))
+            .collect(),
+        browser_missing: SUBSTITUTION_CANARIES
+            .iter()
+            .copied()
+            .filter(|host| missing.contains(host))
+            .collect(),
+    }
+}
+
+fn relay_returns_address(host: &str) -> bool {
+    let query = client::build_query(host, 0xA651);
     client::query_raw_via(
         &query,
         LISTEN_IP.parse().unwrap(),
         0,
         Duration::from_secs(5),
     )
-    .is_ok_and(|reply| client::is_successful_response(&reply))
+    .is_ok_and(|reply| has_usable_a_answer(&query, &reply))
+}
+
+fn has_usable_a_answer(query: &[u8], reply: &[u8]) -> bool {
+    client::response_matches(query, reply)
+        && client::is_successful_response(reply)
+        && client::answer_addrs(reply)
+            .into_iter()
+            .any(|address| match address {
+                std::net::IpAddr::V4(ip) => {
+                    !ip.is_unspecified()
+                        && !ip.is_loopback()
+                        && !ip.is_private()
+                        && !ip.is_link_local()
+                        && !ip.is_multicast()
+                        && !ip.is_broadcast()
+                }
+                std::net::IpAddr::V6(_) => false,
+            })
+}
+
+#[cfg(target_os = "linux")]
+pub fn apply_linux_dns_on_service_start() -> Result<(), String> {
+    // Manual setup holds the lock and verifies the data path before applying
+    // DNS itself. ExecStartPost must not modify system DNS in the meantime.
+    let Some(_configuration) = try_configuration_lock()? else {
+        return Ok(());
+    };
+    if !wait_for_ready(Duration::from_secs(4), relay_ready) {
+        return Err("DNS-служба не подтвердила готовность; настройки DNS сохранены".into());
+    }
+    linux_dns::apply()
 }
 
 pub(crate) fn relay_ready(timeout: Duration) -> bool {
@@ -861,6 +952,59 @@ pub(crate) fn wait_for_ready(budget: Duration, mut probe: impl FnMut(Duration) -
 #[cfg(test)]
 mod startup_tests {
     use super::*;
+
+    #[test]
+    fn relay_requires_a_matching_address_answer_for_a_public_domain() {
+        use std::net::Ipv4Addr;
+        let query = client::build_query(provider::DAILY_CLOUD_CODE, 17);
+        assert!(!has_usable_a_answer(
+            &query,
+            &client::nodata_response(&query)
+        ));
+        assert!(!has_usable_a_answer(
+            &query,
+            &client::servfail_response(&query)
+        ));
+        for ip in [
+            [0, 0, 0, 0],
+            [127, 0, 0, 1],
+            [169, 254, 0, 1],
+            [10, 0, 0, 1],
+            [224, 0, 0, 1],
+            [255; 4],
+        ] {
+            let reply = client::address_response(&query, &[Ipv4Addr::from(ip)]).unwrap();
+            assert!(!has_usable_a_answer(&query, &reply));
+        }
+        let address = Ipv4Addr::new(192, 0, 2, 17);
+        let wrong_query = client::build_query("other.test", 17);
+        let wrong_reply = client::address_response(&wrong_query, &[address]).unwrap();
+        assert!(!has_usable_a_answer(&query, &wrong_reply));
+        assert!(has_usable_a_answer(
+            &query,
+            &client::address_response(&query, &[address]).unwrap()
+        ));
+    }
+
+    #[test]
+    fn relay_can_report_browser_failure_separately_from_agent() {
+        let browser_host = "aistudio.google.com";
+        let status = relay_answers(false, |host| host != browser_host);
+        assert!(status.agent_missing.is_empty());
+        assert_eq!(status.browser_missing, [browser_host]);
+
+        let status = relay_answers(false, |host| host != provider::DAILY_CLOUD_CODE);
+        assert_eq!(status.agent_missing, [provider::DAILY_CLOUD_CODE]);
+        assert!(status.browser_missing.is_empty());
+
+        let status = relay_answers(true, |host| {
+            assert_ne!(host, PRIMARY_CLOUD_CODE);
+            true
+        });
+        assert!(status.agent_missing.is_empty());
+        assert!(status.browser_missing.is_empty());
+    }
+
     #[test]
     fn slow_probe_cannot_multiply_the_startup_budget() {
         let start = std::time::Instant::now();

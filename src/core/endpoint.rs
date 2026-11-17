@@ -12,11 +12,16 @@ pub const IDE_SETTING: &str = "jetski.cloudCodeUrl";
 pub fn daily_configured() -> bool {
     use super::detector::{find_asar_in_path, find_targets_in_path, TargetKind};
 
-    if std::env::var_os("CLOUD_CODE_URL").is_some_and(|value| value != DAILY_ENDPOINT) {
+    let inherited = std::env::var_os("CLOUD_CODE_URL");
+    if inherited
+        .as_deref()
+        .is_some_and(|value| value != DAILY_ENDPOINT)
+    {
         return false;
     }
     let mut paths = Vec::new();
-    let mut needs_launch_env = false;
+    let mut has_app = false;
+    let mut has_cli = false;
     for install in find_installations() {
         let targets = find_targets_in_path(&install);
         if targets.is_empty() {
@@ -25,31 +30,67 @@ pub fn daily_configured() -> bool {
         let has_ide = targets
             .iter()
             .any(|target| target.kind == TargetKind::IdeMainJs);
-        let has_app = find_asar_in_path(&install).is_some();
+        let has_app_here = find_asar_in_path(&install).is_some();
         if has_ide && !product_settings_path(&install).is_some_and(|path| settings_use_daily(&path))
         {
             return false;
         }
         if !has_ide
-            && !has_app
+            && !has_app_here
             && targets
                 .iter()
                 .any(|target| target.kind != TargetKind::AgyCli)
         {
             return false;
         }
-        needs_launch_env |= has_app
-            || targets
-                .iter()
-                .any(|target| target.kind == TargetKind::AgyCli);
+        has_app |= has_app_here;
+        has_cli |= targets
+            .iter()
+            .any(|target| target.kind == TargetKind::AgyCli);
         paths.extend(targets.into_iter().map(|target| target.path));
     }
     !paths.is_empty()
-        && (!needs_launch_env || super::endpoint_env::daily_configured())
+        && launch_settings_confirm_daily(
+            has_app,
+            has_cli,
+            inherited.as_deref(),
+            super::endpoint_env::daily_configured,
+        )
         && crate::system::file_lock::running_applications(&paths)
             .is_ok_and(|running| running.is_empty())
         && (!cfg!(windows)
             || crate::system::file_lock::holders(&paths).is_ok_and(|holders| holders.is_empty()))
+}
+
+fn launch_settings_confirm_daily(
+    has_app: bool,
+    has_cli: bool,
+    inherited: Option<&std::ffi::OsStr>,
+    saved_uses_daily: impl FnOnce() -> bool,
+) -> bool {
+    // A different terminal can still launch CLI with its old environment,
+    // even if no CLI is running and this process inherited the new value.
+    !has_cli
+        && (!has_app
+            || (inherited == Some(std::ffi::OsStr::new(DAILY_ENDPOINT)) && saved_uses_daily()))
+}
+
+#[test]
+fn closed_cli_can_still_launch_from_an_old_terminal() {
+    use std::ffi::OsStr;
+    for inherited in [None, Some(OsStr::new(DAILY_ENDPOINT))] {
+        assert!(!launch_settings_confirm_daily(
+            false,
+            true,
+            inherited,
+            || true
+        ));
+    }
+    assert!(!launch_settings_confirm_daily(true, false, None, || true));
+    let daily = Some(OsStr::new(DAILY_ENDPOINT));
+    assert!(!launch_settings_confirm_daily(true, false, daily, || false));
+    assert!(launch_settings_confirm_daily(true, false, daily, || true));
+    assert!(launch_settings_confirm_daily(false, false, None, || false));
 }
 
 fn settings_use_daily(path: &Path) -> bool {

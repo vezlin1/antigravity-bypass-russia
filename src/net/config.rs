@@ -21,7 +21,9 @@ pub struct UdpProvider {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    #[serde(default)]
+    // Read the marker used by early development builds. Files written by this
+    // version use the v2.5.0 schema so the previous binary can read them.
+    #[serde(default, skip_serializing)]
     pub provider_defaults_version: u8,
     pub doh: Vec<DohProvider>,
     pub extra_udp: Vec<UdpProvider>,
@@ -102,7 +104,7 @@ fn user_log_roots() -> Vec<PathBuf> {
         .collect()
 }
 
-fn context_path() -> PathBuf {
+pub(super) fn context_path() -> PathBuf {
     super::relay::log_dir().join("network-user.json")
 }
 
@@ -190,14 +192,52 @@ pub fn prepare_user() -> Result<(), String> {
 }
 
 pub fn load() -> Result<Config, String> {
-    let mut config: Config = match fs::read(path()) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("network.json: {e}"))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
-        Err(e) => return Err(format!("network.json: {e}")),
-    };
+    match fs::read(path()) {
+        Ok(bytes) => decode(&bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let defaults = Config::default();
+            validate(&defaults)?;
+            Ok(defaults)
+        }
+        Err(e) => Err(format!("network.json: {e}")),
+    }
+}
+
+fn decode(bytes: &[u8]) -> Result<Config, String> {
+    let mut config = serde_json::from_slice(bytes).map_err(|e| format!("network.json: {e}"))?;
     upgrade_builtin_defaults(&mut config);
     validate(&config)?;
     Ok(config)
+}
+
+pub(super) fn keep_downgrade_compatible() -> Result<(), String> {
+    let path = path();
+    let original = fs::read(&path).map_err(|e| format!("network.json: {e}"))?;
+    if let Some(compatible) = without_dev_marker(&original)? {
+        crate::system::fs_utils::guarded_write_file(&path, Some(&original), Some(&compatible))?;
+    }
+    Ok(())
+}
+
+fn without_dev_marker(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    let mut raw: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| format!("network.json: {e}"))?;
+    let Some(fields) = raw.as_object_mut() else {
+        return Err("network.json: ожидался JSON-объект".into());
+    };
+    if fields.remove("provider_defaults_version").is_none() {
+        return Ok(None);
+    }
+
+    let before = decode(bytes)?;
+    let mut compatible = serde_json::to_vec_pretty(&raw).map_err(|e| e.to_string())?;
+    if decode(&compatible)?.doh != before.doh {
+        // The old public defaults also had a single DoH. Record the already
+        // selected order explicitly so the next read keeps this dev choice.
+        raw["provider_order"] = serde_json::json!([before.doh[0].name]);
+        compatible = serde_json::to_vec_pretty(&raw).map_err(|e| e.to_string())?;
+    }
+    Ok(Some(compatible))
 }
 
 // Old network.json files contain the previous defaults explicitly. Upgrade only
@@ -254,6 +294,9 @@ fn forget_retired_provider(config: &mut Config, name: &str) {
 pub fn validate(config: &Config) -> Result<(), String> {
     if config.doh.len() > 8 || config.extra_udp.len() > 8 || config.log_roots.len() > 16 {
         return Err("Слишком много провайдеров/каталогов в network.json".into());
+    }
+    if config.doh.is_empty() && config.extra_udp.is_empty() {
+        return Err("В network.json не осталось DNS-серверов. Для DoH удалите пустое поле doh. Для UDP добавьте серверы в extra_udp".into());
     }
     let mut names = std::collections::HashSet::new();
     for provider in &config.extra_udp {
@@ -321,6 +364,43 @@ pub fn prepare_service() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_config_reads_in_both_new_and_public_schemas() {
+        // v2.5.0 accepts only these fields in network.json.
+        #[derive(Deserialize, Serialize)]
+        #[serde(deny_unknown_fields)]
+        struct PublicConfig {
+            doh: Vec<DohProvider>,
+            extra_udp: Vec<UdpProvider>,
+            disabled_providers: Vec<String>,
+            provider_order: Vec<String>,
+            watch_region_errors: bool,
+            log_roots: Vec<PathBuf>,
+        }
+
+        let defaults = Config::default();
+        let mut public: PublicConfig =
+            serde_json::from_value(serde_json::to_value(&defaults).unwrap()).unwrap();
+        assert_eq!(public.doh, defaults.doh);
+        public.doh.truncate(1);
+        let mut migrated: Config =
+            serde_json::from_value(serde_json::to_value(&public).unwrap()).unwrap();
+        upgrade_builtin_defaults(&mut migrated);
+        validate(&migrated).unwrap();
+        assert_eq!(migrated.doh, defaults.doh);
+        serde_json::from_slice::<PublicConfig>(&serde_json::to_vec(&migrated).unwrap()).unwrap();
+        let mut early_dev = serde_json::to_value(&public).unwrap();
+        early_dev["provider_defaults_version"] = 2.into();
+        let compatible = without_dev_marker(&serde_json::to_vec(&early_dev).unwrap())
+            .unwrap()
+            .unwrap();
+        let restored: PublicConfig = serde_json::from_slice(&compatible).unwrap();
+        assert_eq!(restored.doh, public.doh);
+        assert_eq!(decode(&compatible).unwrap().doh, public.doh);
+        assert!(without_dev_marker(&compatible).unwrap().is_none());
+    }
+
     #[test]
     fn old_provider_settings_upgrade_without_resetting_user_choices() {
         for previous in [
@@ -427,8 +507,16 @@ mod tests {
     fn old_implicit_udp_only_requires_an_explicit_provider_after_removal() {
         let mut config: Config = serde_json::from_str(r#"{"doh":[]}"#).unwrap();
         upgrade_builtin_defaults(&mut config);
-        assert!(validate(&config).unwrap_err().contains("extra_udp"));
+        let error = validate(&config).unwrap_err();
+        assert!(error.contains("удалите пустое поле doh"));
+        assert!(error.contains("extra_udp"));
         assert!(config.doh.is_empty());
+        config.extra_udp.push(UdpProvider {
+            name: "custom".into(),
+            addresses: vec!["192.0.2.53".parse().unwrap(), "192.0.2.54".parse().unwrap()],
+        });
+        let pool = super::super::resolver_pool::from_config(&config).unwrap();
+        assert_eq!(pool[0].udp_addresses(), config.extra_udp[0].addresses);
     }
 
     #[test]

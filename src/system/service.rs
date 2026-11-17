@@ -520,7 +520,107 @@ mod binary_update_tests {
     }
 }
 
-pub fn enable() -> Result<(), String> {
+/// Preserve an installed relay across a failed replacement. Reusing the
+/// existing registration also preserves its settings and startup policy.
+pub struct RelayBackup {
+    pub registered: bool,
+    running: bool,
+    binary: Option<Vec<u8>>,
+}
+
+impl RelayBackup {
+    pub fn capture() -> Result<Self, String> {
+        let registered = registered_state()?;
+        let running = running_state()?;
+        let binary = match fs::read(installed_exe()) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && !running => None,
+            Err(error) => return Err(format!("Не удалось сохранить бинарник DNS-службы: {error}")),
+        };
+        #[cfg(target_os = "macos")]
+        if registered && !Path::new(LAUNCHD_PLIST).is_file() {
+            return Err("Не найден plist работающей DNS-службы".into());
+        }
+        Ok(Self {
+            registered,
+            running,
+            binary,
+        })
+    }
+
+    pub fn stop_replacement(&self) -> Result<(), String> {
+        if !self.registered {
+            return disable();
+        }
+        #[cfg(windows)]
+        return stop_windows_worker();
+        #[cfg(target_os = "macos")]
+        return unload_mac_job();
+        #[cfg(target_os = "linux")]
+        return linux_systemctl(&["stop", SYSTEMD_LABEL]);
+    }
+
+    pub fn restore(self) -> Result<(), String> {
+        restore_relay_binary(&installed_exe(), self.binary.as_deref())?;
+        if self.running {
+            #[cfg(target_os = "macos")]
+            load_mac_job()?;
+            #[cfg(not(target_os = "macos"))]
+            start()?;
+            if !crate::net::wait_for_ready(
+                std::time::Duration::from_secs(4),
+                crate::net::relay_ready,
+            ) {
+                return Err("Прежняя DNS-служба не подтвердила готовность после запуска".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn restore_relay_binary(dst: &Path, original: Option<&[u8]>) -> Result<(), String> {
+    match original {
+        Some(bytes) if fs::read(dst).ok().as_deref() != Some(bytes) => {
+            let staged = crate::system::fs_utils::prepared_file(dst, bytes)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                staged
+                    .as_file()
+                    .set_permissions(fs::Permissions::from_mode(0o755))
+                    .map_err(|e| e.to_string())?;
+            }
+            staged
+                .persist(dst)
+                .map_err(|e| format!("Не удалось вернуть бинарник DNS-службы: {e}"))?;
+        }
+        None => match fs::remove_file(dst) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Не удалось убрать новый бинарник DNS-службы: {error}"
+                ))
+            }
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
+#[test]
+fn relay_binary_backup_can_restore_or_remove_the_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let installed = dir.path().join(EXE_NAME);
+    fs::write(&installed, b"replacement").unwrap();
+    restore_relay_binary(&installed, Some(b"original")).unwrap();
+    assert_eq!(fs::read(&installed).unwrap(), b"original");
+    restore_relay_binary(&installed, None).unwrap();
+    restore_relay_binary(&installed, None).unwrap();
+    assert!(!installed.exists());
+}
+
+pub fn enable(reuse_registration: bool, replacement_attempted: &mut bool) -> Result<(), String> {
     let dir = install_dir();
     fs::create_dir_all(&dir).map_err(|e| {
         format!(
@@ -537,6 +637,7 @@ pub fn enable() -> Result<(), String> {
     if !dst.exists() || !same_file_bytes(&src, &dst) {
         let staged = prepare_service_binary(&src, &dst)?;
         finish_prepared_service_binary(&staged)?;
+        *replacement_attempted = true;
         #[cfg(target_os = "windows")]
         {
             let _ = crate::system::command::output("schtasks", ["/End", "/TN", TASK_NAME]);
@@ -585,12 +686,16 @@ pub fn enable() -> Result<(), String> {
         })?;
     }
 
+    *replacement_attempted = true;
     #[cfg(target_os = "windows")]
     {
         // A worker is a separate process: updating iface.conf/network-user.json
         // cannot invalidate its in-memory caches. Restart on every successful
         // setup, including when the executable bytes have not changed.
         stop_windows_worker()?;
+        if reuse_registration {
+            return start();
+        }
         let task_xml = windows_task_xml(&dst);
 
         let xml_path = dir.join("task.xml");
@@ -639,6 +744,9 @@ pub fn enable() -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         unload_mac_job()?;
+        if reuse_registration {
+            return load_mac_job();
+        }
         let plist_path = LAUNCHD_PLIST;
         let stderr_log = dir.join("stderr.log");
         let stdout_log = dir.join("stdout.log");
@@ -702,14 +810,7 @@ pub fn enable() -> Result<(), String> {
             }
         }
 
-        let out = crate::system::command::output("launchctl", ["bootstrap", "system", plist_path]);
-        if out.map(|o| !o.status.success()).unwrap_or(true) {
-            let fallback = crate::system::command::output("launchctl", ["load", "-w", plist_path])
-                .map_err(|e| format!("launchctl load failed: {}", e))?;
-            if !fallback.status.success() {
-                return Err("Не удалось загрузить LaunchDaemon через launchctl".to_string());
-            }
-        }
+        load_mac_job()?;
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -732,6 +833,9 @@ pub fn enable() -> Result<(), String> {
         );
 
         if linux_has_systemd() {
+            if reuse_registration {
+                return linux_systemctl(&["restart", SYSTEMD_LABEL]);
+            }
             crate::system::fs_utils::robust_write_file(
                 Path::new(SYSTEMD_SERVICE),
                 unit_content.as_bytes(),
@@ -747,6 +851,22 @@ pub fn enable() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn load_mac_job() -> Result<(), String> {
+    if crate::system::command::output("launchctl", ["bootstrap", "system", LAUNCHD_PLIST])
+        .is_ok_and(|out| out.status.success())
+    {
+        return Ok(());
+    }
+    let fallback = crate::system::command::output("launchctl", ["load", "-w", LAUNCHD_PLIST])
+        .map_err(|e| format!("launchctl load failed: {e}"))?;
+    if fallback.status.success() {
+        Ok(())
+    } else {
+        Err("Не удалось загрузить LaunchDaemon через launchctl".into())
+    }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]

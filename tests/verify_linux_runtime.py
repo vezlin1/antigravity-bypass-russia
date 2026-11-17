@@ -45,6 +45,8 @@ for directory in ['/var/lib', '/run']:
 for directory in ['/run/lock','/run/shm','/run/user']:
     Path(directory).mkdir(exist_ok=True)
 subprocess.run(['ip', 'link', 'set', 'lo', 'up'], check=True)
+agent_address = '192.0.2.44'
+subprocess.run(['ip', 'address', 'add', f'{agent_address}/32', 'dev', 'lo'], check=True)
 home = work/'home'
 home.mkdir()
 os.chown(home, 65534, 65534)
@@ -72,7 +74,7 @@ def dns_server(address, smart, scope=0):
             question = data[12:end+4]
             answer = b''
             if qtype in [1, 28]:
-                ip = ('127.0.0.2' if smart else '192.0.2.123') if qtype == 1 else '2001:db8::123'
+                ip = (agent_address if smart else '192.0.2.123') if qtype == 1 else '2001:db8::123'
                 raw = ipaddress.ip_address(ip).packed
                 answer = b'\xc0\x0c'+struct.pack('!HHIH',qtype,1,60,len(raw))+raw
             reply = data[:2]+struct.pack('!HHHHH',0x8180,1,bool(answer),0,0)+question+answer
@@ -88,7 +90,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(401); self.send_header('Content-Length','0'); self.end_headers()
     do_HEAD = do_GET
     def log_message(self, *args): pass
-server = http.server.ThreadingHTTPServer(('127.0.0.2',443), Handler)
+server = http.server.ThreadingHTTPServer((agent_address,443), Handler)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain(cert,key)
 server.socket = context.wrap_socket(server.socket, server_side=True)
@@ -124,20 +126,20 @@ def query(name, qtype=1, tcp=False):
 run('dns')
 applied = resolv.read_bytes()
 assert b'nameserver 127.0.0.55' in applied and b'search corp.test' in applied
-assert b'127.0.0.2 gemini.google.com' not in hosts.read_bytes(), 'Browser DNS must use the resolver, not incidental hosts pins'
-assert query('gemini.google.com').endswith(socket.inet_aton('127.0.0.2'))
-assert query('api.aistudio.google.com').endswith(socket.inet_aton('127.0.0.2'))
+assert f'{agent_address} gemini.google.com'.encode() not in hosts.read_bytes(), 'Browser DNS must use the resolver, not incidental hosts pins'
+assert query('gemini.google.com').endswith(socket.inet_aton(agent_address))
+assert query('api.aistudio.google.com').endswith(socket.inet_aton(agent_address))
 assert query('private.corp.test').endswith(socket.inet_aton('192.0.2.123'))
 assert query('private.corp.test',28).endswith(ipaddress.ip_address('2001:db8::123').packed)
 assert query('private.corp.test',tcp=True).endswith(socket.inet_aton('192.0.2.123'))
-assert {x[4][0] for x in socket.getaddrinfo('gemini.google.com',443,socket.AF_INET)}=={'127.0.0.2'}
+assert {x[4][0] for x in socket.getaddrinfo('gemini.google.com',443,socket.AF_INET)}=={agent_address}
 print('PASS: real Linux setup, system resolver, browser suffixes, private DNS, AAAA and TCP',flush=True)
 run('dns')
 assert resolv.read_bytes()==applied
 print('PASS: repeated setup restarts the standalone worker without systemd',flush=True)
 resolv.write_bytes(applied+b'# changed by another program\n')
 run('rollback',success=False)
-assert query('gemini.google.com').endswith(socket.inet_aton('127.0.0.2'))
+assert query('gemini.google.com').endswith(socket.inet_aton(agent_address))
 assert resolv.read_bytes().endswith(b'# changed by another program\n')
 resolv.write_bytes(applied)
 run('rollback')
@@ -220,7 +222,7 @@ if args.resolved_binary:
     time.sleep(.3)
     run('--linux-dns-apply')
     result=subprocess.run(['resolvectl','query','-4','gemini.google.com'],capture_output=True,text=True,timeout=12)
-    assert result.returncode==0 and '127.0.0.2' in result.stdout,(result.stdout,result.stderr,(work/'resolved.log').read_text())
+    assert result.returncode==0 and agent_address in result.stdout,(result.stdout,result.stderr,(work/'resolved.log').read_text())
     run('rollback')
     assert '127.0.0.1' in subprocess.check_output(['resolvectl','dns','agtest0'],text=True)
     assert subprocess.check_output(['resolvectl','domain','agtest0'],text=True).strip().endswith('corp.test')
@@ -248,7 +250,7 @@ if args.resolved_binary:
     assert prepared['backend']['Resolved']['interface']=='agtest0'
     assert prepared['backend']['Resolved']['domains']==[]
     assert prepared['backend']['Resolved']['default_route'] is True
-    assert {x[4][0] for x in socket.getaddrinfo('fresh.aistudio.google.com',443,socket.AF_INET)}=={'127.0.0.2'}
+    assert {x[4][0] for x in socket.getaddrinfo('fresh.aistudio.google.com',443,socket.AF_INET)}=={agent_address}
     ordinary=subprocess.run(['resolvectl','query','-4','public.example.com'],capture_output=True,text=True,timeout=12)
     assert ordinary.returncode==0 and '192.0.2.123' in ordinary.stdout,(ordinary.stdout,ordinary.stderr)
     run('dns')

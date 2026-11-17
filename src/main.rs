@@ -42,11 +42,7 @@ fn main() {
         if unsafe { libc::geteuid() } != 0 {
             std::process::exit(1);
         }
-        if !net::wait_for_ready(std::time::Duration::from_secs(4), net::relay_ready) {
-            eprintln!("DNS-служба не подтвердила готовность; настройки DNS сохранены");
-            std::process::exit(1);
-        }
-        if let Err(error) = net::linux_dns::apply() {
+        if let Err(error) = net::apply_linux_dns_on_service_start() {
             eprintln!("{error}");
             std::process::exit(1);
         }
