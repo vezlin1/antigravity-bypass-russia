@@ -49,14 +49,17 @@ pub const NRPT_STUDIO: &[&str] = &[
     ".s-aiplatform.googleapis.com",
 ];
 
+pub const DAILY_CLOUD_CODE: &str = "daily-cloudcode-pa.googleapis.com";
+pub const PRIMARY_CLOUD_CODE: &str = "cloudcode-pa.googleapis.com";
+
 /// Agent Cloud Code & Gemini API hosts. Each gets its own NRPT nameserver list —
 /// only providers that actually substitute *this* name, with fallback to ranked SNI proxies.
 /// aicode.googleapis.com serves CLI 1.4.11+ eligibility/entitlement checks
 /// (ManagementService/GetUserInfo, entitlement.userTier); routing it directly
 /// fails the check even with the local gate patched.
 pub const NRPT_AGENT: &[&str] = &[
-    "daily-cloudcode-pa.googleapis.com",
-    "cloudcode-pa.googleapis.com",
+    DAILY_CLOUD_CODE,
+    PRIMARY_CLOUD_CODE,
     "generativelanguage.googleapis.com",
     "aicode.googleapis.com",
 ];

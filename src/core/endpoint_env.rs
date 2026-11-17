@@ -185,6 +185,9 @@ mod windows {
         }
         apply()
     }
+    pub fn daily_configured() -> bool {
+        read().is_ok_and(|value| value.as_ref() == Some(&expected()))
+    }
     pub fn apply() -> Result<String, String> {
         let path = path()?;
         let current = read()?;
@@ -320,6 +323,14 @@ pub fn apply_if_default() -> Result<String, String> {
                 .into(),
         )
     }
+}
+
+pub fn daily_configured() -> bool {
+    #[cfg(windows)]
+    return windows::daily_configured();
+
+    #[cfg(not(windows))]
+    false
 }
 pub fn restore() -> Result<(), String> {
     #[cfg(windows)]

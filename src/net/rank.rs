@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::net::hosts::write_entries as write_hosts_entries;
-use crate::net::provider::NRPT_AGENT;
+use crate::net::provider::{NRPT_AGENT, PRIMARY_CLOUD_CODE};
 use crate::net::relay;
 use crate::net::resolvers;
 use crate::net::routes;
@@ -26,7 +26,10 @@ pub fn rank_path() -> PathBuf {
     relay::log_dir().join("proxy_rank.conf")
 }
 
-pub fn discover_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
+pub(super) fn discover_agent(
+    if_index: u32,
+    prepare_routes: &mut dyn FnMut(&[Ipv4Addr]) -> Result<(), String>,
+) -> Result<Vec<RankedHost>, String> {
     let previous = load();
     let geohide_enabled = super::resolver_pool::load()?
         .iter()
@@ -71,7 +74,7 @@ pub fn discover_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
 
     // The same relay often serves several names. Inspect its OS route once
     // before probing TLS separately with each host's SNI.
-    routes::sync_physical_hosts(&addresses.into_iter().collect::<Vec<_>>())?;
+    prepare_routes(&addresses.into_iter().collect::<Vec<_>>())?;
     let mut ranked = Vec::new();
     for (host, candidates) in host_candidates {
         let mut ips = resolvers::rank_tls_v4(&candidates, &host);
@@ -83,12 +86,11 @@ pub fn discover_agent(if_index: u32) -> Result<Vec<RankedHost>, String> {
         }
         ranked.push(RankedHost { host, ips });
     }
-    require_complete_agent_routes(&ranked)?;
     Ok(ranked)
 }
 
-pub fn apply_ranked(ranked: &[RankedHost]) -> Result<(), String> {
-    apply_complete_ranking(ranked, || {
+pub(super) fn apply_ranked(ranked: &[RankedHost], skip_primary: bool) -> Result<(), String> {
+    apply_complete_ranking(ranked, skip_primary, || {
         routes::sync_physical_hosts(&ranked_ips(ranked))?;
         save(ranked)?;
         apply_hosts(ranked)
@@ -98,7 +100,10 @@ pub fn apply_ranked(ranked: &[RankedHost]) -> Result<(), String> {
 // An incomplete scan must never replace a previously working hosts block or
 // ranking. In particular, a reachable native endpoint cannot stand in for the
 // daily endpoint that is configured in the application.
-fn require_complete_agent_routes(ranked: &[RankedHost]) -> Result<(), String> {
+pub(super) fn check_agent_routes(
+    ranked: &[RankedHost],
+    daily_configured: impl FnOnce() -> bool,
+) -> Result<bool, String> {
     let missing: Vec<_> = NRPT_AGENT
         .iter()
         .filter(|host| {
@@ -110,20 +115,33 @@ fn require_complete_agent_routes(ranked: &[RankedHost]) -> Result<(), String> {
         .copied()
         .collect();
     if missing.is_empty() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Нет однозначного проверенного маршрута для {}; прежние hosts и рейтинг сохранены",
-            missing.join(", ")
-        ))
+        return Ok(false);
     }
+    if missing == [PRIMARY_CLOUD_CODE]
+        && !ranked
+            .iter()
+            .any(|row| super::route_health::host_name(&row.host) == PRIMARY_CLOUD_CODE)
+    {
+        return if daily_configured() {
+            Ok(true)
+        } else {
+            Err(format!(
+                "Нет проверенного маршрута для {PRIMARY_CLOUD_CODE}. Настройки daily для закрытых клиентов не подтверждены. Прежние hosts и рейтинг сохранены"
+            ))
+        };
+    }
+    Err(format!(
+        "Нет однозначного проверенного маршрута для {}; прежние hosts и рейтинг сохранены",
+        missing.join(", ")
+    ))
 }
 
 fn apply_complete_ranking(
     ranked: &[RankedHost],
+    skip_primary: bool,
     apply: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    require_complete_agent_routes(ranked)?;
+    check_agent_routes(ranked, || skip_primary)?;
     apply()
 }
 
@@ -244,7 +262,7 @@ mod tests {
         for missing in 0..NRPT_AGENT.len() {
             let mut ranked = complete_ranking();
             ranked.remove(missing);
-            let error = apply_complete_ranking(&ranked, || {
+            let error = apply_complete_ranking(&ranked, false, || {
                 fs::write(&rank, b"replacement").unwrap();
                 fs::write(&hosts, b"replacement").unwrap();
                 Ok(())
@@ -262,18 +280,57 @@ mod tests {
         for index in 0..ranked.len() {
             let mut empty = ranked.clone();
             empty[index].ips.clear();
-            assert!(require_complete_agent_routes(&empty).is_err());
+            assert!(check_agent_routes(&empty, || true).is_err());
             let mut duplicate = ranked.clone();
             duplicate.push(ranked[index].clone());
-            assert!(require_complete_agent_routes(&duplicate).is_err());
+            assert!(check_agent_routes(&duplicate, || true).is_err());
         }
-        assert!(require_complete_agent_routes(&[]).is_err());
+        assert!(check_agent_routes(&[], || true).is_err());
         let mut applied = false;
-        apply_complete_ranking(&ranked, || {
+        apply_complete_ranking(&ranked, false, || {
             applied = true;
             Ok(())
         })
         .unwrap();
         assert!(applied);
+    }
+
+    #[test]
+    fn missing_primary_route_is_accepted_only_after_daily_configuration_is_confirmed() {
+        let mut ranked = complete_ranking();
+        ranked.retain(|row| row.host != PRIMARY_CLOUD_CODE);
+        assert!(check_agent_routes(&ranked, || false)
+            .unwrap_err()
+            .contains(PRIMARY_CLOUD_CODE));
+        let skip_primary = check_agent_routes(&ranked, || true).unwrap();
+        assert!(skip_primary);
+        let mut applied = false;
+        apply_complete_ranking(&ranked, skip_primary, || {
+            applied = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(applied);
+    }
+
+    #[test]
+    fn missing_daily_route_never_changes_working_pins_even_when_daily_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let hosts = dir.path().join("hosts");
+        let rank = dir.path().join("proxy_rank.conf");
+        fs::write(&hosts, b"original hosts").unwrap();
+        fs::write(&rank, b"original ranking").unwrap();
+        let mut ranked = complete_ranking();
+        let daily = super::super::provider::DAILY_CLOUD_CODE;
+        ranked.retain(|row| row.host != daily);
+        let error = apply_complete_ranking(&ranked, true, || {
+            fs::write(&hosts, b"new hosts").unwrap();
+            fs::write(&rank, b"new ranking").unwrap();
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains(daily));
+        assert_eq!(fs::read(hosts).unwrap(), b"original hosts");
+        assert_eq!(fs::read(rank).unwrap(), b"original ranking");
     }
 }

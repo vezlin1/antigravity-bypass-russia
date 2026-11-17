@@ -27,10 +27,10 @@ pub use relay::{detach_console, log_fatal, run as run_dns_relay};
 use provider::nrpt_domains;
 #[cfg(windows)]
 use provider::NRPT_TAG;
-use provider::{NRPT_AGENT, NRPT_STUDIO, SUBSTITUTION_CANARIES};
+use provider::{NRPT_AGENT, NRPT_STUDIO, PRIMARY_CLOUD_CODE, SUBSTITUTION_CANARIES};
 use relay::{LISTEN_IP, LISTEN_PORT};
 #[cfg(windows)]
-use routes::{add_static_routes, remove_static_routes};
+use routes::remove_static_routes;
 use std::thread;
 use std::time::Duration;
 
@@ -268,7 +268,7 @@ mod tests {
             ),
         ];
         let plan = inventory.plan(&desired);
-        let coverage = compatibility_coverage(&plan, &[]);
+        let coverage = compatibility_coverage(&plan, &[], false);
         assert_eq!(coverage.agent_hosts, ["daily-cloudcode-pa.googleapis.com"]);
         assert!(coverage
             .notes
@@ -302,13 +302,21 @@ mod tests {
                 namespace: "CLOUDCODE-PA.GOOGLEAPIS.COM.".into(),
                 reason: "Windows uses another DNS".into(),
             }],
+            false,
         );
         assert_eq!(coverage.agent_hosts, ["cloudcode-pa.googleapis.com"]);
         inventory.policy_present = true;
         assert_eq!(
-            compatibility_coverage(&inventory.plan(&desired), &[]).agent_hosts,
+            compatibility_coverage(&inventory.plan(&desired), &[], false).agent_hosts,
             NRPT_AGENT
         );
+        let daily_only = compatibility_coverage(&inventory.plan(&desired), &[], true);
+        let required: Vec<_> = NRPT_AGENT
+            .iter()
+            .copied()
+            .filter(|host| *host != PRIMARY_CLOUD_CODE)
+            .collect();
+        assert_eq!(daily_only.agent_hosts, required);
     }
 
     #[test]
@@ -409,6 +417,7 @@ struct CompatibilityCoverage {
 fn compatibility_coverage(
     plan: &nrpt::CompatibilityPlan,
     issues: &[nrpt::EffectiveIssue],
+    skip_primary: bool,
 ) -> CompatibilityCoverage {
     let normalize = |name: &str| name.trim().trim_end_matches('.').to_ascii_lowercase();
     let unavailable: std::collections::BTreeSet<_> = plan
@@ -421,6 +430,7 @@ fn compatibility_coverage(
     // skipped suffix must not invalidate an effective exact Agent rule.
     let agent_hosts: Vec<_> = NRPT_AGENT
         .iter()
+        .filter(|host| !skip_primary || **host != PRIMARY_CLOUD_CODE)
         .filter(|host| unavailable.contains(**host))
         .map(|host| (*host).to_string())
         .collect();
@@ -524,7 +534,6 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
 
     preflight()?;
     let _configuration = configuration_lock()?;
-    config::prepare_service()?;
     step("Подготавливаем подключение");
     // Reconfigure owned rules in place. Removing the working service/hosts/DNS
     // before discovery left users disconnected whenever all probes failed.
@@ -534,10 +543,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     // that DNS is safe to overwrite. Re-read before applying the final plan.
     #[cfg(windows)]
     let initial_inventory = nrpt::inventory()?;
-    #[cfg(windows)]
     let mut compatibility_notes = Vec::new();
-    #[cfg(not(windows))]
-    let compatibility_notes = Vec::new();
     #[cfg(windows)]
     let hosts_fallback;
     #[cfg(not(windows))]
@@ -550,6 +556,25 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     if if_index == 0 || egress.as_ref().is_none_or(|e| e.gateway.is_none()) {
         return Err("Не найден физический выход в интернет; проверка через VPN отменена".into());
     }
+
+    step("Выбираем подходящее подключение");
+    let (ranked, skip_primary) = routes::with_probe_routes(|prepare_routes| {
+        // DNS probes need the same physical provider routes as the relay.
+        prepare_routes(&[])?;
+        #[cfg(windows)]
+        thread::sleep(Duration::from_millis(400));
+        let ranked = rank::discover_agent(if_index, prepare_routes)?;
+        let skip_primary =
+            rank::check_agent_routes(&ranked, crate::core::endpoint::daily_configured)?;
+        Ok((ranked, skip_primary))
+    })?;
+    if skip_primary {
+        compatibility_notes.push(format!(
+            "{PRIMARY_CLOUD_CODE}: закрепление пропущено. В настройках клиента подтверждён daily"
+        ));
+    }
+
+    config::prepare_service()?;
     if if_index > 0 {
         crate::net::relay::save_if_index(if_index);
     }
@@ -562,15 +587,6 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         .map(|s| s.to_string())
         .collect();
     crate::net::relay::save_upstream_config(&ips);
-
-    // Routes first. If VPN is the default route, substitution probes otherwise
-    // leak into the tunnel and SmartDNS returns genuine Google.
-    #[cfg(target_os = "windows")]
-    {
-        step("Подготавливаем DNS");
-        add_static_routes()?;
-        thread::sleep(Duration::from_millis(400));
-    }
 
     let mut sub_notes = Vec::new();
     let mut agent_rules: Vec<(String, Vec<String>)> = Vec::new();
@@ -622,8 +638,6 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         std::path::Path::new("/etc/resolver"),
         &assemble_dns_rules(&agent_rules, &studio_subs, true, true),
     )?;
-    step("Выбираем подходящее подключение");
-    let ranked = crate::net::rank::discover_agent(if_index)?;
     for note in crate::net::rank::format_notes(&ranked) {
         sub_notes.push(note);
     }
@@ -681,13 +695,13 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         let rules = assemble_dns_rules(&agent_rules, &studio_subs, relay_ok, false);
         let inventory = nrpt::inventory()?;
         let plan = inventory.plan(&rules);
-        let coverage = compatibility_coverage(&plan, &[]);
+        let coverage = compatibility_coverage(&plan, &[], skip_primary);
         // Reject a known uncovered Agent before replacing its working pins or
         // removing an old owned NRPT rule during reconciliation.
         compatibility::require_agent_pins(&coverage.agent_hosts, &ranked)?;
         (inventory, plan)
     };
-    crate::net::rank::apply_ranked(&ranked)?;
+    crate::net::rank::apply_ranked(&ranked, skip_primary)?;
 
     // Keep verified agent addresses installed by apply_ranked. A VPN enabled
     // later may intercept loopback DNS even while the relay remains healthy.
@@ -716,7 +730,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
                 })
                 .collect(),
         };
-        let coverage = compatibility_coverage(&plan, &issues);
+        let coverage = compatibility_coverage(&plan, &issues, skip_primary);
         hosts_fallback = !coverage.agent_hosts.is_empty();
         flush_dns_cache()?;
         if hosts_fallback {

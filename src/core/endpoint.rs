@@ -6,6 +6,88 @@ use std::path::{Path, PathBuf};
 pub const DAILY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 pub const IDE_SETTING: &str = "jetski.cloudCodeUrl";
 
+/// Confirm the saved launch settings of the discovered clients. A running
+/// process can still be using its previous endpoint, especially after an
+/// environment change.
+pub fn daily_configured() -> bool {
+    use super::detector::{find_asar_in_path, find_targets_in_path, TargetKind};
+
+    if std::env::var_os("CLOUD_CODE_URL").is_some_and(|value| value != DAILY_ENDPOINT) {
+        return false;
+    }
+    let mut paths = Vec::new();
+    let mut needs_launch_env = false;
+    for install in find_installations() {
+        let targets = find_targets_in_path(&install);
+        if targets.is_empty() {
+            continue;
+        }
+        let has_ide = targets
+            .iter()
+            .any(|target| target.kind == TargetKind::IdeMainJs);
+        let has_app = find_asar_in_path(&install).is_some();
+        if has_ide && !product_settings_path(&install).is_some_and(|path| settings_use_daily(&path))
+        {
+            return false;
+        }
+        if !has_ide
+            && !has_app
+            && targets
+                .iter()
+                .any(|target| target.kind != TargetKind::AgyCli)
+        {
+            return false;
+        }
+        needs_launch_env |= has_app
+            || targets
+                .iter()
+                .any(|target| target.kind == TargetKind::AgyCli);
+        paths.extend(targets.into_iter().map(|target| target.path));
+    }
+    !paths.is_empty()
+        && (!needs_launch_env || super::endpoint_env::daily_configured())
+        && crate::system::file_lock::running_applications(&paths)
+            .is_ok_and(|running| running.is_empty())
+        && (!cfg!(windows)
+            || crate::system::file_lock::holders(&paths).is_ok_and(|holders| holders.is_empty()))
+}
+
+fn settings_use_daily(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| endpoint_value(&text).ok().flatten())
+        .is_some_and(|value| value.as_str() == Some(DAILY_ENDPOINT))
+}
+
+#[test]
+fn daily_settings_must_be_explicit_and_unambiguous() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("settings.json");
+    assert!(!settings_use_daily(&settings));
+    for (text, expected) in [
+        (
+            r#"{"jetski.cloudCodeUrl":"https://daily-cloudcode-pa.googleapis.com"}"#,
+            true,
+        ),
+        (
+            r#"{"jetski.cloudCodeUrl":"https://cloudcode-pa.googleapis.com"}"#,
+            false,
+        ),
+        (
+            r#"{"jetski.cloudCodeUrl":"https://daily-cloudcode-pa.googleapis.com","jetski.cloudCodeUrl":"https://daily-cloudcode-pa.googleapis.com"}"#,
+            false,
+        ),
+        (
+            r#"{"jetski.cloudCodeUrl":"https://daily-cloudcode-pa.googleapis.com.example.org"}"#,
+            false,
+        ),
+        ("{", false),
+    ] {
+        fs::write(&settings, text).unwrap();
+        assert_eq!(settings_use_daily(&settings), expected);
+    }
+}
+
 pub fn apply_all() -> Vec<Result<String, String>> {
     if let Err(error) = migrate_gateway_settings() {
         return vec![Err(error)];
@@ -287,7 +369,7 @@ fn appdata_settings(folder: &str) -> Option<PathBuf> {
     }
 }
 
-fn ide_settings_path(install: &Path) -> Option<PathBuf> {
+fn product_settings_path(install: &Path) -> Option<PathBuf> {
     let product_candidates = [
         install.join("resources").join("app").join("product.json"),
         install
@@ -307,6 +389,13 @@ fn ide_settings_path(install: &Path) -> Option<PathBuf> {
                 }
             }
         }
+    }
+    None
+}
+
+fn ide_settings_path(install: &Path) -> Option<PathBuf> {
+    if let Some(path) = product_settings_path(install) {
+        return Some(path);
     }
     let fallbacks = ["Antigravity", "Antigravity IDE", "Google Antigravity"];
     for f in fallbacks {
