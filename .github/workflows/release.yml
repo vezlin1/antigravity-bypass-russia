@@ -67,7 +67,7 @@ jobs:
 
       - name: Regression tests (isolated fixtures; destructive harnesses remain ignored)
         if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: cargo test --locked --bin antigravity-bypass-russia --target ${{ matrix.target }}
+        run: ${{ runner.os == 'Linux' && 'bash tests/run_linux_ci_check.sh' || '' }} cargo test --locked --bin antigravity-bypass-russia --target ${{ matrix.target }}
 
       - name: Socket regression tests
         if: matrix.target != 'aarch64-unknown-linux-gnu'
@@ -75,7 +75,7 @@ jobs:
 
       - name: Official CLI profiles and rollback
         if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: python tests/verify_cli_profiles.py --target ${{ matrix.target }}
+        run: ${{ runner.os == 'Linux' && 'bash tests/run_linux_ci_check.sh' || '' }} python tests/verify_cli_profiles.py --target ${{ matrix.target }}
 
       - name: Pinned App, IDE and CLI artifacts
         if: matrix.target == 'x86_64-unknown-linux-gnu'
