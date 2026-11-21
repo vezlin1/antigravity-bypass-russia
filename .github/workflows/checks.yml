@@ -14,6 +14,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  upstream-fixtures:
+    name: Pinned App, IDE and CLI artifacts
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python tests/verify_upstream_artifacts.py
+
   test:
     name: Test - ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
@@ -59,8 +70,6 @@ jobs:
       - name: Official CLI profiles and rollback
         if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: python tests/verify_cli_profiles.py --target ${{ matrix.target }}
-      - name: Current App, IDE and CLI versions
-        run: python tests/verify_upstream_versions.py
       - name: Installer platform selection
         run: python tests/verify_installer.py
 

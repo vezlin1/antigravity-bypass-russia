@@ -1,0 +1,21 @@
+name: Monitor Google Antigravity versions
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upstream-versions:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compare published versions with pinned fixtures
+        run: python tests/verify_upstream_versions.py

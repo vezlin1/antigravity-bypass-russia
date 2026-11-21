@@ -28,7 +28,7 @@ if sys.platform != 'linux' or os.geteuid() != 0:
     raise SystemExit('Run as root on Linux; all runtime mutations occur in private namespaces.')
 if args.cli_fixture and not args.cli_version:
     pinned=json.loads((Path(__file__).resolve().parent/'upstream-versions.json').read_text())
-    args.cli_version=pinned['cli']['linux_amd64']['version']
+    args.cli_version=pinned['previous']['cli']['linux_amd64']['version']
 if not args.inside:
     command=['unshare', '--mount', '--net', '--pid', '--fork', '--mount-proc', sys.executable, str(Path(__file__).resolve()), str(binary), '--inside']
     if args.cli_fixture: command.extend(['--cli-fixture',str(args.cli_fixture.resolve()),'--cli-version',args.cli_version])

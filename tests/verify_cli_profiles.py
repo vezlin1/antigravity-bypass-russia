@@ -75,7 +75,7 @@ def main():
             print(f"PASS: official CLI {version} macOS {arch}", flush=True)
 
         pinned = json.loads((ROOT / "tests/upstream-versions.json").read_text())
-        for platform, manifest in pinned["cli"].items():
+        for platform, manifest in pinned["previous"]["cli"].items():
             # macOS transaction tests invoke codesign, which cannot sign PE/ELF.
             # The Windows CI job covers those formats as well as both Mach-O builds.
             if sys.platform == "darwin" and not platform.startswith("darwin"):
