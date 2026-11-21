@@ -10,6 +10,15 @@ use std::{
 };
 
 pub const TIMEOUT: Duration = Duration::from_millis(2500);
+static CLIENTS: OnceLock<Mutex<HashMap<String, Client>>> = OnceLock::new();
+
+pub(super) fn invalidate_connections() {
+    if let Some(clients) = CLIENTS.get() {
+        if let Ok(mut clients) = clients.lock() {
+            clients.clear();
+        }
+    }
+}
 
 fn source_address(if_index: u32) -> Result<Option<IpAddr>, String> {
     if if_index == 0 {
@@ -28,7 +37,6 @@ fn source_address(if_index: u32) -> Result<Option<IpAddr>, String> {
 }
 
 fn http_client(provider: &DohProvider, source: Option<IpAddr>) -> Result<Client, String> {
-    static CLIENTS: OnceLock<Mutex<HashMap<String, Client>>> = OnceLock::new();
     let key = format!("{}|{:?}|{:?}", provider.url, provider.bootstrap, source);
     let mut clients = CLIENTS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -37,6 +45,15 @@ fn http_client(provider: &DohProvider, source: Option<IpAddr>) -> Result<Client,
     if let Some(client) = clients.get(&key) {
         return Ok(client.clone());
     }
+    let client = build_http_client(provider, source)?;
+    if clients.len() >= 32 {
+        clients.clear();
+    }
+    clients.insert(key, client.clone());
+    Ok(client)
+}
+
+fn build_http_client(provider: &DohProvider, source: Option<IpAddr>) -> Result<Client, String> {
     let url = reqwest::Url::parse(&provider.url).map_err(|e| e.to_string())?;
     if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
         return Err("DoH требует HTTPS без credentials".into());
@@ -60,14 +77,31 @@ fn http_client(provider: &DohProvider, source: Option<IpAddr>) -> Result<Client,
             .collect();
         builder = builder.resolve_to_addrs(host, &addresses);
     }
-    let client = builder
+    builder
         .build()
-        .map_err(|e| format!("DoH client: {}", e.without_url()))?;
-    if clients.len() >= 32 {
-        clients.clear();
+        .map_err(|e| format!("DoH client: {}", e.without_url()))
+}
+
+#[cfg(windows)]
+pub(super) fn query_vpn_bootstrap(
+    provider: &DohProvider,
+    packet: &[u8],
+    tunnel: u32,
+    deadline: Instant,
+) -> Result<Vec<u8>, String> {
+    let mut pinned = provider.clone();
+    pinned.bootstrap.retain(|ip| {
+        matches!(ip, IpAddr::V4(address) if super::egress::windows_ipv4_route(*address) == Some(tunnel))
+    });
+    if pinned.bootstrap.is_empty() {
+        return Err("DoH: для bootstrap нет маршрута через текущий VPN".into());
     }
-    clients.insert(key, client.clone());
-    Ok(client)
+
+    // Use the VPN source address on a fresh client and explicit bootstrap IPs.
+    // In particular, never invoke the ordinary system-DNS retry here.
+    let source = source_address(tunnel)?.ok_or("DoH: не найден адрес интерфейса VPN")?;
+    let client = build_http_client(&pinned, Some(source))?;
+    exchange_until(&client, &pinned.url, packet, deadline)
 }
 
 #[cfg(test)]

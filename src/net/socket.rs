@@ -257,24 +257,7 @@ pub fn bind_socket_to_interface(sock: &UdpSocket, if_index: u32) -> Result<(), S
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::io::AsRawSocket;
-        #[link(name = "ws2_32")]
-        extern "system" {
-            fn setsockopt(
-                s: usize,
-                level: i32,
-                optname: i32,
-                optval: *const u8,
-                optlen: i32,
-            ) -> i32;
-        }
-        let raw = sock.as_raw_socket() as usize;
-        let be = if_index.to_be();
-        let bytes = be.to_ne_bytes();
-        let ret = unsafe { setsockopt(raw, 0, 31, bytes.as_ptr(), 4) };
-        if ret != 0 {
-            return Err("setsockopt(IP_UNICAST_IF) failed".to_string());
-        }
-        Ok(())
+        bind_ipv4_interface(sock.as_raw_socket(), if_index)
     }
 
     #[cfg(target_os = "macos")]
@@ -331,6 +314,30 @@ pub fn bind_socket_to_interface(sock: &UdpSocket, if_index: u32) -> Result<(), S
     }
 }
 
+#[cfg(windows)]
+pub(super) fn bind_ipv4_interface(
+    socket: std::os::windows::io::RawSocket,
+    index: u32,
+) -> Result<(), String> {
+    const IPPROTO_IP: i32 = 0;
+    const IP_UNICAST_IF: i32 = 31;
+    let bytes = index.to_be_bytes();
+    if unsafe {
+        win_sock::setsockopt(
+            socket as usize,
+            IPPROTO_IP,
+            IP_UNICAST_IF,
+            bytes.as_ptr(),
+            4,
+        )
+    } != 0
+    {
+        return Err(format!("IP_UNICAST_IF: {}", unsafe {
+            win_sock::WSAGetLastError()
+        }));
+    }
+    Ok(())
+}
 pub fn set_socket_buffers(sock: &UdpSocket, size: i32) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {

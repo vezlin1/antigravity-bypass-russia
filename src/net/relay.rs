@@ -1,5 +1,6 @@
 use crate::net::client::{nodata_response, question_name, question_type};
 use crate::net::resolvers;
+use crate::net::routes::RoutePolicy;
 use std::fs;
 use std::io::Write;
 use std::net::{Ipv4Addr, UdpSocket};
@@ -103,12 +104,12 @@ unsafe extern "system" fn route_changed(
 
 #[cfg(windows)]
 impl RouteNotifications {
-    fn new(sender: mpsc::SyncSender<()>) -> Option<Self> {
+    fn new(sender: mpsc::SyncSender<()>, family: u16) -> Option<Self> {
         let mut context = Box::new(sender);
         let mut handle = std::ptr::null_mut();
         let code = unsafe {
             NotifyRouteChange2(
-                2, // AF_INET
+                family,
                 route_changed,
                 (&mut *context as *mut mpsc::SyncSender<()>).cast(),
                 0,
@@ -140,13 +141,17 @@ impl Drop for RouteNotifications {
 }
 
 #[cfg(windows)]
-fn start_network_refresh() {
+fn start_network_refresh(policy: RoutePolicy) {
     // Route discovery and recovery can invoke OS utilities. Keep every one of
     // those operations off the DNS startup/readiness path, including boot.
     thread::spawn(move || {
         let (wake, notifications) = mpsc::sync_channel(1);
-        let _subscription = RouteNotifications::new(wake.clone());
+        let family = if policy == RoutePolicy::System { 0 } else { 2 }; // AF_UNSPEC / AF_INET
+        let subscription = RouteNotifications::new(wake.clone(), family);
         let _keep_channel_open = wake;
+        if policy == RoutePolicy::System {
+            return refresh_system_network(&notifications, subscription.is_some());
+        }
         let mut state = NetworkRefresh::default();
         let mut previous_error = None;
         loop {
@@ -169,6 +174,38 @@ fn start_network_refresh() {
             let _ = notifications.recv_timeout(delay);
         }
     });
+}
+
+#[cfg(windows)]
+fn refresh_system_network(notifications: &mpsc::Receiver<()>, subscribed: bool) {
+    const RETRY: Duration = Duration::from_secs(10);
+    const POLL: Duration = Duration::from_secs(30);
+    let mut retry = true;
+    loop {
+        let delay = if retry { RETRY } else { POLL };
+        let changed = match notifications.recv_timeout(delay) {
+            Ok(()) => true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => false,
+        };
+        if !changed && !retry && subscribed {
+            continue;
+        }
+        // VPN clients commonly update several routes in succession. Do not
+        // publish pins found on the old network if another event arrives.
+        if changed {
+            thread::sleep(Duration::from_millis(350));
+            let _ = notifications.try_recv();
+        }
+        resolvers::invalidate_network_caches();
+        retry = match super::rank::refresh_system_pins(|| notifications.try_recv().is_err()) {
+            Ok(ready) => !ready,
+            Err(error) => {
+                log_event(&format!("Обновление резервных адресов отложено: {error}"));
+                true
+            }
+        };
+    }
 }
 
 pub fn detach_console() {
@@ -220,7 +257,26 @@ pub(super) fn clear_settings_cache() {
     clear_upstream_cache();
 }
 
-pub fn clear_custom_mode() -> Result<(), String> {
+#[cfg(windows)]
+const SYSTEM_ROUTE_MARKER: &[u8] = b"windows-system-route-v1\n";
+
+pub(super) fn load_route_policy() -> Result<RoutePolicy, String> {
+    #[cfg(windows)]
+    match fs::read(mode_conf_path()) {
+        Ok(marker) if marker == SYSTEM_ROUTE_MARKER => return Ok(RoutePolicy::System),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("Режим маршрутизации: {error}")),
+    }
+    Ok(RoutePolicy::Physical)
+}
+
+pub(super) fn save_route_policy(policy: RoutePolicy) -> Result<(), String> {
+    #[cfg(windows)]
+    if policy == RoutePolicy::System {
+        return crate::system::fs_utils::robust_write_file(&mode_conf_path(), SYSTEM_ROUTE_MARKER);
+    }
+    let _ = policy;
     match fs::remove_file(mode_conf_path()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -334,9 +390,9 @@ pub fn log_fatal(msg: &str) {
 }
 
 pub fn run() -> Result<(), String> {
-    let _ = load_if_index();
+    let policy = load_route_policy()?;
     #[cfg(windows)]
-    start_network_refresh();
+    start_network_refresh(policy);
     let addr = format!("{}:{}", LISTEN_IP, LISTEN_PORT);
     let socket =
         UdpSocket::bind(&addr).map_err(|e| format!("Не удалось занять {}: {}", addr, e))?;
@@ -375,7 +431,7 @@ pub fn run() -> Result<(), String> {
             };
             match job {
                 Ok((query, client_addr)) => {
-                    if let Some(resp) = relay(&query) {
+                    if let Some(resp) = relay(&query, policy) {
                         let _ = sock_c.send_to(&resp, client_addr);
                     } else {
                         let name = question_name(&query).unwrap_or_else(|| "?".into());
@@ -413,7 +469,7 @@ fn answered_locally(qtype: Option<u16>) -> bool {
     matches!(qtype, Some(28 | 64 | 65))
 }
 
-fn relay(query: &[u8]) -> Option<Vec<u8>> {
+fn relay(query: &[u8], policy: RoutePolicy) -> Option<Vec<u8>> {
     #[cfg(target_os = "linux")]
     if !super::linux_dns::is_target(&question_name(query)?) {
         return Some(
@@ -425,7 +481,11 @@ fn relay(query: &[u8]) -> Option<Vec<u8>> {
         return Some(nodata_response(query));
     }
 
-    let if_index = load_if_index();
+    let if_index = match policy {
+        RoutePolicy::Physical => load_if_index(),
+        #[cfg(windows)]
+        RoutePolicy::System => 0,
+    };
     match resolvers::resolve_best(query, if_index) {
         Some(hit) => {
             log_line(&format!(
@@ -462,7 +522,7 @@ fn start_tcp_listener(addr: &str) -> Result<(), String> {
             if query.len() < 12 || stream.read_exact(&mut query).is_err() {
                 continue;
             }
-            if let Some(reply) = relay(&query) {
+            if let Some(reply) = relay(&query, RoutePolicy::Physical) {
                 if let Ok(length) = u16::try_from(reply.len()) {
                     let _ = stream
                         .write_all(&length.to_be_bytes())
@@ -498,31 +558,31 @@ pub fn log_event(msg: &str) {
 }
 
 pub fn local_dns_available() -> Result<bool, String> {
-    let receiver =
-        UdpSocket::bind("127.0.0.254:53").map_err(|e| format!("Проверка локального DNS: {e}"))?;
-    receiver
-        .set_read_timeout(Some(Duration::from_millis(250)))
-        .map_err(|e| e.to_string())?;
-    let sender = UdpSocket::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
-    let packet = crate::net::client::build_query(HEALTH_NAME, 0xA657);
-    sender
-        .send_to(&packet, receiver.local_addr().map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    let mut bytes = [0u8; 512];
-    match receiver.recv_from(&mut bytes) {
-        Ok((n, peer)) => {
-            Ok(peer == sender.local_addr().map_err(|e| e.to_string())? && bytes[..n] == packet)
-        }
-        Err(e)
+    match probe_local_dns() {
+        Ok(passed) => Ok(passed),
+        Err(error)
             if matches!(
-                e.kind(),
-                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
             ) =>
         {
             Ok(false)
         }
-        Err(e) => Err(e.to_string()),
+        Err(error) => Err(format!("Проверка локального DNS: {error}")),
     }
+}
+
+fn probe_local_dns() -> std::io::Result<bool> {
+    let receiver = UdpSocket::bind("127.0.0.254:53")?;
+    receiver.set_read_timeout(Some(Duration::from_millis(250)))?;
+    let sender = UdpSocket::bind("127.0.0.1:0")?;
+    let packet = crate::net::client::build_query(HEALTH_NAME, 0xA657);
+    sender.send_to(&packet, receiver.local_addr()?)?;
+    let mut bytes = [0u8; 512];
+    let (n, peer) = receiver.recv_from(&mut bytes)?;
+    Ok(peer == sender.local_addr()? && bytes[..n] == packet)
 }
 
 #[cfg(test)]
@@ -615,7 +675,7 @@ mod tests {
             let at = query.len() - 4;
             query[at..at + 2].copy_from_slice(&qtype.to_be_bytes());
             assert_eq!(question_type(&query), Some(qtype));
-            let reply = relay(&query).unwrap();
+            let reply = relay(&query, RoutePolicy::Physical).unwrap();
             assert!(crate::net::client::is_successful_response(&reply));
             assert!(crate::net::client::answer_addrs(&reply).is_empty());
         }

@@ -324,6 +324,31 @@ fn is_vpn_iface(if_index: u32) -> bool {
     }
 }
 
+#[cfg(windows)]
+pub(super) fn windows_ipv4_route(address: std::net::Ipv4Addr) -> Option<u32> {
+    #[link(name = "iphlpapi")]
+    extern "system" {
+        fn GetBestInterface(address: u32, interface: *mut u32) -> u32;
+    }
+    let mut index = 0;
+    let address = u32::from_ne_bytes(address.octets());
+    (unsafe { GetBestInterface(address, &mut index) } == 0 && index != 0).then_some(index)
+}
+
+#[cfg(windows)]
+pub(super) fn windows_vpn_route() -> Option<u32> {
+    // Look at the default internet path, rather than an installed adapter name.
+    windows_ipv4_route([1, 1, 1, 1].into()).filter(|&index| {
+        is_vpn_iface(index)
+            && if_entry_meta(index).is_some_and(|(_, descr)| {
+                let descr = descr.to_ascii_lowercase();
+                !["tailscale", "zerotier", "hyper-v", "virtualbox", "vmware"]
+                    .iter()
+                    .any(|overlay| descr.contains(overlay))
+            })
+    })
+}
+
 /// Physical default route (skips VPN adapters). Used for pinning Xbox-DNS /32 routes.
 pub fn detect_physical() -> Option<(u32, String)> {
     #[cfg(target_os = "windows")]
@@ -520,15 +545,8 @@ if ($mine.Count -gt 0) {
 pub fn detect() -> Option<Egress> {
     #[cfg(target_os = "windows")]
     {
-        #[link(name = "iphlpapi")]
-        extern "system" {
-            fn GetBestInterface(dwDestAddr: u32, pdwBestIfIndex: *mut u32) -> u32;
-        }
-
-        let mut if_index: u32 = 0;
-        let dest: u32 = u32::from_ne_bytes([8, 8, 8, 8]);
-        let res = unsafe { GetBestInterface(dest, &mut if_index) };
-        let default_vpn = res == 0 && if_index > 0 && is_vpn_iface(if_index);
+        let if_index = windows_ipv4_route([8, 8, 8, 8].into()).unwrap_or(0);
+        let default_vpn = if_index > 0 && is_vpn_iface(if_index);
 
         if let Some((phys, gw)) = detect_physical() {
             return Some(Egress {
@@ -538,7 +556,7 @@ pub fn detect() -> Option<Egress> {
             });
         }
 
-        if res == 0 && if_index > 0 {
+        if if_index > 0 {
             return Some(Egress {
                 if_index,
                 gateway: None,

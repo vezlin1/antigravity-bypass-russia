@@ -39,6 +39,7 @@ fn geohide_proxy_seeds(pool: &[Provider]) -> &'static [&'static str] {
 
 pub(super) fn discover_agent(
     if_index: u32,
+    policy: routes::RoutePolicy,
     prepare_routes: &mut dyn FnMut(&[Ipv4Addr]) -> Result<(), String>,
 ) -> Result<Vec<RankedHost>, String> {
     let previous = load();
@@ -84,6 +85,12 @@ pub(super) fn discover_agent(
     let mut ranked = Vec::new();
     for (host, candidates) in host_candidates {
         let mut ips = resolvers::rank_tls_v4(&candidates, &host);
+        #[cfg(windows)]
+        if ips.is_empty() && policy == routes::RoutePolicy::System {
+            ips = resolvers::rank_tls_v4(&system_addresses(&host), &host);
+        }
+        #[cfg(not(windows))]
+        let _ = policy;
         if ips.is_empty() {
             continue;
         }
@@ -95,9 +102,124 @@ pub(super) fn discover_agent(
     Ok(ranked)
 }
 
-pub(super) fn apply_ranked(ranked: &[RankedHost], skip_primary: bool) -> Result<(), String> {
+#[cfg(windows)]
+fn system_addresses(host: &str) -> Vec<IpAddr> {
+    use std::net::ToSocketAddrs;
+
+    (host, 443)
+        .to_socket_addrs()
+        .into_iter()
+        .flatten()
+        .map(|address| address.ip())
+        .filter(IpAddr::is_ipv4)
+        .filter(|address| resolvers::looks_google(address))
+        .take(MAX_FALLBACKS)
+        .collect()
+}
+
+#[cfg(windows)]
+pub(super) fn refresh_system_pins(still_current: impl FnOnce() -> bool) -> Result<bool, String> {
+    let current = {
+        let _configuration = super::configuration_lock()?;
+        super::hosts::owned_entries()?
+    };
+    if current.is_empty() {
+        return Ok(true);
+    }
+
+    let ranked = load();
+    let updates = std::thread::scope(|scope| {
+        let checks: Vec<_> = current
+            .iter()
+            .map(|(host, ip)| {
+                let ranked = &ranked;
+                scope.spawn(move || {
+                    recover_pin(
+                        *ip,
+                        super::health::probe_ip((*ip, 443).into(), host).is_ok(),
+                        || replacement_pin(host, *ip, ranked),
+                    )
+                })
+            })
+            .collect();
+        checks
+            .into_iter()
+            .map(|check| check.join().unwrap_or(None))
+            .collect::<Vec<_>>()
+    });
+
+    let all_reachable = updates.iter().all(Option::is_some);
+    let next: Vec<_> = current
+        .iter()
+        .zip(updates)
+        .map(|((host, ip), replacement)| (host.clone(), replacement.unwrap_or(*ip)))
+        .collect();
+    let _configuration = super::configuration_lock()?;
+    if !still_current()
+        || relay::load_route_policy()? != routes::RoutePolicy::System
+        || super::hosts::owned_entries()? != current
+    {
+        return Ok(false);
+    }
+    if next != current {
+        write_hosts_entries(&next)?;
+        super::flush_dns_cache()?;
+    }
+    Ok(all_reachable)
+}
+
+#[cfg(windows)]
+fn replacement_pin(host: &str, current: Ipv4Addr, ranked: &[RankedHost]) -> Option<Ipv4Addr> {
+    let known = ranked
+        .iter()
+        .find(|entry| entry.host == host)
+        .into_iter()
+        .flat_map(|entry| entry.ips.iter().map(|&(ip, _)| IpAddr::V4(ip)));
+    let fresh = resolvers::candidate_addrs(host, 0).unwrap_or_default();
+    let mut seen = std::collections::HashSet::from([IpAddr::V4(current)]);
+    let candidates: Vec<_> = known
+        .chain(fresh)
+        .filter(IpAddr::is_ipv4)
+        .filter(|ip| seen.insert(*ip))
+        .take(12)
+        .collect();
+
+    resolvers::rank_tls_v4(&candidates, host)
+        .first()
+        .map(|&(ip, _)| ip)
+        .or_else(|| {
+            let native: Vec<_> = system_addresses(host)
+                .into_iter()
+                .filter(|ip| seen.insert(*ip))
+                .collect();
+            resolvers::rank_tls_v4(&native, host)
+                .first()
+                .map(|&(ip, _)| ip)
+        })
+}
+
+#[cfg(any(windows, test))]
+fn recover_pin(
+    current: Ipv4Addr,
+    still_works: bool,
+    verified_replacement: impl FnOnce() -> Option<Ipv4Addr>,
+) -> Option<Ipv4Addr> {
+    if still_works {
+        Some(current)
+    } else {
+        verified_replacement()
+    }
+}
+
+pub(super) fn apply_ranked(
+    ranked: &[RankedHost],
+    skip_primary: bool,
+    policy: routes::RoutePolicy,
+) -> Result<(), String> {
     apply_complete_ranking(ranked, skip_primary, || {
-        routes::sync_physical_hosts(&ranked_ips(ranked))?;
+        if policy == routes::RoutePolicy::Physical {
+            routes::sync_physical_hosts(&ranked_ips(ranked))?;
+        }
         save(ranked)?;
         apply_hosts(ranked)
     })
@@ -246,6 +368,24 @@ fn load() -> Vec<RankedHost> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn network_change_keeps_working_pins_and_only_accepts_verified_replacements() {
+        let active = Ipv4Addr::new(192, 0, 2, 4);
+        let alternate = Ipv4Addr::new(192, 0, 2, 5);
+        assert_eq!(
+            recover_pin(active, true, || panic!("working pin should be kept")),
+            Some(active)
+        );
+        assert_eq!(
+            recover_pin(active, false, || Some(alternate)),
+            Some(alternate)
+        );
+        assert_eq!(
+            recover_pin(active, false, || None).unwrap_or(active),
+            active
+        );
+    }
 
     #[test]
     fn geohide_proxy_seeds_follow_its_doh_endpoint_independently_of_udp() {

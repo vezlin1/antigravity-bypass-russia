@@ -27,6 +27,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2",
  "tempfile",
  "time",
  "windows-sys 0.61.2",

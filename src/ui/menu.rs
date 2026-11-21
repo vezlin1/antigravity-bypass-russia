@@ -1,6 +1,6 @@
 use crate::core::detector::{
-    find_installations, find_targets_in_path, recover_installations, recover_targets_in_path,
-    FoundTarget,
+    find_installation_targets, find_installations, find_targets_in_path, recover_installations,
+    recover_targets_in_path, FoundTarget,
 };
 use crate::core::patcher::{patch_target, restore_target};
 use crate::core::v8_cache::clear_ide_v8_caches;
@@ -270,8 +270,8 @@ fn apply_endpoints() -> Result<(), String> {
     }
 }
 
-fn apply_connection() -> bool {
-    match configure_connection_with(apply_dns_rules, apply_endpoints) {
+fn apply_connection(setup: impl FnOnce() -> Result<crate::net::NetworkSetup, String>) -> bool {
+    match configure_connection_with(setup, apply_endpoints) {
         Ok(setup) => show_network_result(&setup),
         Err(error) => {
             operation_error("Не удалось завершить настройку подключения", &error);
@@ -289,10 +289,7 @@ fn patch_installations() -> FileSetupOutcome {
         eprintln!("[✗] Установки не найдены; укажите путь в пункте 4.");
         return FileSetupOutcome::Stopped;
     }
-    let targets: Vec<_> = installs
-        .iter()
-        .flat_map(|root| find_targets_in_path(root))
-        .collect();
+    let targets = find_installation_targets(&installs);
     if targets.is_empty() {
         eprintln!("[✗] Файлы приложения не найдены; укажите путь в пункте 4.");
         return FileSetupOutcome::Stopped;
@@ -301,7 +298,9 @@ fn patch_installations() -> FileSetupOutcome {
 }
 fn show_result(ok: bool) {
     if ok {
-        println!("\n  \x1b[92mГотово. Изменения применены.\x1b[0m\n  Теперь откройте Antigravity и проверьте работу.");
+        println!(
+            "\n  \x1b[92mГотово. Изменения применены.\x1b[0m\n  Проверьте работу Antigravity."
+        );
     } else {
         eprintln!("\n  Операция не завершена. Причина указана выше.");
         print_error_details();
@@ -313,17 +312,60 @@ fn show_network_result(setup: &crate::net::NetworkSetup) -> bool {
     if setup.hosts_fallback {
         println!("  \x1b[92m✓\x1b[0m Подключение Antigravity настроено через hosts");
     } else if setup.local_relay_running {
-        println!("  \x1b[92m✓\x1b[0m DNS настроен. Прямое подключение, без фонового подбора");
+        println!("  \x1b[92m✓\x1b[0m DNS настроен");
     } else {
         eprintln!("  \x1b[93m!\x1b[0m Используются прямые DNS и сохранённые адреса");
         eprintln!("  {}", setup.message);
         print_error_details();
+    }
+    if setup.system_routes {
+        println!("  Подключение следует маршрутам Windows при смене VPN.");
     }
     for note in &setup.compatibility_notes {
         eprintln!("  \x1b[93m!\x1b[0m {note}");
     }
     true
 }
+
+#[cfg(windows)]
+fn apply_connection_and_launch() -> bool {
+    let setup = configure_connection_with(apply_dns_rules, apply_endpoints);
+    match &setup {
+        Ok(setup) => {
+            show_network_result(setup);
+        }
+        Err(error) if crate::net::windows_connect::fallback_available() => {
+            eprintln!("  DNS: {error}");
+            println!("  Пробуем запуск Antigravity через CONNECT внутри VPN.");
+        }
+        Err(error) => {
+            operation_error("Не удалось завершить настройку подключения", error);
+            return false;
+        }
+    }
+    match crate::system::windows_connect_launch::launch_desktop() {
+        Ok(true) => {
+            println!(
+                "  Antigravity запущен. Запасной CONNECT включится при блокировке локального DNS."
+            );
+            return true;
+        }
+        Ok(false) => {
+            if let Err(error) = &setup {
+                operation_error("Режим CONNECT требует Antigravity App или IDE", error);
+            }
+        }
+        Err(error) => {
+            operation_error(
+                "Не удалось запустить Antigravity с запасным CONNECT",
+                &error,
+            );
+            return false;
+        }
+    }
+    setup.is_ok()
+}
+
 pub fn handle_unlock_all() -> bool {
     clear_screen();
     banner();
@@ -331,7 +373,13 @@ pub fn handle_unlock_all() -> bool {
     if !check_vpn_before_setup() {
         return false;
     }
-    let outcome = continue_setup(patch_installations(), apply_connection);
+    let outcome = continue_setup(patch_installations(), || {
+        #[cfg(windows)]
+        if crate::system::env::args().nth(1).is_none() {
+            return apply_connection_and_launch();
+        }
+        apply_connection(apply_dns_rules)
+    });
     let ok = outcome.succeeded();
     show_result(ok);
     pause();
@@ -351,7 +399,7 @@ pub fn handle_dns_only() -> bool {
     if !check_vpn_before_setup() {
         return false;
     }
-    let ok = apply_connection();
+    let ok = apply_connection(apply_dns_rules);
     pause();
     ok
 }
@@ -374,8 +422,13 @@ pub fn handle_manual_path() {
         return;
     }
     let root = expand_env_vars(input.trim().trim_matches('"'));
-    let ok = patch_root(&root);
-    show_result(ok);
+    match crate::core::install_paths::remember(&root) {
+        Ok((root, targets)) => {
+            println!("  Путь сохранён для пункта [1]: {}", display_path(&root));
+            show_result(patch_targets(targets).succeeded());
+        }
+        Err(error) => operation_error("Не удалось добавить путь к Antigravity", &error),
+    }
     pause();
 }
 fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool {
@@ -442,13 +495,15 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
 }
 
 pub fn handle_rollback() -> bool {
-    let installs = if let Some(path) = crate::system::env::args().nth(2) {
-        let root = expand_env_vars(&path);
-        if let Err(error) = recover_targets_in_path(&root) {
+    let explicit_root = crate::system::env::args()
+        .nth(2)
+        .map(|path| expand_env_vars(&path));
+    let installs = if let Some(root) = &explicit_root {
+        if let Err(error) = recover_targets_in_path(root) {
             operation_error("Не удалось восстановить прерванную запись", &error);
             return false;
         }
-        vec![root]
+        vec![root.clone()]
     } else {
         if let Err(error) = recover_installations() {
             operation_error("Не удалось восстановить прерванную запись", &error);
@@ -456,11 +511,8 @@ pub fn handle_rollback() -> bool {
         }
         find_installations()
     };
-    let paths: Vec<_> = installs
-        .iter()
-        .flat_map(|root| find_targets_in_path(root))
-        .map(|t| t.path)
-        .collect();
+    let targets = find_installation_targets(&installs);
+    let paths: Vec<_> = targets.iter().map(|target| target.path.clone()).collect();
     clear_screen();
     banner();
     println!("  ОТКЛЮЧЕНИЕ ОБХОДА\n");
@@ -469,17 +521,12 @@ pub fn handle_rollback() -> bool {
     }
     println!("  Восстанавливаем настройки…\n");
     let mut ok = true;
-    for root in installs {
-        let targets = find_targets_in_path(&root);
-        if targets.is_empty() {
-            if crate::system::env::args().nth(2).is_some() {
-                eprintln!("[✗] Цели для отката не найдены: {}", root.display());
-                ok = false;
-            }
-        }
-        for target in targets {
-            ok &= print_patch_result(&target, restore_target(&target));
-        }
+    if let Some(root) = explicit_root.filter(|_| targets.is_empty()) {
+        eprintln!("[✗] Цели для отката не найдены: {}", root.display());
+        ok = false;
+    }
+    for target in targets {
+        ok &= print_patch_result(&target, restore_target(&target));
     }
     if !paths.is_empty() {
         if let Err(error) = clear_ide_v8_caches() {
@@ -498,9 +545,19 @@ pub fn handle_rollback() -> bool {
         pause();
         return false;
     }
-    if let Err(e) = remove_dns_rules() {
-        operation_error("Не удалось восстановить подключение", &e);
-        ok = false;
+    match remove_dns_rules() {
+        Err(error) => {
+            operation_error("Не удалось восстановить подключение", &error);
+            ok = false;
+        }
+        Ok(()) =>
+        {
+            #[cfg(windows)]
+            if let Err(error) = crate::net::windows_connect::disable() {
+                operation_error("Не удалось отключить запасной CONNECT", &error);
+                ok = false;
+            }
+        }
     }
     if ok {
         println!("  \x1b[92m✓\x1b[0m Настройки подключения восстановлены");
@@ -605,7 +662,7 @@ pub fn run_app() {
         println!("  \x1b[92m[1]\x1b[0m  Включить обход");
         println!("  [2]  Настроить только файлы приложения");
         println!("  [3]  Настроить только подключение");
-        println!("  [4]  Указать папку Antigravity");
+        println!("  [4]  Указать путь к Antigravity");
         println!("  \x1b[96m[5]\x1b[0m  Проверить подключение");
         println!("  \x1b[91m[6]\x1b[0m  Отключить обход");
         println!("  [7]  Сохранить диагностику");

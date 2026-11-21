@@ -113,7 +113,10 @@ fn is_already_contained(installs: &[PathBuf], candidate: &Path) -> bool {
 }
 
 pub fn find_installations() -> Vec<PathBuf> {
-    let mut installs = Vec::new();
+    let mut installs: Vec<_> = super::install_paths::saved()
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect();
 
     #[cfg(target_os = "windows")]
     {
@@ -344,10 +347,27 @@ fn cli_search_includes_ide_managed_installations() {
 /// resurrect files or finalize transactions.
 pub fn recover_installations() -> Result<(), String> {
     recover_cli_in_dirs(&cli_search_dirs())?;
+    // An interrupted write can temporarily hide a manually selected file.
+    for path in super::install_paths::saved() {
+        if !path.exists() && path.parent().is_some_and(Path::is_dir) {
+            recover_targets_in_path(&path)?;
+        }
+    }
     for root in find_installations() {
         recover_targets_in_path(&root)?;
     }
     Ok(())
+}
+
+pub fn find_installation_targets(installs: &[PathBuf]) -> Vec<FoundTarget> {
+    let mut seen = std::collections::HashSet::new();
+    installs
+        .iter()
+        .flat_map(|root| find_targets_in_path(root))
+        .filter(|target| {
+            seen.insert(std::fs::canonicalize(&target.path).unwrap_or_else(|_| target.path.clone()))
+        })
+        .collect()
 }
 
 fn recover_cli_in_dirs(dirs: &[PathBuf]) -> Result<(), String> {

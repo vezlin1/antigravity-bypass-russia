@@ -257,7 +257,7 @@ pub fn ensure_admin() {
 
 /// Microsoft CRT argument escaping, including a path ending with backslashes.
 #[cfg(any(windows, test))]
-fn windows_arguments(args: Vec<Vec<u16>>) -> Vec<u16> {
+pub(super) fn windows_arguments(args: Vec<Vec<u16>>) -> Vec<u16> {
     let mut out = Vec::new();
     for (i, arg) in args.into_iter().enumerate() {
         if i > 0 {

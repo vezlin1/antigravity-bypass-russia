@@ -8,6 +8,7 @@ use super::{
 };
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,6 +21,7 @@ const LIVENESS_BUDGET: Duration = Duration::from_millis(250);
 const LIVENESS_TTL_ALIVE: Duration = Duration::from_secs(600);
 const LIVENESS_TTL_DEAD: Duration = Duration::from_secs(60);
 static LIVENESS: Mutex<Option<HashMap<IpAddr, (bool, Instant)>>> = Mutex::new(None);
+static NETWORK_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 const CACHE_CAPACITY: usize = 1024;
 // An expired answer is served at once with a short TTL while one refresh runs.
@@ -61,6 +63,7 @@ pub(super) fn configured_udp_v4(pool: &[ActiveProvider]) -> Vec<String> {
 struct CacheKey {
     pool: String,
     interface: u32,
+    network_generation: u64,
     question: Vec<u8>,
 }
 struct Cached {
@@ -77,6 +80,7 @@ fn cache_key(pool: &[ActiveProvider], query: &[u8], interface: u32) -> CacheKey 
     CacheKey {
         pool: format!("{pool:?}"),
         interface,
+        network_generation: NETWORK_GENERATION.load(Ordering::Acquire),
         question: query.get(2..).unwrap_or_default().to_vec(),
     }
 }
@@ -169,6 +173,7 @@ fn verified_latency(addr: SocketAddr, sni: &str) -> Option<u128> {
 }
 
 fn is_alive(addr: IpAddr) -> bool {
+    let generation = NETWORK_GENERATION.load(Ordering::Acquire);
     if let Ok(guard) = LIVENESS.lock() {
         if let Some(map) = guard.as_ref() {
             if let Some((ok, at)) = map.get(&addr) {
@@ -187,8 +192,10 @@ fn is_alive(addr: IpAddr) -> bool {
     let sock = SocketAddr::new(addr, LIVENESS_PORT);
     let ok = TcpStream::connect_timeout(&sock, LIVENESS_BUDGET).is_ok();
     if let Ok(mut guard) = LIVENESS.lock() {
-        let map = guard.get_or_insert_with(HashMap::new);
-        map.insert(addr, (ok, Instant::now()));
+        if generation == NETWORK_GENERATION.load(Ordering::Acquire) {
+            let map = guard.get_or_insert_with(HashMap::new);
+            map.insert(addr, (ok, Instant::now()));
+        }
     }
     ok
 }
@@ -463,6 +470,9 @@ fn remember(key: CacheKey, hit: &ResolveHit) {
     let Ok(mut guard) = PACKETS.lock() else {
         return;
     };
+    if key.network_generation != NETWORK_GENERATION.load(Ordering::Acquire) {
+        return;
+    }
     let cache = guard.get_or_insert_with(HashMap::new);
     if cache.len() >= CACHE_CAPACITY && !cache.contains_key(&key) {
         let oldest = cache
@@ -705,6 +715,8 @@ pub fn verdict_tag(v: Verdict) -> &'static str {
     }
 }
 pub fn invalidate_network_caches() {
+    super::dns_https::invalidate_connections();
+    NETWORK_GENERATION.fetch_add(1, Ordering::AcqRel);
     if let Ok(mut cache) = PACKETS.lock() {
         *cache = None;
     }
@@ -963,6 +975,7 @@ mod tests {
         CacheKey {
             pool: format!("test-{name}"),
             interface: 0,
+            network_generation: NETWORK_GENERATION.load(Ordering::Acquire),
             question: build_query(name, 0)[2..].to_vec(),
         }
     }
@@ -1061,6 +1074,7 @@ mod tests {
 
     #[test]
     fn cache_is_invalidated_by_interface_endpoint_and_order_changes() {
+        let _serial = CACHE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let mut config = super::super::config::Config::default();
         let pool = resolver_pool::from_config(&config).unwrap();
         let query = build_query("example.test", 1);
@@ -1074,6 +1088,27 @@ mod tests {
         assert!(key != cache_key(&resolver_pool::from_config(&config).unwrap(), &query, 0));
         config.disabled_providers.push("dns-ai.ru".into());
         assert!(key != cache_key(&resolver_pool::from_config(&config).unwrap(), &query, 0));
+    }
+
+    #[test]
+    fn a_reply_from_before_a_route_change_cannot_repopulate_the_dns_cache() {
+        let _serial = CACHE_TESTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let host = "vpn-switch.test";
+        let old = test_key(host);
+        remember(old.clone(), &address_hit(host));
+        assert!(matches!(cached(&old), Lookup::Fresh(_)));
+
+        invalidate_network_caches();
+        let current = test_key(host);
+        assert!(old != current);
+        remember(old.clone(), &address_hit(host));
+        assert!(matches!(cached(&old), Lookup::Miss));
+        assert!(matches!(cached(&current), Lookup::Miss));
+
+        remember(current.clone(), &address_hit(host));
+        assert!(matches!(cached(&current), Lookup::Fresh(_)));
     }
 
     #[test]

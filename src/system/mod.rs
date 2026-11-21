@@ -14,6 +14,8 @@ pub mod process;
 pub mod service;
 #[cfg(any(windows, unix, test))]
 pub mod user_context;
+#[cfg(windows)]
+pub mod windows_connect_launch;
 
 pub use lock::check_single_instance;
 pub use privilege::ensure_admin;

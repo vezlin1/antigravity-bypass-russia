@@ -112,7 +112,7 @@ pub fn args() -> std::vec::IntoIter<String> {
 #[cfg(unix)]
 pub use unix::{elevation_arguments, home};
 #[cfg(windows)]
-pub use windows::{elevation_arguments, environment_key};
+pub use windows::{elevation_arguments, environment_key, profile_sid};
 
 #[cfg(windows)]
 mod windows {
@@ -360,6 +360,18 @@ mod windows {
     /// already loaded because their original process is still waiting for UAC.
     pub fn environment_key() -> (HKEY, Vec<u16>) {
         environment_key_for(USER.get().map(|user| user.sid.as_str()))
+    }
+
+    pub fn profile_sid() -> Result<String, String> {
+        if let Some(user) = USER.get() {
+            return Ok(user.sid.clone());
+        }
+        let mut raw = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), 0x0008 | 0x0004, &mut raw) } == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let token = Handle(raw);
+        token_user(token.0).map(|user| user.sid)
     }
 
     fn environment_key_for(sid: Option<&str>) -> (HKEY, Vec<u16>) {

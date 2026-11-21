@@ -21,6 +21,8 @@ pub mod routes;
 pub mod socket;
 #[cfg(any(target_os = "macos", test))]
 pub mod split_dns;
+#[cfg(windows)]
+pub mod windows_connect;
 
 pub use relay::{detach_console, log_fatal, run as run_dns_relay};
 
@@ -32,6 +34,7 @@ use provider::{NRPT_AGENT, NRPT_STUDIO, PRIMARY_CLOUD_CODE, SUBSTITUTION_CANARIE
 use relay::{LISTEN_IP, LISTEN_PORT};
 #[cfg(windows)]
 use routes::remove_static_routes;
+use routes::RoutePolicy;
 use std::thread;
 use std::time::Duration;
 
@@ -440,6 +443,7 @@ pub struct NetworkSetup {
     pub message: String,
     pub local_relay_running: bool,
     pub hosts_fallback: bool,
+    pub system_routes: bool,
     pub compatibility_notes: Vec<String>,
 }
 
@@ -577,6 +581,14 @@ fn try_lock_configuration_file(
 }
 
 pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
+    #[cfg(windows)]
+    let policy = RoutePolicy::System;
+    #[cfg(not(windows))]
+    let policy = RoutePolicy::Physical;
+    apply_dns_rules_with(policy)
+}
+
+fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
     fn step(msg: &str) {
         println!("  \x1b[90m… {}\x1b[0m", msg);
         let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -603,32 +615,38 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
     let hosts_fallback = false;
 
     step("Определяем подключение к интернету");
-    let egress = crate::net::egress::detect();
+    let egress = match policy {
+        RoutePolicy::Physical => crate::net::egress::detect(),
+        #[cfg(windows)]
+        RoutePolicy::System => None,
+    };
     let if_index = egress.as_ref().map(|e| e.if_index).unwrap_or(0);
     #[cfg(windows)]
-    if if_index == 0 || egress.as_ref().is_none_or(|e| e.gateway.is_none()) {
+    if policy == RoutePolicy::Physical
+        && (if_index == 0 || egress.as_ref().is_none_or(|e| e.gateway.is_none()))
+    {
         return Err("Не найден физический выход в интернет; проверка через VPN отменена".into());
     }
 
     step("Выбираем подходящее подключение");
     let mut update = None;
-    let staged = routes::with_probe_routes(|prepare_routes| {
-        // DNS probes need the same physical provider routes as the relay.
+    let staged = routes::with_probe_routes(policy, |prepare_routes| {
+        // DNS probes and the running relay use the same route policy.
         prepare_routes(&[])?;
         #[cfg(windows)]
         thread::sleep(Duration::from_millis(400));
-        let ranked = rank::discover_agent(if_index, prepare_routes)?;
+        let ranked = rank::discover_agent(if_index, policy, prepare_routes)?;
         let skip_primary =
             rank::check_agent_routes(&ranked, crate::core::endpoint::daily_configured)?;
 
         let update = update.insert(relay_update::RelayUpdate::capture()?);
         config::prepare_service()?;
-        if if_index > 0 {
+        if if_index > 0 || policy != RoutePolicy::Physical {
             relay::save_if_index(if_index)?;
         }
         #[cfg(target_os = "linux")]
         linux_dns::prepare(if_index)?;
-        relay::clear_custom_mode()?;
+        relay::save_route_policy(policy)?;
         relay::save_upstream_config(&udp_ips)?;
 
         step("Запускаем DNS-релей");
@@ -756,7 +774,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         compatibility::require_agent_pins(&coverage.agent_hosts, &ranked)?;
         (inventory, plan)
     };
-    crate::net::rank::apply_ranked(&ranked, skip_primary)?;
+    crate::net::rank::apply_ranked(&ranked, skip_primary, policy)?;
 
     // Keep verified agent addresses installed by apply_ranked. A VPN enabled
     // later may intercept loopback DNS even while the relay remains healthy.
@@ -768,7 +786,14 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         let latest_inventory = nrpt::inventory()?;
         // Foreign split-DNS often relies on system DoH policy. Hosts provides
         // the Agent fallback without changing those global settings.
-        if may_disable_system_doh(&[&initial_inventory, &inventory, &latest_inventory], &plan) {
+        if policy == RoutePolicy::System {
+            if let Err(error) = crate::net::doh::restore_system_doh() {
+                compatibility_notes.push(format!("Восстановление исходного DoH: {error}"));
+            }
+        } else if may_disable_system_doh(
+            &[&initial_inventory, &inventory, &latest_inventory],
+            &plan,
+        ) {
             crate::net::doh::disable_system_doh()?;
         } else {
             compatibility_notes
@@ -833,6 +858,7 @@ pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
         message: msg,
         local_relay_running: relay_ok,
         hosts_fallback,
+        system_routes: policy != RoutePolicy::Physical,
         compatibility_notes,
     })
 }
@@ -1079,6 +1105,7 @@ fn remove_dns_configuration(restore_tcp: bool) -> Result<(), String> {
     }
     resolvers::invalidate_network_caches();
     if errors.is_empty() {
+        relay::save_route_policy(RoutePolicy::Physical)?;
         Ok(())
     } else {
         Err(errors.join("; "))

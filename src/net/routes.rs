@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, net::Ipv4Addr, path::PathBuf};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RoutePolicy {
+    Physical,
+    #[cfg(windows)]
+    System,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct OwnedRoute {
     ip: Ipv4Addr,
@@ -63,6 +70,7 @@ pub fn sync_physical_hosts(extra: &[Ipv4Addr]) -> Result<(), String> {
 /// Setup holds the configuration lock while staging routes for its probes.
 /// A rejected ranking must not leave those routes installed or retire old ones.
 pub(super) fn with_probe_routes<T>(
+    policy: RoutePolicy,
     probe: impl FnOnce(&mut dyn FnMut(&[Ipv4Addr]) -> Result<(), String>) -> Result<T, String>,
 ) -> Result<T, String> {
     #[cfg(windows)]
@@ -74,7 +82,12 @@ pub(super) fn with_probe_routes<T>(
             Err(error) => return Err(error.to_string()),
         };
         let mut changes = Vec::new();
-        let result = probe(&mut |ips| prepare_probe_routes(ips, &mut changes));
+        let result = match policy {
+            RoutePolicy::Physical => probe(&mut |ips| prepare_probe_routes(ips, &mut changes)),
+            RoutePolicy::System => {
+                release_owned_routes(&mut changes).and_then(|()| probe(&mut |_| Ok(())))
+            }
+        };
         if let Err(error) = result {
             let rollback = restore_probe_routes(&path, previous, &changes, |script| {
                 powershell(script).map(|_| ())
@@ -89,7 +102,34 @@ pub(super) fn with_probe_routes<T>(
         result
     }
     #[cfg(not(windows))]
-    probe(&mut sync_physical_hosts)
+    {
+        let _ = policy;
+        probe(&mut sync_physical_hosts)
+    }
+}
+
+#[cfg(windows)]
+fn release_owned_routes(changes: &mut Vec<RouteChange>) -> Result<(), String> {
+    let owned = load()?;
+    if !owned.is_empty() {
+        remove_recorded_routes(&owned, changes, powershell)?;
+        save(&[])?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_recorded_routes(
+    routes: &[OwnedRoute],
+    changes: &mut Vec<RouteChange>,
+    mut run: impl FnMut(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    for route in routes {
+        if run(&remove_route_script(route))? == "removed" {
+            changes.push(RouteChange::Removed(route.clone()));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -286,6 +326,33 @@ fn remove_route_script(route: &OwnedRoute) -> String {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_route_migration_can_undo_a_partial_release() {
+        let released = route();
+        let pending = OwnedRoute {
+            ip: "192.0.2.26".parse().unwrap(),
+            ..released.clone()
+        };
+        let mut changes = Vec::new();
+        let result = remove_recorded_routes(&[released, pending], &mut changes, |script| {
+            if script.contains("192.0.2.25/32") {
+                Ok("removed".into())
+            } else {
+                Err("route table unavailable".into())
+            }
+        });
+        assert_eq!(result.unwrap_err(), "route table unavailable");
+        let mut restored = Vec::new();
+        undo_probe_routes(&changes, |script| {
+            restored.push(script.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0].contains("New-NetRoute -DestinationPrefix '192.0.2.25/32'"));
+    }
+
     #[test]
     fn gateway_migration_accepts_only_exact_owned_routes_and_preserves_foreign_conflicts() {
         let old = route();
