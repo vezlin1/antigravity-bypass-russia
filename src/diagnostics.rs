@@ -204,10 +204,11 @@ fn event_summary(line: &str) -> Option<Value> {
 }
 
 fn version_text(value: &str) -> Option<String> {
-    let valid =
+    static VALID: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"^[0-9]{1,6}\.[0-9]{1,6}(?:\.[0-9]{1,6})?(?:[-+][0-9A-Za-z.-]{1,32})?$")
-            .unwrap();
-    valid.is_match(value).then(|| value.to_owned())
+            .unwrap()
+    });
+    VALID.is_match(value).then(|| value.to_owned())
 }
 
 fn installations() -> Value {

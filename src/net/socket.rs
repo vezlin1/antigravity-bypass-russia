@@ -292,12 +292,15 @@ pub fn get_os_network_status() -> String {
             ("net.inet.tcp.fastopen", "TCP Fast Open"),
         ];
 
-        for (key, label) in &sysctl_keys {
-            if let Ok(output) = crate::system::command::output("sysctl", ["-n", key]) {
-                let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !val.is_empty() {
-                    lines.push(format!("  - {}: {}", label, val));
-                }
+        let keys: Vec<&str> = sysctl_keys.iter().map(|(key, _)| *key).collect();
+        let values = sysctl_values(&keys);
+        for ((key, label), batch) in sysctl_keys.iter().zip(values) {
+            let val = batch.or_else(|| {
+                let output = crate::system::command::output("sysctl", ["-n", key]).ok()?;
+                Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            });
+            if let Some(val) = val.filter(|val| !val.is_empty()) {
+                lines.push(format!("  - {}: {}", label, val));
             }
         }
 
@@ -320,12 +323,15 @@ pub fn get_os_network_status() -> String {
             ("net.ipv4.tcp_fastopen", "TCP Fast Open"),
         ];
 
-        for (key, label) in &sysctl_keys {
-            if let Ok(output) = crate::system::command::output("sysctl", ["-n", key]) {
-                let val = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !val.is_empty() {
-                    lines.push(format!("  - {}: {}", label, val));
-                }
+        let keys: Vec<&str> = sysctl_keys.iter().map(|(key, _)| *key).collect();
+        let values = sysctl_values(&keys);
+        for ((key, label), batch) in sysctl_keys.iter().zip(values) {
+            let val = batch.or_else(|| {
+                let output = crate::system::command::output("sysctl", ["-n", key]).ok()?;
+                Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            });
+            if let Some(val) = val.filter(|val| !val.is_empty()) {
+                lines.push(format!("  - {}: {}", label, val));
             }
         }
 
@@ -392,6 +398,28 @@ fn tcp_tunables() -> &'static [(&'static str, &'static str)] {
         &[]
     }
 }
+/// All values from one `sysctl -n` call, in key order. Every entry is None
+/// when the combined call fails (an unknown key shifts the output lines), so
+/// callers then query keys one by one as before.
+#[cfg(unix)]
+fn sysctl_values(keys: &[&str]) -> Vec<Option<String>> {
+    let batch =
+        crate::system::command::output("sysctl", std::iter::once("-n").chain(keys.iter().copied()))
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(|line| line.trim().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|values| values.len() == keys.len());
+    match batch {
+        Some(values) => values.into_iter().map(Some).collect(),
+        None => vec![None; keys.len()],
+    }
+}
+
 fn tcp_state_path() -> PathBuf {
     crate::net::relay::log_dir().join("tcp_snapshot.json")
 }
@@ -414,16 +442,22 @@ fn capture_tcp() -> Result<TcpSnapshot, String> {
         }
     }
     #[cfg(unix)]
-    for (key, _) in tcp_tunables() {
-        let out =
-            crate::system::command::output("sysctl", ["-n", key]).map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(format!("Нет snapshot {key}"));
+    {
+        let keys: Vec<&str> = tcp_tunables().iter().map(|(key, _)| *key).collect();
+        for (key, batch) in keys.iter().zip(sysctl_values(&keys)) {
+            let value = match batch {
+                Some(value) => value,
+                None => {
+                    let out = crate::system::command::output("sysctl", ["-n", key])
+                        .map_err(|e| e.to_string())?;
+                    if !out.status.success() {
+                        return Err(format!("Нет snapshot {key}"));
+                    }
+                    String::from_utf8_lossy(&out.stdout).trim().to_string()
+                }
+            };
+            original.insert(key.to_string(), value);
         }
-        original.insert(
-            key.to_string(),
-            String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        );
     }
     if original.len() != tcp_tunables().len() || original.is_empty() {
         return Err("Неполный TCP snapshot; настройки не изменены".into());
@@ -446,7 +480,7 @@ fn validate_snapshot(snapshot: &TcpSnapshot) -> Result<(), String> {
     }
     Ok(())
 }
-fn write_tcp(key: &str, value: &str) -> Result<(), String> {
+fn valid_tcp_setting(key: &str, value: &str) -> Result<(), String> {
     if !tcp_tunables().iter().any(|(k, _)| *k == key)
         || value.is_empty()
         || !value
@@ -455,6 +489,44 @@ fn write_tcp(key: &str, value: &str) -> Result<(), String> {
     {
         return Err("Некорректный TCP snapshot".into());
     }
+    Ok(())
+}
+
+/// One `netsh int tcp set global` (or `sysctl -w`) for every value instead of
+/// a process per setting. If the combined command is refused, for example
+/// because this OS build lacks one option, each value is written separately
+/// exactly as before; callers verify the result afterwards either way.
+fn write_tcp_all(values: &[(&str, &str)]) -> Result<(), String> {
+    for (key, value) in values {
+        valid_tcp_setting(key, value)?;
+    }
+    let assignments: Vec<String> = values
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    #[cfg(target_os = "windows")]
+    let combined = crate::system::command::output(
+        "netsh",
+        ["int", "tcp", "set", "global"]
+            .into_iter()
+            .chain(assignments.iter().map(String::as_str)),
+    );
+    #[cfg(not(target_os = "windows"))]
+    let combined = crate::system::command::output(
+        "sysctl",
+        std::iter::once("-w").chain(assignments.iter().map(String::as_str)),
+    );
+    if combined.is_ok_and(|out| out.status.success()) {
+        return Ok(());
+    }
+    for (key, value) in values {
+        write_tcp(key, value)?;
+    }
+    Ok(())
+}
+
+fn write_tcp(key: &str, value: &str) -> Result<(), String> {
+    valid_tcp_setting(key, value)?;
     #[cfg(target_os = "windows")]
     let result = crate::system::command::output(
         "netsh",
@@ -493,11 +565,11 @@ pub fn tune_os_network_stack() -> Result<Vec<String>, String> {
         serde_json::from_slice(&fs::read(tcp_state_path()).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
     validate_snapshot(&snapshot)?;
-    let mut logs = Vec::new();
-    for (key, value) in tcp_tunables() {
-        write_tcp(key, value)?;
-        logs.push(format!("{key}={value}"));
-    }
+    write_tcp_all(tcp_tunables())?;
+    let logs = tcp_tunables()
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
     let actual = capture_tcp()?;
     if tcp_tunables()
         .iter()
@@ -519,9 +591,12 @@ fn restore_tcp_snapshot() -> Result<Vec<String>, String> {
     }) {
         return Err("TCP изменён после настройки; текущие значения и backup сохранены".into());
     }
-    for (key, value) in &snapshot.original {
-        write_tcp(key, value)?;
-    }
+    let original: Vec<(&str, &str)> = snapshot
+        .original
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    write_tcp_all(&original)?;
     if capture_tcp()?.original != snapshot.original {
         return Err("Проверка TCP rollback не пройдена; snapshot сохранён".into());
     }

@@ -136,6 +136,30 @@ fn safe_windows(value: &Value, ips: &[Ipv4Addr]) -> Value {
         "selected_routes": selected})
 }
 
+/// The route Windows selects for each address, from the routing table itself
+/// (`GetBestRoute`) instead of one `Find-NetRoute` call per address.
+#[cfg(windows)]
+fn selected_routes(ips: &[Ipv4Addr]) -> Value {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute, MIB_IPFORWARDROW};
+    let dotted = |raw: u32| Ipv4Addr::from(raw.to_ne_bytes());
+    let rows: Vec<Value> = ips
+        .iter()
+        .map(|ip| {
+            let mut row: MIB_IPFORWARDROW = unsafe { std::mem::zeroed() };
+            let destination = u32::from_ne_bytes(ip.octets());
+            if unsafe { GetBestRoute(destination, 0, &mut row) } != 0 {
+                return json!({"target": ip.to_string(), "ok": false});
+            }
+            let prefix = u32::from_be(row.dwForwardMask).count_ones();
+            json!({"target": ip.to_string(), "ok": true,
+                "destination": format!("{}/{prefix}", dotted(row.dwForwardDest)),
+                "gateway": dotted(row.dwForwardNextHop).to_string(),
+                "interface": row.dwForwardIfIndex})
+        })
+        .collect();
+    json!(rows)
+}
+
 #[cfg(windows)]
 pub(super) fn network(ips: &[Ipv4Addr]) -> Value {
     let script = r#"
@@ -146,24 +170,13 @@ pub(super) fn network(ips: &[Ipv4Addr]) -> Value {
     try { $routes=@(Get-NetRoute -AddressFamily IPv4 -PolicyStore ActiveStore | ForEach-Object {
         [pscustomobject]@{destination=$_.DestinationPrefix; gateway=$_.NextHop; interface=$_.InterfaceIndex; metric=$_.RouteMetric}
     }) } catch { $routesOk=$false }
-    $selected=@(foreach($ip in $targets) {
-        try {
-            $r=Find-NetRoute -RemoteIPAddress $ip | Where-Object { $_.DestinationPrefix } | Select-Object -First 1
-            if (!$r) { throw 'No route' }
-            [pscustomobject]@{target=$ip; ok=$true; destination=$r.DestinationPrefix; gateway=$r.NextHop; interface=$r.InterfaceIndex}
-        } catch { [pscustomobject]@{target=$ip; ok=$false} }
-    })
-    [pscustomobject]@{dns_ok=$dnsOk; routes_ok=$routesOk; dns=$dns; routes=$routes; selected=$selected} | ConvertTo-Json -Depth 6 -Compress
+    [pscustomobject]@{dns_ok=$dnsOk; routes_ok=$routesOk; dns=$dns; routes=$routes} | ConvertTo-Json -Depth 6 -Compress
     "#;
-    // All interpolated values are typed IPv4 addresses, never user-supplied shell text.
-    let targets = ips
-        .iter()
-        .map(|ip| format!("'{ip}'"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let script = format!("$targets=@({targets}); {script}");
-    match powershell(&script) {
-        Ok(v) => safe_windows(&v, ips),
+    match powershell(script) {
+        Ok(mut v) => {
+            v["selected"] = selected_routes(ips);
+            safe_windows(&v, ips)
+        }
         Err(e) => unavailable(e),
     }
 }
@@ -217,9 +230,10 @@ fn mac_route(text: &str) -> Value {
         .filter_map(mac_field)
         .find_map(|(name, value)| (name == "interface").then_some(value))
         .filter(|s| {
-            regex::Regex::new(r"^(en|utun|ppp|bridge|lo)[0-9]{1,4}$")
-                .unwrap()
-                .is_match(s)
+            static INTERFACE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+                regex::Regex::new(r"^(en|utun|ppp|bridge|lo)[0-9]{1,4}$").unwrap()
+            });
+            INTERFACE.is_match(s)
         });
     json!({"status": "ok", "gateway": gateway, "interface": interface})
 }
@@ -295,13 +309,14 @@ pub(super) fn network(_ips: &[Ipv4Addr]) -> Value {
 pub(super) fn os_version() -> Value {
     #[cfg(windows)]
     {
-        let value = powershell("$v=Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'; [pscustomobject]@{major=[int]$v.CurrentMajorVersionNumber; minor=[int]$v.CurrentMinorVersionNumber; build=[int]$v.CurrentBuildNumber; revision=[int]$v.UBR} | ConvertTo-Json -Compress");
-        match value {
-            Ok(v) => {
-                json!({"status": "ok", "major": v["major"].as_u64(), "minor": v["minor"].as_u64(),
-                "build": v["build"].as_u64(), "revision": v["revision"].as_u64()})
+        // Four registry values, read directly instead of starting PowerShell.
+        match windows_version() {
+            Ok((major, minor, build, revision)) => {
+                json!({"status": "ok", "major": major, "minor": minor,
+                "build": build, "revision": revision})
             }
-            Err(e) => unavailable(e),
+            // Report a fixed reason; registry codes are not exported.
+            Err(_) => unavailable("query_failed"),
         }
     }
     #[cfg(target_os = "macos")]
@@ -340,9 +355,81 @@ pub(super) fn os_version() -> Value {
     unavailable("unsupported_platform")
 }
 
+#[cfg(windows)]
+fn windows_version() -> Result<(u64, u64, u64, u64), String> {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
+    };
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let key = wide(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
+    let dword = |name: &str| -> Result<u64, String> {
+        let mut value = 0u32;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let code = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                key.as_ptr(),
+                wide(name).as_ptr(),
+                RRF_RT_REG_DWORD,
+                std::ptr::null_mut(),
+                (&mut value as *mut u32).cast(),
+                &mut size,
+            )
+        };
+        if code == 0 {
+            Ok(u64::from(value))
+        } else {
+            Err(format!("{name}: {code}"))
+        }
+    };
+    // CurrentBuildNumber is stored as text.
+    let mut text = [0u16; 32];
+    let mut size = std::mem::size_of_val(&text) as u32;
+    let code = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            wide("CurrentBuildNumber").as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            text.as_mut_ptr().cast(),
+            &mut size,
+        )
+    };
+    if code != 0 {
+        return Err(format!("CurrentBuildNumber: {code}"));
+    }
+    let length = text
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(text.len());
+    let build = String::from_utf16_lossy(&text[..length])
+        .trim()
+        .parse::<u64>()
+        .map_err(|e| format!("CurrentBuildNumber: {e}"))?;
+    Ok((
+        dword("CurrentMajorVersionNumber")?,
+        dword("CurrentMinorVersionNumber")?,
+        build,
+        dword("UBR")?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn native_windows_queries_match_the_system() {
+        let (major, _, build, _) = windows_version().unwrap();
+        assert_eq!(major, 10);
+        assert!(build >= 10240);
+        let loopback = selected_routes(&[Ipv4Addr::LOCALHOST]);
+        assert_eq!(loopback[0]["ok"], true);
+        assert_eq!(loopback[0]["destination"], "127.0.0.1/32");
+        assert_eq!(loopback[0]["gateway"], "0.0.0.0");
+    }
+
     #[test]
     fn os_queries_export_only_relevant_names_and_typed_addresses() {
         let v = json!({"dns_ok": true, "routes_ok": true, "SECRET": "SECRET_USER",

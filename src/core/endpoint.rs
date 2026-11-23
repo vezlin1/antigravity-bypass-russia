@@ -101,12 +101,15 @@ fn daily_settings_must_be_explicit_and_unambiguous() {
 }
 
 pub fn apply_all() -> Vec<Result<String, String>> {
-    if let Err(error) = migrate_gateway_settings() {
+    // One discovery for the migration, the IDE loop and the APPDATA checks;
+    // migrating settings files does not change which installations exist.
+    let installs = find_installations();
+    if let Err(error) = migrate_gateway_settings(&installs) {
         return vec![Err(error)];
     }
     let mut notes = Vec::new();
-    for inst in find_installations() {
-        match apply_ide(&inst) {
+    for inst in &installs {
+        match apply_ide(inst) {
             Ok(msg) => notes.push(Ok(format!("{}: {}", inst.display(), msg))),
             Err(e) => notes.push(Err(format!("{}: {}", inst.display(), e))),
         }
@@ -114,7 +117,7 @@ pub fn apply_all() -> Vec<Result<String, String>> {
     // Fresh installs keep settings under APPDATA even if we missed the folder.
     for folder in ["Antigravity", "Antigravity IDE"] {
         if let Some(path) = appdata_settings(folder) {
-            if find_installations()
+            if installs
                 .iter()
                 .any(|p| ide_settings_path(p).as_ref() == Some(&path))
             {
@@ -131,9 +134,9 @@ pub fn apply_all() -> Vec<Result<String, String>> {
 }
 
 /// Restore the settings journalled by 2.3.0/2.3.1 before stopping their gateway.
-fn migrate_gateway_settings() -> Result<(), String> {
+fn migrate_gateway_settings(installs: &[PathBuf]) -> Result<(), String> {
     super::endpoint_env::restore_gateway()?;
-    for path in settings_paths() {
+    for path in settings_paths_for(installs) {
         restore_gateway_profile(&path)?;
     }
     Ok(())
@@ -202,8 +205,8 @@ fn automatic_settings_text(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(text))
 }
 
-pub fn settings_paths() -> Vec<PathBuf> {
-    let mut paths: Vec<_> = find_installations()
+fn settings_paths_for(installs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = installs
         .iter()
         .filter_map(|p| ide_settings_path(p))
         .collect();
@@ -361,10 +364,12 @@ fn product_settings_path(install: &Path) -> Option<PathBuf> {
             .join("product.json"),
         install.join("product.json"),
     ];
-    let re = Regex::new(r#""nameShort"[ \t\r\n]*:[ \t\r\n]*"([^"]+)""#).ok();
+    static NAME_SHORT: std::sync::LazyLock<Option<Regex>> = std::sync::LazyLock::new(|| {
+        Regex::new(r#""nameShort"[ \t\r\n]*:[ \t\r\n]*"([^"]+)""#).ok()
+    });
     for product in product_candidates {
         if let Ok(text) = fs::read_to_string(&product) {
-            if let Some(ref re) = re {
+            if let Some(re) = NAME_SHORT.as_ref() {
                 if let Some(cap) = re.captures(&text) {
                     let name = cap.get(1)?.as_str();
                     return appdata_settings(name);

@@ -715,6 +715,8 @@ pub fn handle_diagnostics() -> bool {
     clear_screen();
     banner();
     println!("  ПРОВЕРКА ПОДКЛЮЧЕНИЯ\n");
+    // Reading the IDE logs does not depend on the network checks.
+    let observation = std::thread::spawn(crate::model_status::snapshot);
     let reports = crate::net::health::probe_all();
     let mut ok = true;
     for report in &reports {
@@ -733,7 +735,9 @@ pub fn handle_diagnostics() -> bool {
     }
     println!("\n  Проверена сеть. Доступ к моделям и аккаунту этой проверкой не подтверждается.");
     println!("  Откройте Antigravity и отправьте короткий запрос нужной модели.");
-    let observation = crate::model_status::snapshot();
+    let observation = observation
+        .join()
+        .unwrap_or_else(|_| crate::model_status::snapshot());
     println!("\n  Модель: {}.", observation.label());
     println!("  Учитываются события за 15 минут. Начало ответа не подтверждает его завершение.");
     if observation.last_failure.is_some()

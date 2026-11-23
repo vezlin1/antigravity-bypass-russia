@@ -884,7 +884,32 @@ fn walk_targets(dir: &Path, depth: usize, max_depth: usize, targets: &mut Vec<Fo
                     | "logs"
                     | "dist"
                     | "obj"
-            ) {
+                    // Electron/VS Code user data: caches, editor history and
+                    // per-workspace state grow with use and hold no executables.
+                    | "CachedData"
+                    | "CachedExtensionVSIXs"
+                    | "CachedProfilesData"
+                    | "History"
+                    | "workspaceStorage"
+                    | "Service Worker"
+                    | "WebStorage"
+                    | "Partitions"
+                    | "Shared Dictionary"
+                    | "ShaderCache"
+                    | "GrShaderCache"
+                    | "GPUPersistentCache"
+                    | "DawnCache"
+                    | "DawnGraphiteCache"
+                    | "DawnWebGPUCache"
+                    // Antigravity agent data in ~/.gemini/antigravity.
+                    | "brain"
+                    | "conversations"
+                    | "annotations"
+                    | "scratch"
+                    | "crashes"
+                    | "persistent_terminals"
+            ) || file_name.ends_with(".ag-backups")
+            {
                 continue;
             }
             walk_targets(&entry.path(), depth + 1, max_depth, targets);
@@ -940,6 +965,36 @@ fn update_component_state(current: &mut Option<BinaryState>, new_state: BinarySt
 #[cfg(test)]
 mod detection_tests {
     use super::*;
+
+    #[test]
+    fn walk_skips_user_data_trees_but_finds_unconventional_install_folders() {
+        let root = tempfile::tempdir().unwrap();
+        let wanted = root
+            .path()
+            .join("custom/layout/resources/app/extensions/antigravity/bin");
+        std::fs::create_dir_all(&wanted).unwrap();
+        std::fs::write(wanted.join("language_server_windows_x64.exe"), b"x").unwrap();
+        for skipped in [
+            "brain/123/bin",
+            "User/History/abc",
+            "User/workspaceStorage/hash",
+            "CachedData/1.0",
+            "language_server.exe.ag-backups",
+        ] {
+            let dir = root.path().join(skipped);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("language_server_windows_x64.exe"), b"x").unwrap();
+        }
+        let mut targets = Vec::new();
+        walk_targets(root.path(), 0, 8, &mut targets);
+        assert_eq!(
+            targets.len(),
+            1,
+            "{:?}",
+            targets.iter().map(|t| &t.path).collect::<Vec<_>>()
+        );
+        assert!(targets[0].path.starts_with(&wanted));
+    }
 
     fn pending_fixture(path: &Path, bytes: &[u8]) -> PathBuf {
         let name = path.file_name().unwrap().to_string_lossy();

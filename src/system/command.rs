@@ -148,6 +148,7 @@ fn capture(command: &mut Command, budget: Duration) -> io::Result<Output> {
             .spawn()?,
     );
     let started = Instant::now();
+    let mut step = Duration::from_millis(1);
     let status = loop {
         if stdout.metadata()?.len() > OUTPUT_LIMIT || stderr.metadata()?.len() > OUTPUT_LIMIT {
             return Err(io::Error::new(
@@ -168,7 +169,23 @@ fn capture(command: &mut Command, budget: Duration) -> io::Result<Output> {
                 ),
             ));
         }
-        std::thread::sleep(Duration::from_millis(20).min(budget.saturating_sub(started.elapsed())));
+        // The output limit is re-checked at least every 20 ms. Windows wakes
+        // as soon as the process exits; elsewhere short commands are noticed
+        // after 1-2 ms instead of a fixed 20 ms poll.
+        let wait = step.min(budget.saturating_sub(started.elapsed()));
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            unsafe {
+                windows_sys::Win32::System::Threading::WaitForSingleObject(
+                    child.0.as_raw_handle(),
+                    wait.as_millis() as u32,
+                );
+            }
+        }
+        #[cfg(not(windows))]
+        std::thread::sleep(wait);
+        step = (step * 2).min(Duration::from_millis(20));
     };
     fn read(file: &mut std::fs::File) -> io::Result<Vec<u8>> {
         file.seek(SeekFrom::Start(0))?;
