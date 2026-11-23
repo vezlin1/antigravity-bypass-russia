@@ -185,54 +185,135 @@ pub(super) fn discover_agent(
     prepare_routes(&addresses.into_iter().collect::<Vec<_>>())?;
     let mut ranked = Vec::new();
     let mut failures = Vec::new();
+    let mut tried = std::collections::HashMap::new();
     for (index, (host, candidates)) in host_candidates.into_iter().enumerate() {
         progress(Working(&format!(
             "TLS/HTTP {}/{} · {host}",
             index + 1,
             NRPT_AGENT.len()
         )));
-        let attempted = candidates.len();
-        #[allow(unused_mut)]
-        let (mut ips, mut errors) = resolvers::rank_tls_v4_report(&candidates, &host);
-        #[cfg(windows)]
-        let attempted = if ips.is_empty() && policy == routes::RoutePolicy::System {
-            progress(Working(&format!("Системный DNS · {host}")));
-            let native = system_addresses(&host);
-            progress(Working(&format!("Проверяем системные адреса · {host}")));
-            let (native_ips, native_errors) = resolvers::rank_tls_v4_report(&native, &host);
-            ips = native_ips;
-            errors.extend(native_errors);
-            attempted + native.len()
-        } else {
-            attempted
-        };
-        #[cfg(not(windows))]
-        let _ = policy;
-        let Some((_, fastest)) = ips.first() else {
-            let stage = FailureStage::furthest(&errors);
-            progress(Detail(&format!(
-                "– {host} · проверено {attempted}, подходящих адресов нет ({})",
-                stage.label()
-            )));
-            failures.push(HostFailure {
-                host,
-                attempted,
-                stage,
-            });
-            continue;
-        };
-        progress(Detail(&format!(
-            "✓ {host} · прошли {}/{} · лучший {} мс",
-            ips.len(),
-            attempted,
-            fastest
-        )));
-        if ips.len() > MAX_FALLBACKS {
-            ips.truncate(MAX_FALLBACKS);
+        match verify_host(&host, &candidates, policy, progress) {
+            Ok(row) => ranked.push(row),
+            Err(failure) => failures.push(failure),
         }
-        ranked.push(RankedHost { host, ips });
+        tried.insert(host, candidates);
     }
+
+    // DoH answers and relays occasionally fail for a moment. Give each failed
+    // host one more attempt with a fresh DNS answer before rejecting setup.
+    if !failures.is_empty() {
+        progress(Working(&format!(
+            "Повторная проверка через {} с",
+            RETRY_DELAY.as_secs()
+        )));
+    }
+    let (recovered, failures) = retry_failed(
+        failures,
+        || std::thread::sleep(RETRY_DELAY),
+        |failure| {
+            let host = &failure.host;
+            progress(Working(&format!("Повтор · DNS · {host}")));
+            let known = tried.remove(host).unwrap_or_default();
+            let fresh: Vec<_> = resolvers::candidate_addrs(host, if_index)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|ip| ip.is_ipv4() && !known.contains(ip))
+                .collect();
+            let new_routes: Vec<_> = fresh
+                .iter()
+                .filter_map(|ip| match ip {
+                    IpAddr::V4(ip) => Some(*ip),
+                    _ => None,
+                })
+                .collect();
+            if !new_routes.is_empty() {
+                if let Err(error) = prepare_routes(&new_routes) {
+                    progress(Detail(&format!("– {host} · маршруты для повтора: {error}")));
+                    return Err(failure);
+                }
+            }
+            let candidates: Vec<_> = known.into_iter().chain(fresh).take(32).collect();
+            progress(Working(&format!("Повтор · TLS/HTTP · {host}")));
+            verify_host(host, &candidates, policy, progress)
+        },
+    );
+    ranked.extend(recovered);
     Ok(Discovery { ranked, failures })
+}
+
+const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Pause once, then verify each failed host one more time. A host that fails
+/// again keeps the result of its latest attempt.
+fn retry_failed(
+    failures: Vec<HostFailure>,
+    pause: impl FnOnce(),
+    mut attempt: impl FnMut(HostFailure) -> Result<RankedHost, HostFailure>,
+) -> (Vec<RankedHost>, Vec<HostFailure>) {
+    if failures.is_empty() {
+        return (Vec::new(), failures);
+    }
+    pause();
+    let mut recovered = Vec::new();
+    let mut remaining = Vec::new();
+    for failure in failures {
+        match attempt(failure) {
+            Ok(row) => recovered.push(row),
+            Err(failure) => remaining.push(failure),
+        }
+    }
+    (recovered, remaining)
+}
+
+/// Verify one host's candidates with its SNI and keep the fastest few.
+fn verify_host(
+    host: &str,
+    candidates: &[IpAddr],
+    policy: routes::RoutePolicy,
+    progress: &mut dyn FnMut(super::SetupProgress<'_>),
+) -> Result<RankedHost, HostFailure> {
+    use super::SetupProgress::Detail;
+    let attempted = candidates.len();
+    #[allow(unused_mut)]
+    let (mut ips, mut errors) = resolvers::rank_tls_v4_report(candidates, host);
+    #[cfg(windows)]
+    let attempted = if ips.is_empty() && policy == routes::RoutePolicy::System {
+        use super::SetupProgress::Working;
+        progress(Working(&format!("Системный DNS · {host}")));
+        let native = system_addresses(host);
+        progress(Working(&format!("Проверяем системные адреса · {host}")));
+        let (native_ips, native_errors) = resolvers::rank_tls_v4_report(&native, host);
+        ips = native_ips;
+        errors.extend(native_errors);
+        attempted + native.len()
+    } else {
+        attempted
+    };
+    #[cfg(not(windows))]
+    let _ = policy;
+    let Some(&(_, fastest)) = ips.first() else {
+        let stage = FailureStage::furthest(&errors);
+        progress(Detail(&format!(
+            "– {host} · проверено {attempted}, подходящих адресов нет ({})",
+            stage.label()
+        )));
+        return Err(HostFailure {
+            host: host.to_owned(),
+            attempted,
+            stage,
+        });
+    };
+    progress(Detail(&format!(
+        "✓ {host} · прошли {}/{} · лучший {} мс",
+        ips.len(),
+        attempted,
+        fastest
+    )));
+    ips.truncate(MAX_FALLBACKS);
+    Ok(RankedHost {
+        host: host.to_owned(),
+        ips,
+    })
 }
 
 #[cfg(windows)]
@@ -633,6 +714,52 @@ mod tests {
         })
         .unwrap();
         assert!(applied);
+    }
+
+    #[test]
+    fn failed_hosts_get_exactly_one_retry_after_a_single_pause() {
+        let failure = |host: &str, stage| HostFailure {
+            host: host.into(),
+            attempted: 4,
+            stage,
+        };
+
+        let mut paused = false;
+        let (recovered, remaining) = retry_failed(
+            Vec::new(),
+            || paused = true,
+            |_| panic!("nothing to retry"),
+        );
+        assert!(!paused && recovered.is_empty() && remaining.is_empty());
+
+        let mut pauses = 0;
+        let mut attempts = Vec::new();
+        let (recovered, remaining) = retry_failed(
+            vec![
+                failure("a.example", FailureStage::Tcp),
+                failure("b.example", FailureStage::Tls),
+            ],
+            || pauses += 1,
+            |failure| {
+                attempts.push(failure.host.clone());
+                if failure.host == "a.example" {
+                    Ok(RankedHost {
+                        host: failure.host,
+                        ips: vec![(Ipv4Addr::new(192, 0, 2, 1), 30)],
+                    })
+                } else {
+                    Err(HostFailure {
+                        stage: FailureStage::Http,
+                        ..failure
+                    })
+                }
+            },
+        );
+        assert_eq!(pauses, 1);
+        assert_eq!(attempts, ["a.example", "b.example"]);
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].host, "a.example");
+        assert_eq!(remaining, [failure("b.example", FailureStage::Http)]);
     }
 
     #[test]
