@@ -342,6 +342,9 @@ fn parse_lsof(
 
 #[cfg(any(target_os = "linux", test))]
 fn linux_lsof_stderr_is_safe(stderr: &str, paths: &[PathBuf]) -> bool {
+    use std::path::Path;
+
+    const WSLG_PREFIX: &str = "/mnt/wslg";
     let mut incomplete_expected = false;
     for line in stderr
         .lines()
@@ -358,12 +361,12 @@ fn linux_lsof_stderr_is_safe(stderr: &str, paths: &[PathBuf]) -> bool {
         else {
             return false;
         };
-        let directory = match filesystem {
-            "fuse.portal" => "doc",
-            "fuse.gvfsd-fuse" => "gvfs",
+        let (directory, local_mount) = match filesystem {
+            "fuse.portal" => ("doc", mount.strip_prefix(WSLG_PREFIX).unwrap_or(mount)),
+            "fuse.gvfsd-fuse" => ("gvfs", mount),
             _ => return false,
         };
-        let Some(uid) = mount
+        let Some(uid) = local_mount
             .strip_prefix("/run/user/")
             .and_then(|path| path.strip_suffix(&format!("/{directory}")))
         else {
@@ -373,15 +376,22 @@ fn linux_lsof_stderr_is_safe(stderr: &str, paths: &[PathBuf]) -> bool {
         {
             return false;
         }
-        // These desktop mounts are unrelated only when every target can be
-        // resolved outside them. Preserve errors for targets reached via links.
-        let mount = std::path::Path::new(mount);
+        // WSLg can expose the same portal at either path. Check both aliases
+        // even if lsof reports only one, and reject unresolved symlinks.
+        let wslg_mount = (filesystem == "fuse.portal")
+            .then(|| PathBuf::from(format!("{WSLG_PREFIX}{local_mount}")));
+        let in_mount = |path: &Path| {
+            path.starts_with(local_mount)
+                || wslg_mount
+                    .as_ref()
+                    .is_some_and(|mount| path.starts_with(mount))
+        };
         if paths.is_empty()
             || paths.iter().any(|path| {
-                path.starts_with(mount)
+                in_mount(path)
                     || path
                         .canonicalize()
-                        .map_or(true, |resolved| resolved.starts_with(mount))
+                        .map_or(true, |resolved| in_mount(&resolved))
             })
         {
             return false;
@@ -560,6 +570,55 @@ mod mac_lock_tests {
         }
         #[cfg(not(target_os = "linux"))]
         assert!(super::parse_lsof(Some(1), "", warnings, &paths).is_err());
+    }
+
+    #[test]
+    fn wslg_portal_warnings_preserve_file_lock_checks() {
+        let target = tempfile::NamedTempFile::new().unwrap();
+        let paths = [target.path().to_path_buf()];
+        let local = "lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n\
+                     Output information may be incomplete.";
+        let wslg =
+            "lsof: WARNING: can't stat() fuse.portal file system /mnt/wslg/run/user/1000/doc\n\
+                    Output information may be incomplete.";
+        let warnings = format!("{local}\n{wslg}");
+        let error = format!("{warnings}\nlsof: permission denied");
+
+        assert!(super::linux_lsof_stderr_is_safe(&warnings, &paths));
+        assert!(!super::linux_lsof_stderr_is_safe(&error, &paths));
+        assert!(!super::linux_lsof_stderr_is_safe(
+            &wslg.replace("fuse.portal", "fuse.sshfs"),
+            &paths,
+        ));
+        assert!(!super::linux_lsof_stderr_is_safe(
+            &wslg.replace("/mnt/wslg/", "/mnt/wslg-backup/"),
+            &paths,
+        ));
+        for (warning, locked_path) in [
+            (wslg, "/run/user/1000/doc/agy"),
+            (local, "/mnt/wslg/run/user/1000/doc/agy"),
+        ] {
+            assert!(!super::linux_lsof_stderr_is_safe(
+                warning,
+                &[PathBuf::from(locked_path)],
+            ));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            assert!(super::parse_lsof(Some(1), "", &warnings, &paths)
+                .unwrap()
+                .is_empty());
+            let busy = wait_for_holders_to_exit(
+                || super::parse_lsof(Some(1), "p123\ncagy\n", &warnings, &paths),
+                Duration::ZERO,
+            )
+            .unwrap_err();
+            assert!(busy.contains("agy (PID 123)"), "{busy}");
+            let failed = super::parse_lsof(Some(1), "", &error, &paths).unwrap_err();
+            assert!(failed.contains("permission denied"), "{failed}");
+            assert!(super::parse_lsof(Some(2), "", &warnings, &paths).is_err());
+        }
     }
 
     #[cfg(target_os = "macos")]

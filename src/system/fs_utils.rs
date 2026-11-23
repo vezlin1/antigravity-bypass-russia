@@ -97,7 +97,7 @@ pub(super) fn inherit_directory_owner(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn create_private_directory(path: &Path) -> Result<(), String> {
+pub(crate) fn create_private_directory(path: &Path) -> Result<(), String> {
     let builder = fs::DirBuilder::new();
     #[cfg(unix)]
     let mut builder = builder;

@@ -4,11 +4,12 @@ use crate::core::detector::{
 };
 use crate::core::patcher::{patch_target, restore_target};
 use crate::core::v8_cache::clear_ide_v8_caches;
-use crate::net::{apply_dns_rules, remove_dns_rules};
+use crate::net::{apply_dns_rules, remove_dns_rules, NetworkSetup, SetupProgress};
 use crate::system::env::{display_path, expand_env_vars, mask_path};
 use crate::ui::dashboard::{banner, print_dashboard};
-use crate::ui::terminal::{clear_screen, pause, prompt};
+use crate::ui::terminal::{clear_screen, pause, prompt, Progress};
 use std::path::Path;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FileSetupOutcome {
@@ -270,12 +271,43 @@ fn apply_endpoints() -> Result<(), String> {
     }
 }
 
-fn apply_connection(setup: impl FnOnce() -> Result<crate::net::NetworkSetup, String>) -> bool {
-    match configure_connection_with(setup, apply_endpoints) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SetupStatus {
+    Complete,
+    Limited,
+    Failed,
+}
+
+impl SetupStatus {
+    fn succeeded(self) -> bool {
+        self != Self::Failed
+    }
+}
+
+fn configure_network() -> Result<NetworkSetup, String> {
+    println!("\n  \x1b[96m── Настройка подключения ──\x1b[0m");
+    let progress = Progress::new();
+    apply_dns_rules(&mut |event| {
+        let message = match event {
+            SetupProgress::Working(message) => {
+                progress.working(message);
+                message
+            }
+            SetupProgress::Detail(message) => {
+                progress.detail(message);
+                message
+            }
+        };
+        crate::net::relay::log_event(message);
+    })
+}
+
+fn apply_connection() -> SetupStatus {
+    match configure_connection_with(configure_network, apply_endpoints) {
         Ok(setup) => show_network_result(&setup),
         Err(error) => {
             operation_error("Не удалось завершить настройку подключения", &error);
-            false
+            SetupStatus::Failed
         }
     }
 }
@@ -307,81 +339,181 @@ fn show_result(ok: bool) {
     }
 }
 
-fn show_network_result(setup: &crate::net::NetworkSetup) -> bool {
+fn show_network_result(setup: &NetworkSetup) -> SetupStatus {
     crate::net::relay::log_event(&setup.message);
+    println!("\n  \x1b[96m── Состояние подключения ──\x1b[0m");
     if setup.hosts_fallback {
-        println!("  \x1b[92m✓\x1b[0m Подключение Antigravity настроено через hosts");
+        println!("  \x1b[92m✓\x1b[0m Antigravity · проверен запасной путь через hosts");
     } else if setup.local_relay_running {
-        println!("  \x1b[92m✓\x1b[0m DNS настроен");
+        println!("  \x1b[92m✓\x1b[0m Antigravity · локальный DNS-релей работает");
     } else {
-        eprintln!("  \x1b[93m!\x1b[0m Используются прямые DNS и сохранённые адреса");
-        eprintln!("  {}", setup.message);
-        print_error_details();
+        println!("  \x1b[93m!\x1b[0m Antigravity · применены запасные настройки DNS");
     }
     if setup.system_routes {
-        println!("  Подключение следует маршрутам Windows при смене VPN.");
+        println!("    Используются системные маршруты Windows.");
     }
-    for note in &setup.compatibility_notes {
-        eprintln!("  \x1b[93m!\x1b[0m {note}");
+    if setup.primary_skipped {
+        println!(
+            "  \x1b[93m!\x1b[0m Основной Cloud Code недоступен из этой сети · Antigravity переключён на daily"
+        );
+        for hint in crate::core::endpoint::primary_skip_hints() {
+            crate::net::relay::log_event(&hint);
+            println!("    {hint}");
+        }
     }
-    true
+    if setup.browser_dns_confirmed {
+        println!("  \x1b[92m✓\x1b[0m Gemini и AI Studio · DNS проверен");
+    } else {
+        println!("  \x1b[93m!\x1b[0m Gemini и AI Studio · DNS не подтверждён");
+    }
+    if !setup.local_relay_running {
+        println!("  \x1b[93m!\x1b[0m Локальный DNS-релей не прошёл проверку");
+    }
+    if setup.browser_dns_confirmed {
+        SetupStatus::Complete
+    } else {
+        SetupStatus::Limited
+    }
 }
 
 #[cfg(windows)]
-fn apply_connection_and_launch() -> bool {
-    let setup = configure_connection_with(apply_dns_rules, apply_endpoints);
+fn apply_connection_and_launch() -> SetupStatus {
+    use crate::net::windows_connect;
+    use crate::system::windows_connect_launch::{launch_desktop, DesktopLaunch};
+
+    let setup = configure_connection_with(configure_network, apply_endpoints);
+    let browser_dns = setup
+        .as_ref()
+        .is_ok_and(|setup| setup.browser_dns_confirmed);
+    let try_browser = !browser_dns && windows_connect::vpn_present();
+    let try_app = setup.is_ok() || windows_connect::fallback_available();
     match &setup {
         Ok(setup) => {
             show_network_result(setup);
         }
-        Err(error) if crate::net::windows_connect::fallback_available() => {
-            eprintln!("  DNS: {error}");
-            println!("  Пробуем запуск Antigravity через CONNECT внутри VPN.");
+        Err(error) if try_app || try_browser => {
+            crate::net::relay::log_event(&format!("Настройка DNS: {error}"));
+            println!("  \x1b[93m!\x1b[0m DNS не настроен. Проверяем запасной CONNECT внутри VPN.");
         }
         Err(error) => {
             operation_error("Не удалось завершить настройку подключения", error);
-            return false;
+            return SetupStatus::Failed;
         }
-    }
-    match crate::system::windows_connect_launch::launch_desktop() {
-        Ok(true) => {
-            println!(
-                "  Antigravity запущен. Запасной CONNECT включится при блокировке локального DNS."
-            );
-            return true;
-        }
-        Ok(false) => {
-            if let Err(error) = &setup {
-                operation_error("Режим CONNECT требует Antigravity App или IDE", error);
+    };
+    let antigravity_ok = if try_app {
+        let launch = {
+            let progress = Progress::new();
+            progress.working("Запускаем Antigravity с запасным CONNECT");
+            launch_desktop()
+        };
+        match launch {
+            Ok(DesktopLaunch::Started | DesktopLaunch::AlreadyRunning) => {
+                println!("  \x1b[92m✓\x1b[0m Antigravity запущен с резервным CONNECT");
+                true
+            }
+            Ok(DesktopLaunch::NotInstalled) => {
+                if let Err(error) = &setup {
+                    operation_error("Режим CONNECT требует Antigravity App или IDE", error);
+                }
+                setup.is_ok()
+            }
+            Ok(DesktopLaunch::ElevatedSession(reason)) | Err(reason) => {
+                crate::net::relay::log_event(&format!("Запуск CONNECT не выполнен: {reason}"));
+                println!("  \x1b[93m!\x1b[0m CONNECT не запущен. {reason}");
+                if setup.is_ok() {
+                    println!("    Сеть настроена. Antigravity можно открыть обычным способом.");
+                }
+                false
             }
         }
-        Err(error) => {
-            operation_error(
-                "Не удалось запустить Antigravity с запасным CONNECT",
-                &error,
+    } else {
+        false
+    };
+    let browser_ok = browser_dns || (try_browser && launch_browser_fallback());
+    if setup.is_ok() && antigravity_ok && browser_ok {
+        SetupStatus::Complete
+    } else if setup.is_ok() || antigravity_ok || browser_ok {
+        SetupStatus::Limited
+    } else {
+        SetupStatus::Failed
+    }
+}
+
+#[cfg(windows)]
+fn launch_browser_fallback() -> bool {
+    use crate::system::windows_connect_launch::{launch_browser, DesktopLaunch};
+
+    let launch = {
+        let progress = Progress::new();
+        progress.working("Проверяем Gemini и AI Studio через CONNECT");
+        launch_browser()
+    };
+    match launch {
+        Ok(DesktopLaunch::Started) => {
+            println!(
+                "  \x1b[92m✓\x1b[0m Gemini и AI Studio открыты через CONNECT в отдельном Chrome"
             );
-            return false;
+            true
+        }
+        Ok(DesktopLaunch::AlreadyRunning) => {
+            println!("  \x1b[92m✓\x1b[0m Отдельный Chrome с CONNECT уже открыт");
+            true
+        }
+        Ok(DesktopLaunch::NotInstalled) => {
+            println!("  \x1b[93m!\x1b[0m Для запуска Gemini и AI Studio через CONNECT нужен Google Chrome");
+            false
+        }
+        Ok(DesktopLaunch::ElevatedSession(reason)) | Err(reason) => {
+            crate::net::relay::log_event(&format!("Браузерный CONNECT не запущен: {reason}"));
+            println!("  \x1b[93m!\x1b[0m Gemini и AI Studio не открылись через CONNECT. {reason}");
+            false
         }
     }
-    setup.is_ok()
+}
+
+fn finish_setup(status: SetupStatus, started: Instant) {
+    let (color, title) = match status {
+        SetupStatus::Complete => ("\x1b[92m", "Настройка завершена"),
+        SetupStatus::Limited => ("\x1b[93m", "Завершено с ограничениями"),
+        SetupStatus::Failed => ("\x1b[91m", "Настройка остановлена"),
+    };
+    let seconds = started.elapsed().as_secs();
+    println!(
+        "\n  {color}━━ {title} · {:02}:{:02} ━━\x1b[0m",
+        seconds / 60,
+        seconds % 60,
+    );
+    if status != SetupStatus::Complete {
+        print_error_details();
+    }
 }
 
 pub fn handle_unlock_all() -> bool {
+    let started = Instant::now();
     clear_screen();
     banner();
     println!("  ВКЛЮЧЕНИЕ ОБХОДА\n");
     if !check_vpn_before_setup() {
+        finish_setup(SetupStatus::Failed, started);
+        pause();
         return false;
     }
+    println!("  \x1b[96m── Файлы приложения ──\x1b[0m");
+    let mut status = SetupStatus::Failed;
     let outcome = continue_setup(patch_installations(), || {
         #[cfg(windows)]
         if crate::system::env::args().nth(1).is_none() {
-            return apply_connection_and_launch();
+            status = apply_connection_and_launch();
+            return status.succeeded();
         }
-        apply_connection(apply_dns_rules)
+        status = apply_connection();
+        status.succeeded()
     });
     let ok = outcome.succeeded();
-    show_result(ok);
+    if !ok && status.succeeded() {
+        status = SetupStatus::Limited;
+    }
+    finish_setup(status, started);
     pause();
     ok
 }
@@ -396,22 +528,31 @@ pub fn handle_patch_files_only() -> bool {
     ok
 }
 pub fn handle_dns_only() -> bool {
+    let started = Instant::now();
     if !check_vpn_before_setup() {
+        finish_setup(SetupStatus::Failed, started);
+        pause();
         return false;
     }
-    let ok = apply_connection(apply_dns_rules);
+    let status = apply_connection();
+    finish_setup(status, started);
     pause();
-    ok
+    status.succeeded()
 }
 
 fn check_vpn_before_setup() -> bool {
+    #[cfg(windows)]
+    if crate::net::windows_connect::vpn_present() {
+        println!("  \x1b[93m!\x1b[0m Обнаружен VPN. Он может мешать DNS и подключению.");
+        println!("    Если VPN не нужен, лучше временно отключить его.");
+    }
     match crate::net::preflight() {
         Ok(()) => true,
         Err(message) => {
+            crate::net::relay::log_event(&message);
             println!("  \x1b[93mВключение обхода приостановлено\x1b[0m\n");
             println!("  {message}\n");
             println!("  Устраните причину и выберите этот пункт ещё раз.");
-            pause();
             false
         }
     }

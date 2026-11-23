@@ -6,6 +6,9 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 pub const PROBE_BUDGET: Duration = Duration::from_millis(4500);
+const HTTP_HEADER_LIMIT: usize = 16 * 1024;
+#[cfg(windows)]
+const BROWSER_HEADER_LIMIT: usize = 64 * 1024;
 
 /// The same certificate/HTTP probe is used by the resolver and the CONNECT proxy.
 /// The socket is consumed: the real client always receives a fresh, unmodified tunnel.
@@ -20,6 +23,65 @@ fn probe_with_connector(
     deadline: Instant,
     connector: &TlsConnector,
 ) -> Result<u16, String> {
+    let header = probe_response(
+        stream,
+        host,
+        "HEAD /",
+        deadline,
+        connector,
+        HTTP_HEADER_LIMIT,
+    )?;
+    let status = parse_http_status(&header)?;
+    if status < 500 {
+        Ok(status)
+    } else {
+        Err(format!("HTTP {status}"))
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn probe_browser_connected(
+    stream: TcpStream,
+    host: &str,
+    path: &str,
+    deadline: Instant,
+) -> Result<(), String> {
+    let connector = TlsConnector::new().map_err(|e| e.to_string())?;
+    let header = probe_response(
+        stream,
+        host,
+        &format!("GET {path}"),
+        deadline,
+        &connector,
+        BROWSER_HEADER_LIMIT,
+    )?;
+    let status = parse_http_status(&header)?;
+    if !(200..400).contains(&status) {
+        return Err(format!("Страница отвечает HTTP {status}"));
+    }
+    if (300..400).contains(&status)
+        && String::from_utf8_lossy(&header).lines().any(|line| {
+            line.split_once(':').is_some_and(|(field, value)| {
+                field.eq_ignore_ascii_case("location")
+                    && value.split('?').next().is_some_and(|path| {
+                        path.contains("/sorry") || path.contains("/available-regions")
+                    })
+            })
+        })
+    {
+        return Err("Страница перенаправила на проверку доступа".into());
+    }
+    Ok(())
+}
+
+fn probe_response(
+    stream: TcpStream,
+    host: &str,
+    method_and_path: &str,
+    deadline: Instant,
+    connector: &TlsConnector,
+    header_limit: usize,
+) -> Result<Vec<u8>, String> {
     if Instant::now() >= deadline {
         return Err("TLS: общий срок проверки истёк".into());
     }
@@ -40,7 +102,8 @@ fn probe_with_connector(
             }
         }
     };
-    let request = format!("HEAD / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    let request =
+        format!("{method_and_path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
     let mut sent = 0;
     while sent < request.len() {
         if Instant::now() >= deadline {
@@ -57,22 +120,20 @@ fn probe_with_connector(
     }
     // Incremental parsing also enforces the total deadline for a trickling peer.
     let mut header = Vec::new();
-    let mut byte = [0u8; 1];
-    while header.len() < 16 * 1024 {
+    let mut buffer = [0u8; 1024];
+    while header.len() < header_limit {
         if Instant::now() >= deadline {
             return Err("HTTP header: timeout".into());
         }
-        match tls.read(&mut byte) {
+        let remaining = (header_limit - header.len()).min(buffer.len());
+        match tls.read(&mut buffer[..remaining]) {
             Ok(0) => return Err("HTTP header: EOF".into()),
-            Ok(_) => {
-                header.push(byte[0]);
-                if header.ends_with(b"\r\n\r\n") {
-                    let status = read_http_status(&mut header.as_slice())?;
-                    return if status < 500 {
-                        Ok(status)
-                    } else {
-                        Err(format!("HTTP {status}"))
-                    };
+            Ok(bytes) => {
+                let start = header.len().saturating_sub(3);
+                header.extend_from_slice(&buffer[..bytes]);
+                if let Some(end) = memchr::memmem::find(&header[start..], b"\r\n\r\n") {
+                    header.truncate(start + end + 4);
+                    return Ok(header);
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -81,7 +142,7 @@ fn probe_with_connector(
             Err(e) => return Err(e.to_string()),
         }
     }
-    Err("HTTP header exceeds 16 KiB".into())
+    Err(format!("HTTP header exceeds {} KiB", header_limit / 1024))
 }
 
 pub fn probe_ip(addr: SocketAddr, host: &str) -> Result<u128, String> {
@@ -160,29 +221,34 @@ pub fn connect_tls(
 fn read_http_status(reader: &mut impl Read) -> Result<u16, String> {
     let mut header = Vec::new();
     let mut byte = [0u8; 1];
-    while header.len() < 16 * 1024 {
+    while header.len() < HTTP_HEADER_LIMIT {
         reader
             .read_exact(&mut byte)
             .map_err(|e| format!("HTTP header: {e}"))?;
         header.push(byte[0]);
         if header.ends_with(b"\r\n\r\n") {
-            let line = std::str::from_utf8(&header)
-                .map_err(|_| "HTTP: invalid header")?
-                .lines()
-                .next()
-                .unwrap_or("");
-            let mut fields = line.split_whitespace();
-            if !matches!(fields.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
-                return Err("HTTP: invalid status line".into());
-            }
-            return fields
-                .next()
-                .and_then(|s| s.parse::<u16>().ok())
-                .filter(|s| (200..=599).contains(s))
-                .ok_or_else(|| "HTTP: invalid final status".into());
+            return parse_http_status(&header);
         }
     }
     Err("HTTP: header exceeds 16 KiB".into())
+}
+
+fn parse_http_status(header: &[u8]) -> Result<u16, String> {
+    let line = header
+        .split(|byte| *byte == b'\n')
+        .next()
+        .unwrap_or_default();
+    let mut fields = std::str::from_utf8(line)
+        .map_err(|_| "HTTP: invalid status line")?
+        .split_whitespace();
+    if !matches!(fields.next(), Some("HTTP/1.0" | "HTTP/1.1")) {
+        return Err("HTTP: invalid status line".into());
+    }
+    fields
+        .next()
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|status| (200..=599).contains(status))
+        .ok_or_else(|| "HTTP: invalid final status".into())
 }
 
 const DIAGNOSTIC_BUDGET: Duration = Duration::from_secs(4);

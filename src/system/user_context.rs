@@ -112,13 +112,13 @@ pub fn args() -> std::vec::IntoIter<String> {
 #[cfg(unix)]
 pub use unix::{elevation_arguments, home};
 #[cfg(windows)]
-pub use windows::{elevation_arguments, environment_key, profile_sid};
+pub use windows::{elevation_arguments, environment_key, profile_sid, user_registry_key};
 
 #[cfg(windows)]
 mod windows {
     use super::*;
-    use std::ffi::{c_void, OsStr};
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::{
         Foundation::{CloseHandle, LocalFree, FILETIME, HANDLE, WAIT_TIMEOUT},
         System::{
@@ -358,8 +358,12 @@ mod windows {
 
     /// An elevated process may have another HKCU. The initiating user's hive is
     /// already loaded because their original process is still waiting for UAC.
+    pub fn user_registry_key(path: &str) -> (HKEY, Vec<u16>) {
+        user_registry_key_for(USER.get().map(|user| user.sid.as_str()), path)
+    }
+
     pub fn environment_key() -> (HKEY, Vec<u16>) {
-        environment_key_for(USER.get().map(|user| user.sid.as_str()))
+        user_registry_key("Environment")
     }
 
     pub fn profile_sid() -> Result<String, String> {
@@ -374,15 +378,20 @@ mod windows {
         token_user(token.0).map(|user| user.sid)
     }
 
-    fn environment_key_for(sid: Option<&str>) -> (HKEY, Vec<u16>) {
-        let (root, name) = match sid {
-            Some(sid) => (HKEY_USERS, format!("{sid}\\Environment")),
-            None => (HKEY_CURRENT_USER, "Environment".into()),
-        };
-        (
-            root,
-            OsStr::new(&name).encode_wide().chain(Some(0)).collect(),
-        )
+    fn user_registry_key_for(sid: Option<&str>, path: &str) -> (HKEY, Vec<u16>) {
+        match sid {
+            Some(sid) => (
+                HKEY_USERS,
+                format!("{sid}\\{path}")
+                    .encode_utf16()
+                    .chain(Some(0))
+                    .collect(),
+            ),
+            None => (
+                HKEY_CURRENT_USER,
+                path.encode_utf16().chain(Some(0)).collect(),
+            ),
+        }
     }
 
     #[cfg(test)]
@@ -419,13 +428,13 @@ mod windows {
         }
         #[test]
         fn another_administrators_hkcu_is_not_used_for_the_originating_user() {
-            let (root, path) = environment_key_for(Some("S-1-5-21-111-222-333-1001"));
+            let (root, path) = user_registry_key_for(Some("S-1-5-21-111-222-333-1001"), "Software");
             assert_eq!(root, HKEY_USERS);
             assert_eq!(
                 String::from_utf16(&path[..path.len() - 1]).unwrap(),
-                "S-1-5-21-111-222-333-1001\\Environment"
+                "S-1-5-21-111-222-333-1001\\Software"
             );
-            assert_eq!(environment_key_for(None).0, HKEY_CURRENT_USER);
+            assert_eq!(user_registry_key_for(None, "Software").0, HKEY_CURRENT_USER);
         }
 
         #[test]

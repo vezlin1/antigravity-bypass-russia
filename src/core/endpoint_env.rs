@@ -316,7 +316,11 @@ pub fn apply_if_default() -> Result<String, String> {
     {
         windows::apply_if_default()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        super::endpoint_macos::apply_if_default()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         Ok(
             "CLOUD_CODE_URL для CLI: глобальная настройка на этой платформе не поддерживается"
@@ -329,7 +333,10 @@ pub fn daily_configured() -> bool {
     #[cfg(windows)]
     return windows::daily_configured();
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    return super::endpoint_macos::cli_configured();
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     false
 }
 pub fn restore() -> Result<(), String> {
@@ -337,7 +344,11 @@ pub fn restore() -> Result<(), String> {
     {
         windows::restore()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        super::endpoint_macos::restore()
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         Ok(())
     }

@@ -141,35 +141,36 @@ pub fn classify(candidate: &[IpAddr], reference: &[IpAddr], proxy: &[IpAddr]) ->
 /// TLS-ok IPv4s, fastest first. TCP-open is not enough: a proxy can accept
 /// SYN and still RST or stall the handshake.
 pub fn rank_tls_v4(addrs: &[IpAddr], sni: &str) -> Vec<(Ipv4Addr, u128)> {
+    rank_tls_v4_report(addrs, sni).0
+}
+
+/// Verified addresses sorted by latency, plus the probe error of every
+/// address that failed. The errors explain an empty result to the user.
+pub fn rank_tls_v4_report(addrs: &[IpAddr], sni: &str) -> (Vec<(Ipv4Addr, u128)>, Vec<String>) {
     let candidates: Vec<IpAddr> = addrs.iter().copied().filter(|a| a.is_ipv4()).collect();
     if candidates.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let (tx, rx) = mpsc::channel();
     for addr in candidates {
         let sni = sni.to_string();
         let tx = tx.clone();
         thread::spawn(move || {
-            let _ = tx.send((addr, verified_latency(SocketAddr::new(addr, 443), &sni)));
+            let _ = tx.send((addr, super::health::probe_ip(SocketAddr::new(addr, 443), &sni)));
         });
     }
     drop(tx);
     let mut out = Vec::new();
-    while let Ok((addr, ms)) = rx.recv() {
-        let Some(ms) = ms else {
-            continue;
-        };
-        let IpAddr::V4(v4) = addr else {
-            continue;
-        };
-        out.push((v4, ms));
+    let mut errors = Vec::new();
+    while let Ok((addr, result)) = rx.recv() {
+        match (addr, result) {
+            (IpAddr::V4(v4), Ok(ms)) => out.push((v4, ms)),
+            (_, Err(error)) => errors.push(error),
+            _ => {}
+        }
     }
     out.sort_by_key(|(_, ms)| *ms);
-    out
-}
-
-fn verified_latency(addr: SocketAddr, sni: &str) -> Option<u128> {
-    super::health::probe_ip(addr, sni).ok()
+    (out, errors)
 }
 
 fn is_alive(addr: IpAddr) -> bool {
@@ -772,14 +773,14 @@ mod tests {
                 let _ = stream.read(&mut [0; 4096]);
                 let _ = stream.write_all(reply);
             });
-            assert!(verified_latency(addr, "localhost").is_none());
+            assert!(super::super::health::probe_ip(addr, "localhost").is_err());
             server.join().unwrap();
         }
         let (addr, server) = super::super::health::tests::server(
             b"HTTP/1.1 200 OK\r\n\r\n".to_vec(),
             Duration::ZERO,
         );
-        assert!(verified_latency(addr, "localhost").is_none());
+        assert!(super::super::health::probe_ip(addr, "localhost").is_err());
         server.join().unwrap();
     }
 

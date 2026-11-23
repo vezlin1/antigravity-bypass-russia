@@ -309,6 +309,7 @@ mod tests {
         let plan = inventory.plan(&desired);
         let coverage = compatibility_coverage(&plan, &[], false);
         assert_eq!(coverage.agent_hosts, ["daily-cloudcode-pa.googleapis.com"]);
+        assert!(!coverage.browser_rules_effective);
         assert!(coverage
             .notes
             .iter()
@@ -444,12 +445,20 @@ pub struct NetworkSetup {
     pub local_relay_running: bool,
     pub hosts_fallback: bool,
     pub system_routes: bool,
-    pub compatibility_notes: Vec<String>,
+    pub browser_dns_confirmed: bool,
+    /// The regular Cloud Code endpoint failed verification; clients must use daily.
+    pub primary_skipped: bool,
+}
+
+pub enum SetupProgress<'a> {
+    Working(&'a str),
+    Detail(&'a str),
 }
 
 #[cfg(any(windows, test))]
 struct CompatibilityCoverage {
     agent_hosts: Vec<String>,
+    browser_rules_effective: bool,
     notes: Vec<String>,
 }
 
@@ -517,7 +526,11 @@ fn compatibility_coverage(
     for issue in issues {
         notes.push(format!("DNS {}: {}", issue.namespace, issue.reason));
     }
-    CompatibilityCoverage { agent_hosts, notes }
+    CompatibilityCoverage {
+        agent_hosts,
+        browser_rules_effective: optional.is_empty(),
+        notes,
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -580,27 +593,27 @@ fn try_lock_configuration_file(
     }
 }
 
-pub fn apply_dns_rules() -> Result<NetworkSetup, String> {
+pub fn apply_dns_rules(
+    progress: &mut dyn FnMut(SetupProgress<'_>),
+) -> Result<NetworkSetup, String> {
     #[cfg(windows)]
     let policy = RoutePolicy::System;
     #[cfg(not(windows))]
     let policy = RoutePolicy::Physical;
-    apply_dns_rules_with(policy)
+    apply_dns_rules_with(policy, progress)
 }
 
-fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
-    fn step(msg: &str) {
-        println!("  \x1b[90m… {}\x1b[0m", msg);
-        let _ = std::io::Write::flush(&mut std::io::stdout());
-    }
-
+fn apply_dns_rules_with(
+    policy: RoutePolicy,
+    progress: &mut dyn FnMut(SetupProgress<'_>),
+) -> Result<NetworkSetup, String> {
+    use SetupProgress::{Detail, Working};
+    progress(Working("Проверяем настройки сети"));
     preflight()?;
     let _configuration = configuration_lock()?;
-    step("Подготавливаем подключение");
     // Reconfigure owned rules in place. Removing the working service/hosts/DNS
     // before discovery left users disconnected whenever all probes failed.
 
-    step("Проверяем настройки сети");
     // Read before changing routes/service; unreadable rules are not evidence
     // that DNS is safe to overwrite. Re-read before applying the final plan.
     #[cfg(windows)]
@@ -614,7 +627,7 @@ fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
     #[cfg(not(windows))]
     let hosts_fallback = false;
 
-    step("Определяем подключение к интернету");
+    progress(Working("Определяем подключение к интернету"));
     let egress = match policy {
         RoutePolicy::Physical => crate::net::egress::detect(),
         #[cfg(windows)]
@@ -628,16 +641,24 @@ fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
         return Err("Не найден физический выход в интернет; проверка через VPN отменена".into());
     }
 
-    step("Выбираем подходящее подключение");
+    progress(Detail("Подбор маршрута · проверяем DNS и TLS/HTTP"));
+    progress(Working("Подготавливаем маршруты для проверки"));
     let mut update = None;
     let staged = routes::with_probe_routes(policy, |prepare_routes| {
         // DNS probes and the running relay use the same route policy.
         prepare_routes(&[])?;
         #[cfg(windows)]
         thread::sleep(Duration::from_millis(400));
-        let ranked = rank::discover_agent(if_index, policy, prepare_routes)?;
-        let skip_primary =
-            rank::check_agent_routes(&ranked, crate::core::endpoint::daily_configured)?;
+        let discovery = rank::discover_agent(if_index, policy, prepare_routes, progress)?;
+        // Every caller switches client endpoints to daily right after this
+        // setup, so the regular endpoint is optional wherever that switch
+        // covers all discovered clients.
+        let skip_primary = rank::check_agent_routes(
+            &discovery.ranked,
+            &discovery.failures,
+            crate::core::endpoint::primary_optional(),
+        )?;
+        let ranked = discovery.ranked;
 
         let update = update.insert(relay_update::RelayUpdate::capture()?);
         config::prepare_service()?;
@@ -649,7 +670,7 @@ fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
         relay::save_route_policy(policy)?;
         relay::save_upstream_config(&udp_ips)?;
 
-        step("Запускаем DNS-релей");
+        progress(Working("Запускаем и проверяем DNS-релей"));
         let mut browser_missing = Vec::new();
         let startup = update.start().and_then(|()| {
             if !wait_for_ready(Duration::from_secs(4), relay_ready) {
@@ -686,7 +707,7 @@ fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
         relay_update::finish_staging(staged, || update.map_or(Ok(()), |update| update.rollback()))?;
     if skip_primary {
         compatibility_notes.push(format!(
-            "{PRIMARY_CLOUD_CODE}: закрепление пропущено. В настройках клиента подтверждён daily"
+            "{PRIMARY_CLOUD_CODE}: недоступен из этой сети, клиенты переключаются на daily"
         ));
     }
 
@@ -697,7 +718,7 @@ fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
         .collect();
     let mut studio_subs: Vec<String> = Vec::new();
     if !udp_ips.is_empty() {
-        step("Проверяем доступные серверы");
+        progress(Working("Проверяем резервные DNS-серверы"));
         for (name, subs) in &mut agent_rules {
             let host = name.trim_start_matches('.');
             *subs = resolvers::substituting_addrs(host, if_index);
@@ -740,6 +761,7 @@ fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
         sub_notes.push(note);
     }
     let relay_ok = relay_error.is_none();
+    let browser_dns_confirmed = relay_ok && browser_missing.is_empty();
     let relay_note = relay_error.unwrap_or_default();
     if !browser_missing.is_empty() {
         compatibility_notes.push(format!(
@@ -780,8 +802,8 @@ fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
     // later may intercept loopback DNS even while the relay remains healthy.
 
     #[cfg(target_os = "windows")]
-    {
-        step("Сохраняем настройки подключения");
+    let browser_dns_confirmed = {
+        progress(Working("Сохраняем настройки подключения"));
         let plan = nrpt::apply_compatible_rules(&plan, NRPT_TAG, "Antigravity DNS")?;
         let latest_inventory = nrpt::inventory()?;
         // Foreign split-DNS often relies on system DoH policy. Hosts provides
@@ -814,7 +836,7 @@ fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
         hosts_fallback = !coverage.agent_hosts.is_empty();
         flush_dns_cache()?;
         if hosts_fallback {
-            step("Проверяем подключение Antigravity через hosts");
+            progress(Working("Проверяем запасное подключение через hosts"));
             compatibility::verify_agent_pins(&coverage.agent_hosts, &ranked)?;
             compatibility_notes.push(format!(
                 "Antigravity: проверен резервный путь через hosts для {}",
@@ -822,7 +844,8 @@ fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
             ));
         }
         compatibility_notes.extend(coverage.notes);
-    }
+        browser_dns_confirmed && coverage.browser_rules_effective
+    };
 
     #[cfg(target_os = "macos")]
     {
@@ -859,7 +882,8 @@ fn apply_dns_rules_with(policy: RoutePolicy) -> Result<NetworkSetup, String> {
         local_relay_running: relay_ok,
         hosts_fallback,
         system_routes: policy != RoutePolicy::Physical,
-        compatibility_notes,
+        browser_dns_confirmed,
+        primary_skipped: skip_primary,
     })
 }
 

@@ -23,11 +23,104 @@ pub struct RankedHost {
     pub ips: Vec<(Ipv4Addr, u128)>,
 }
 
+/// The furthest stage reached by any candidate of a host that failed
+/// verification. Declaration order is the order of the stages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum FailureStage {
+    NoAddresses,
+    Tcp,
+    Tls,
+    Certificate,
+    Http,
+}
+
+impl FailureStage {
+    fn classify(error: &str) -> Self {
+        if let Some(detail) = error.strip_prefix("TLS/certificate:") {
+            let detail = detail.to_lowercase();
+            let certificate = [
+                "certif", "trust", "verify", "issuer", "self signed", "self-signed", "сертифик",
+                "довер",
+            ]
+            .iter()
+            .any(|word| detail.contains(word));
+            if certificate {
+                Self::Certificate
+            } else {
+                Self::Tls
+            }
+        } else if error.starts_with("TLS") {
+            Self::Tls
+        } else if error.starts_with("HTTP") {
+            Self::Http
+        } else {
+            Self::Tcp
+        }
+    }
+
+    fn furthest(errors: &[String]) -> Self {
+        errors
+            .iter()
+            .map(|error| Self::classify(error))
+            .max()
+            .unwrap_or(Self::NoAddresses)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::NoAddresses => "DNS не вернул адресов",
+            Self::Tcp => "нет TCP-подключения",
+            Self::Tls => "обрыв TLS",
+            Self::Certificate => "сертификат не прошёл проверку",
+            Self::Http => "сервер отвечает ошибкой HTTP 5xx",
+        }
+    }
+
+    fn advice(self) -> &'static str {
+        match self {
+            Self::NoAddresses => {
+                "Проверьте подключение к интернету и повторите. Если не поможет, добавьте другой DNS-провайдер в network.json"
+            }
+            Self::Tcp => {
+                "Проверьте, не блокируют ли подключение файрвол, антивирус или VPN с Kill Switch, и повторите через несколько минут"
+            }
+            Self::Tls => {
+                "Похоже на блокировку по имени сайта у интернет-провайдера. Повторите позже, попробуйте другую сеть (например, мобильный интернет) или VPN с обфускацией трафика"
+            }
+            Self::Certificate => {
+                "Если антивирус проверяет HTTPS-трафик, отключите эту проверку или добавьте исключение для *.googleapis.com"
+            }
+            Self::Http => "Релей временно перегружен. Повторите через несколько минут",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct HostFailure {
+    pub host: String,
+    pub attempted: usize,
+    pub stage: FailureStage,
+}
+
+pub(super) struct Discovery {
+    pub ranked: Vec<RankedHost>,
+    pub failures: Vec<HostFailure>,
+}
+
 pub fn rank_path() -> PathBuf {
     relay::log_dir().join("proxy_rank.conf")
 }
 
-fn geohide_proxy_seeds(pool: &[Provider]) -> &'static [&'static str] {
+#[cfg(windows)]
+pub(super) fn saved_addresses(host: &str) -> Vec<Ipv4Addr> {
+    load()
+        .into_iter()
+        .find(|entry| entry.host == host)
+        .map(|entry| entry.ips.into_iter().map(|(address, _)| address).collect())
+        .unwrap_or_default()
+}
+
+pub(super) fn geohide_proxy_seeds(pool: &[Provider]) -> &'static [&'static str] {
     if pool.iter().any(
         |provider| matches!(&provider.transport, Transport::Doh(doh) if doh.url == GEOHIDE_EU_DOH),
     ) {
@@ -41,13 +134,20 @@ pub(super) fn discover_agent(
     if_index: u32,
     policy: routes::RoutePolicy,
     prepare_routes: &mut dyn FnMut(&[Ipv4Addr]) -> Result<(), String>,
-) -> Result<Vec<RankedHost>, String> {
+    progress: &mut dyn FnMut(super::SetupProgress<'_>),
+) -> Result<Discovery, String> {
+    use super::SetupProgress::{Detail, Working};
     let previous = load();
     let geohide_seeds = geohide_proxy_seeds(&resolver_pool::load()?);
     let mut host_candidates = Vec::new();
     let mut addresses = std::collections::BTreeSet::new();
-    for name in NRPT_AGENT {
+    for (index, name) in NRPT_AGENT.iter().enumerate() {
         let host = name.trim_start_matches('.').to_string();
+        progress(Working(&format!(
+            "DNS {}/{} · {host}",
+            index + 1,
+            NRPT_AGENT.len()
+        )));
         let mut candidates = resolvers::candidate_addrs(&host, if_index)?;
         if let Some(old) = previous.iter().find(|h| h.host == host) {
             for (ip, _) in &old.ips {
@@ -81,25 +181,58 @@ pub(super) fn discover_agent(
 
     // The same relay often serves several names. Inspect its OS route once
     // before probing TLS separately with each host's SNI.
+    progress(Working("Проверяем системные маршруты до найденных адресов"));
     prepare_routes(&addresses.into_iter().collect::<Vec<_>>())?;
     let mut ranked = Vec::new();
-    for (host, candidates) in host_candidates {
-        let mut ips = resolvers::rank_tls_v4(&candidates, &host);
+    let mut failures = Vec::new();
+    for (index, (host, candidates)) in host_candidates.into_iter().enumerate() {
+        progress(Working(&format!(
+            "TLS/HTTP {}/{} · {host}",
+            index + 1,
+            NRPT_AGENT.len()
+        )));
+        let attempted = candidates.len();
+        #[allow(unused_mut)]
+        let (mut ips, mut errors) = resolvers::rank_tls_v4_report(&candidates, &host);
         #[cfg(windows)]
-        if ips.is_empty() && policy == routes::RoutePolicy::System {
-            ips = resolvers::rank_tls_v4(&system_addresses(&host), &host);
-        }
+        let attempted = if ips.is_empty() && policy == routes::RoutePolicy::System {
+            progress(Working(&format!("Системный DNS · {host}")));
+            let native = system_addresses(&host);
+            progress(Working(&format!("Проверяем системные адреса · {host}")));
+            let (native_ips, native_errors) = resolvers::rank_tls_v4_report(&native, &host);
+            ips = native_ips;
+            errors.extend(native_errors);
+            attempted + native.len()
+        } else {
+            attempted
+        };
         #[cfg(not(windows))]
         let _ = policy;
-        if ips.is_empty() {
+        let Some((_, fastest)) = ips.first() else {
+            let stage = FailureStage::furthest(&errors);
+            progress(Detail(&format!(
+                "– {host} · проверено {attempted}, подходящих адресов нет ({})",
+                stage.label()
+            )));
+            failures.push(HostFailure {
+                host,
+                attempted,
+                stage,
+            });
             continue;
-        }
+        };
+        progress(Detail(&format!(
+            "✓ {host} · прошли {}/{} · лучший {} мс",
+            ips.len(),
+            attempted,
+            fastest
+        )));
         if ips.len() > MAX_FALLBACKS {
             ips.truncate(MAX_FALLBACKS);
         }
         ranked.push(RankedHost { host, ips });
     }
-    Ok(ranked)
+    Ok(Discovery { ranked, failures })
 }
 
 #[cfg(windows)]
@@ -228,9 +361,14 @@ pub(super) fn apply_ranked(
 // An incomplete scan must never replace a previously working hosts block or
 // ranking. In particular, a reachable native endpoint cannot stand in for the
 // daily endpoint that is configured in the application.
+//
+// The regular Cloud Code endpoint may be missing when `primary_optional`: the
+// caller switches every client that would use it to daily right after setup.
+// Returns whether the regular endpoint is skipped.
 pub(super) fn check_agent_routes(
     ranked: &[RankedHost],
-    daily_configured: impl FnOnce() -> bool,
+    failures: &[HostFailure],
+    primary_optional: bool,
 ) -> Result<bool, String> {
     let missing: Vec<_> = NRPT_AGENT
         .iter()
@@ -245,23 +383,47 @@ pub(super) fn check_agent_routes(
     if missing.is_empty() {
         return Ok(false);
     }
-    if missing == [PRIMARY_CLOUD_CODE]
+    let only_primary_absent = missing == [PRIMARY_CLOUD_CODE]
         && !ranked
             .iter()
-            .any(|row| super::route_health::host_name(&row.host) == PRIMARY_CLOUD_CODE)
-    {
-        return if daily_configured() {
-            Ok(true)
-        } else {
-            Err(format!(
-                "Нет проверенного маршрута для {PRIMARY_CLOUD_CODE}. Настройки daily для закрытых клиентов не подтверждены. Прежние hosts и рейтинг сохранены"
-            ))
-        };
+            .any(|row| super::route_health::host_name(&row.host) == PRIMARY_CLOUD_CODE);
+    if only_primary_absent && primary_optional {
+        return Ok(true);
     }
-    Err(format!(
-        "Нет однозначного проверенного маршрута для {}; прежние hosts и рейтинг сохранены",
-        missing.join(", ")
-    ))
+    let mut error = route_failure_message(&missing, failures);
+    if only_primary_absent {
+        error.push_str(
+            ". Daily доступен, но найденные Antigravity App или CLI на этой системе не переключаются на него автоматически",
+        );
+    }
+    error.push_str(". Прежние hosts и рейтинг сохранены");
+    Err(error)
+}
+
+fn route_failure_message(missing: &[&str], failures: &[HostFailure]) -> String {
+    let mut reasons = Vec::new();
+    let mut advice: Vec<&str> = Vec::new();
+    for host in missing {
+        match failures.iter().find(|failure| failure.host == *host) {
+            Some(failure) => {
+                reasons.push(format!(
+                    "{host} — {} (проверено адресов: {})",
+                    failure.stage.label(),
+                    failure.attempted
+                ));
+                if !advice.contains(&failure.stage.advice()) {
+                    advice.push(failure.stage.advice());
+                }
+            }
+            None => reasons.push(format!("{host} — нет однозначного проверенного маршрута")),
+        }
+    }
+    let mut message = format!("Не удалось подобрать маршрут: {}", reasons.join("; "));
+    for line in advice {
+        message.push_str(". ");
+        message.push_str(line);
+    }
+    message
 }
 
 fn apply_complete_ranking(
@@ -269,7 +431,7 @@ fn apply_complete_ranking(
     skip_primary: bool,
     apply: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
-    check_agent_routes(ranked, || skip_primary)?;
+    check_agent_routes(ranked, &[], skip_primary)?;
     apply()
 }
 
@@ -440,12 +602,12 @@ mod tests {
         for index in 0..ranked.len() {
             let mut empty = ranked.clone();
             empty[index].ips.clear();
-            assert!(check_agent_routes(&empty, || true).is_err());
+            assert!(check_agent_routes(&empty, &[], true).is_err());
             let mut duplicate = ranked.clone();
             duplicate.push(ranked[index].clone());
-            assert!(check_agent_routes(&duplicate, || true).is_err());
+            assert!(check_agent_routes(&duplicate, &[], true).is_err());
         }
-        assert!(check_agent_routes(&[], || true).is_err());
+        assert!(check_agent_routes(&[], &[], true).is_err());
         let mut applied = false;
         apply_complete_ranking(&ranked, false, || {
             applied = true;
@@ -456,13 +618,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_primary_route_is_accepted_only_after_daily_configuration_is_confirmed() {
+    fn missing_primary_route_is_skipped_only_when_clients_can_switch_to_daily() {
         let mut ranked = complete_ranking();
         ranked.retain(|row| row.host != PRIMARY_CLOUD_CODE);
-        assert!(check_agent_routes(&ranked, || false)
-            .unwrap_err()
-            .contains(PRIMARY_CLOUD_CODE));
-        let skip_primary = check_agent_routes(&ranked, || true).unwrap();
+        let error = check_agent_routes(&ranked, &[], false).unwrap_err();
+        assert!(error.contains(PRIMARY_CLOUD_CODE), "{error}");
+        assert!(error.contains("Daily доступен"), "{error}");
+        let skip_primary = check_agent_routes(&ranked, &[], true).unwrap();
         assert!(skip_primary);
         let mut applied = false;
         apply_complete_ranking(&ranked, skip_primary, || {
@@ -471,6 +633,54 @@ mod tests {
         })
         .unwrap();
         assert!(applied);
+    }
+
+    #[test]
+    fn probe_errors_are_classified_by_the_furthest_stage_reached() {
+        use FailureStage::*;
+        for (error, stage) in [
+            ("TCP: connection timed out", Tcp),
+            ("TCP/TLS/HTTP: общий срок проверки истёк", Tcp),
+            ("TLS: общий срок проверки истёк", Tls),
+            ("TLS/certificate: connection reset by peer (os error 10054)", Tls),
+            ("TLS/certificate: certificate verify failed", Certificate),
+            (
+                "TLS/certificate: Цепочка сертификатов выпущена центром, не имеющим доверия",
+                Certificate,
+            ),
+            ("HTTP 502", Http),
+            ("HTTP header: EOF", Http),
+        ] {
+            assert_eq!(FailureStage::classify(error), stage, "{error}");
+        }
+        assert_eq!(FailureStage::furthest(&[]), NoAddresses);
+        let mixed = ["TCP: timed out".to_string(), "TLS: общий срок проверки истёк".into()];
+        assert_eq!(FailureStage::furthest(&mixed), Tls);
+    }
+
+    #[test]
+    fn route_errors_explain_each_failed_host_and_give_advice_once() {
+        let mut ranked = complete_ranking();
+        let daily = super::super::provider::DAILY_CLOUD_CODE;
+        ranked.retain(|row| row.host != PRIMARY_CLOUD_CODE && row.host != daily);
+        let failures = [
+            HostFailure {
+                host: PRIMARY_CLOUD_CODE.into(),
+                attempted: 7,
+                stage: FailureStage::Tls,
+            },
+            HostFailure {
+                host: daily.into(),
+                attempted: 5,
+                stage: FailureStage::Tls,
+            },
+        ];
+        let error = check_agent_routes(&ranked, &failures, true).unwrap_err();
+        assert!(error.contains(&format!("{PRIMARY_CLOUD_CODE} — обрыв TLS (проверено адресов: 7)")));
+        assert!(error.contains(&format!("{daily} — обрыв TLS (проверено адресов: 5)")));
+        assert_eq!(error.matches(FailureStage::Tls.advice()).count(), 1, "{error}");
+        assert!(!error.contains("Daily доступен"), "{error}");
+        assert!(error.ends_with("Прежние hosts и рейтинг сохранены"), "{error}");
     }
 
     #[test]

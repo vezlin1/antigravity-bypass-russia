@@ -34,7 +34,7 @@ pub(crate) fn is_agy_cli_name(name: &str) -> bool {
             .is_none_or(|extension| extension == "exe"))
 }
 
-const CLI_NAMES: [&str; 6] = [
+pub(super) const CLI_NAMES: [&str; 6] = [
     "agy.exe",
     "agy",
     "antigravity-cli.exe",
@@ -147,6 +147,12 @@ pub fn find_installations() -> Vec<PathBuf> {
             let p = expand_env_vars(c);
             if p.exists() && p.is_dir() && !is_already_contained(&installs, &p) {
                 installs.push(p);
+            }
+        }
+
+        for path in super::windows_installations::find() {
+            if !is_already_contained(&installs, &path) {
+                installs.push(path);
             }
         }
 
@@ -593,7 +599,7 @@ fn regular_file_under(root: &Path, path: &Path) -> bool {
     regular_file(path)
 }
 
-fn native_cli(path: &Path, name: &str) -> bool {
+pub(super) fn native_cli(path: &Path, name: &str) -> bool {
     if !is_agy_cli_name(name) || !regular_file(path) || !native_executable(path) {
         return false;
     }

@@ -14,8 +14,11 @@ const MAX_HEADER: usize = 8192;
 const MAX_CONNECTIONS: usize = 48;
 const HEADER_TIMEOUT: Duration = Duration::from_secs(3);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(7);
+const RANKED_PROBE_BUDGET: Duration = Duration::from_millis(2400);
 const CONNECT_BUDGET: Duration = Duration::from_millis(900);
 const DNS_RECHECK: Duration = Duration::from_secs(1);
+const VERIFIED_TTL: Duration = Duration::from_secs(60);
+const VERIFIED_LIMIT: usize = 64;
 const ENABLED_VALUE: &[u8] = b"connect-v1\n";
 
 fn activation_path() -> std::path::PathBuf {
@@ -40,7 +43,11 @@ pub fn disable() -> Result<(), String> {
 }
 
 pub fn fallback_available() -> bool {
-    egress::windows_vpn_route().is_some() && matches!(relay::local_dns_available(), Ok(false))
+    vpn_present() && matches!(relay::local_dns_available(), Ok(false))
+}
+
+pub fn vpn_present() -> bool {
+    egress::windows_vpn_route().is_some()
 }
 
 pub fn verify_fallback(host: &str) -> Result<(), String> {
@@ -83,10 +90,18 @@ fn parse_request(line: &str) -> Option<Request> {
     Some(Request::Connect(host.to_ascii_lowercase()))
 }
 
+fn matches_domain(host: &str, rule: &str) -> bool {
+    host == rule.trim_start_matches('.') || (rule.starts_with('.') && host.ends_with(rule))
+}
+
+fn browser_destination(host: &str) -> bool {
+    provider::NRPT_STUDIO
+        .iter()
+        .any(|rule| matches_domain(host, rule))
+}
+
 fn ai_destination(host: &str) -> bool {
-    provider::nrpt_domains().into_iter().any(|rule| {
-        host == rule.trim_start_matches('.') || (rule.starts_with('.') && host.ends_with(rule))
-    })
+    provider::NRPT_AGENT.contains(&host) || browser_destination(host)
 }
 
 fn pac(port: u16) -> String {
@@ -131,27 +146,32 @@ struct DnsRoute {
 }
 
 impl DnsRoute {
-    fn update(&mut self, dns_blocked: Option<bool>, vpn_present: bool) -> bool {
+    fn update(&mut self, dns_blocked: Option<bool>, vpn_present: bool, browser: bool) -> bool {
         // During a tunnel reconnect, keep waiting for the guarded path while
         // local DNS is still blocked. A healthy DNS probe returns to Windows.
-        if let Some(blocked) = dns_blocked {
+        if browser && vpn_present {
+            self.using_vpn_fallback = true;
+        } else if let Some(blocked) = dns_blocked {
             self.using_vpn_fallback = blocked && (vpn_present || self.using_vpn_fallback);
         }
         self.using_vpn_fallback
     }
 
-    fn vpn_needed(&mut self) -> bool {
+    fn vpn_needed(&mut self, browser: bool) -> bool {
         if let Some((checked, vpn_only)) = self.cached {
             if checked.elapsed() < DNS_RECHECK {
                 return vpn_only;
             }
         }
-        let vpn_only = self.update(
+        let vpn = vpn_present();
+        let dns_blocked = if browser && vpn {
+            None
+        } else {
             relay::local_dns_available()
                 .ok()
-                .map(|available| !available),
-            egress::windows_vpn_route().is_some(),
-        );
+                .map(|available| !available)
+        };
+        let vpn_only = self.update(dns_blocked, vpn, browser);
         self.cached = Some((Instant::now(), vpn_only));
         vpn_only
     }
@@ -213,13 +233,122 @@ fn connect_through_tunnel(
     Ok(socket.into())
 }
 
+type VerifiedKey = (Ipv4Addr, String, u32);
+
+/// Addresses that recently passed the TLS/HTTP probe for a host through a
+/// particular tunnel. A browser page opens many connections; probing each one
+/// doubles the handshakes and page requests seen by Google.
+struct VerifiedRoutes {
+    entries: Vec<(VerifiedKey, Instant)>,
+}
+
+impl VerifiedRoutes {
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        self.entries
+            .retain(|(_, verified)| now.saturating_duration_since(*verified) < VERIFIED_TTL);
+    }
+
+    fn fresh(&mut self, key: &VerifiedKey, now: Instant) -> bool {
+        self.prune(now);
+        self.entries.iter().any(|(entry, _)| entry == key)
+    }
+
+    fn record(&mut self, key: VerifiedKey, now: Instant) {
+        self.prune(now);
+        self.entries.retain(|(entry, _)| *entry != key);
+        if self.entries.len() >= VERIFIED_LIMIT {
+            self.entries.remove(0);
+        }
+        self.entries.push((key, now));
+    }
+
+    fn forget(&mut self, key: &VerifiedKey) {
+        self.entries.retain(|(entry, _)| entry != key);
+    }
+}
+
+static VERIFIED: Mutex<VerifiedRoutes> = Mutex::new(VerifiedRoutes::new());
+
+fn verified_routes() -> std::sync::MutexGuard<'static, VerifiedRoutes> {
+    VERIFIED.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn verify_then_connect(
+    address: Ipv4Addr,
+    host: &str,
+    tunnel: u32,
+    deadline: Instant,
+) -> Option<TcpStream> {
+    let key = (address, host.to_owned(), tunnel);
+    if verified_routes().fresh(&key, Instant::now()) {
+        let stream = connect_through_tunnel(address, tunnel, deadline).ok();
+        if stream.is_none() {
+            verified_routes().forget(&key);
+        }
+        return stream;
+    }
+    let probe = connect_through_tunnel(address, tunnel, deadline).ok()?;
+    let probe_deadline = deadline.min(Instant::now() + Duration::from_millis(1500));
+    match provider::BROWSER_PAGES
+        .iter()
+        .find(|(page, _)| *page == host)
+    {
+        Some((_, path)) => {
+            super::health::probe_browser_connected(probe, host, path, probe_deadline).ok()?
+        }
+        None => {
+            super::health::probe_connected(probe, host, probe_deadline).ok()?;
+        }
+    }
+    verified_routes().record(key, Instant::now());
+    connect_through_tunnel(address, tunnel, deadline).ok()
+}
+
 fn dial_vpn(host: &str) -> Result<TcpStream, String> {
     let tunnel =
         egress::windows_vpn_route().ok_or("Нет подтверждённого системного маршрута VPN")?;
+    // Setup already found these addresses through the system route. They still
+    // need a fresh TLS probe bound to the current tunnel before use.
+    let ranked_deadline = Instant::now() + RANKED_PROBE_BUDGET;
+    if let Some(stream) = super::rank::saved_addresses(host)
+        .into_iter()
+        .filter(|ip| public_address(IpAddr::V4(*ip)))
+        .find_map(|ip| verify_then_connect(ip, host, tunnel, ranked_deadline))
+    {
+        return Ok(stream);
+    }
+
+    let pool = resolver_pool::load()?;
+    if browser_destination(host) {
+        // Only try frontends belonging to the configured provider. Prefer its
+        // addresses verified during setup, and probe the browser hostname anew.
+        let seeds: Vec<Ipv4Addr> = super::rank::geohide_proxy_seeds(&pool)
+            .iter()
+            .filter_map(|seed| seed.parse().ok())
+            .collect();
+        let deadline = Instant::now() + RANKED_PROBE_BUDGET;
+        let mut tried = std::collections::HashSet::new();
+        if let Some(stream) = super::rank::saved_addresses(provider::DAILY_CLOUD_CODE)
+            .into_iter()
+            .filter(|address| seeds.contains(address))
+            .chain(seeds.iter().copied())
+            .filter(|address| tried.insert(*address))
+            .find_map(|address| verify_then_connect(address, host, tunnel, deadline))
+        {
+            return Ok(stream);
+        }
+    }
+
     let deadline = Instant::now() + DIAL_TIMEOUT;
     let packet = client::build_query(host, 0xa641);
     let mut tried = std::collections::HashSet::new();
-    for provider in resolver_pool::load()? {
+    for provider in pool {
         let resolver_pool::Transport::Doh(doh) = &provider.transport else {
             continue;
         };
@@ -238,16 +367,12 @@ fn dial_vpn(host: &str) -> Result<TcpStream, String> {
                 IpAddr::V4(address) => Some(address),
                 IpAddr::V6(_) => None,
             });
-        for address in candidates.filter(|ip| tried.insert(*ip)).take(6) {
-            let Ok(probe) = connect_through_tunnel(address, tunnel, deadline) else {
-                continue;
-            };
-            let probe_deadline = deadline.min(Instant::now() + Duration::from_millis(1500));
-            if super::health::probe_connected(probe, host, probe_deadline).is_ok() {
-                if let Ok(upstream) = connect_through_tunnel(address, tunnel, deadline) {
-                    return Ok(upstream);
-                }
-            }
+        if let Some(stream) = candidates
+            .filter(|ip| tried.insert(*ip))
+            .take(6)
+            .find_map(|ip| verify_then_connect(ip, host, tunnel, deadline))
+        {
+            return Ok(stream);
         }
     }
     Err("Проверенное назначение через VPN недоступно".into())
@@ -284,20 +409,18 @@ fn forward(mut client: TcpStream, mut upstream: TcpStream, first: &[u8]) -> io::
     client.set_read_timeout(None)?;
     let _ = client.set_nodelay(true);
     let _ = upstream.set_nodelay(true);
-    let mut request = client.try_clone()?;
-    let mut remote = upstream.try_clone()?;
     client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
     upstream.write_all(first)?;
     std::thread::scope(|scope| {
-        scope.spawn(move || {
-            let result = io::copy(&mut request, &mut remote);
-            let _ = remote.shutdown(if result.is_ok() {
+        scope.spawn(|| {
+            let result = io::copy(&mut &client, &mut &upstream);
+            let _ = upstream.shutdown(if result.is_ok() {
                 Shutdown::Write
             } else {
                 Shutdown::Both
             });
         });
-        let result = io::copy(&mut upstream, &mut client);
+        let result = io::copy(&mut &upstream, &mut &client);
         let _ = client.shutdown(if result.is_ok() {
             Shutdown::Write
         } else {
@@ -326,7 +449,7 @@ fn handle(mut stream: TcpStream, port: u16, dial: &Dial<'_>) -> io::Result<()> {
     }
 }
 
-pub fn listen() -> io::Result<u16> {
+pub fn listen(browser: bool) -> io::Result<u16> {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let port = listener.local_addr()?.port();
     let dns = Arc::new(Mutex::new(DnsRoute::default()));
@@ -351,10 +474,12 @@ pub fn listen() -> io::Result<u16> {
                         let dial = |host: &str| {
                             let blocked = enabled()
                                 && ai_destination(host)
-                                && dns.lock().is_ok_and(|mut state| state.vpn_needed());
+                                && dns.lock().is_ok_and(|mut state| state.vpn_needed(browser));
                             dial_destination(host, blocked, &dial_system, &dial_vpn)
                         };
-                        let _ = handle(stream, port, &dial);
+                        if let Err(error) = handle(stream, port, &dial) {
+                            relay::log_event(&format!("Локальный CONNECT: {error}"));
+                        }
                         workers.fetch_sub(1, Ordering::Relaxed);
                     })
                     .is_err()
@@ -370,6 +495,41 @@ pub fn listen() -> io::Result<u16> {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn verified_routes_expire_and_are_scoped_to_host_and_tunnel() {
+        let mut routes = VerifiedRoutes::new();
+        let start = Instant::now();
+        let address = Ipv4Addr::new(203, 0, 113, 7);
+        let key = (address, "gemini.google.com".to_owned(), 12);
+        routes.record(key.clone(), start);
+
+        assert!(routes.fresh(&key, start + Duration::from_secs(30)));
+        assert!(!routes.fresh(&(address, "aistudio.google.com".to_owned(), 12), start));
+        assert!(!routes.fresh(&(address, "gemini.google.com".to_owned(), 13), start));
+        assert!(!routes.fresh(&key, start + VERIFIED_TTL));
+        assert!(routes.entries.is_empty());
+
+        routes.record(key.clone(), start);
+        routes.forget(&key);
+        assert!(!routes.fresh(&key, start));
+    }
+
+    #[test]
+    fn verified_routes_stay_bounded_and_refresh_existing_entries() {
+        let mut routes = VerifiedRoutes::new();
+        let now = Instant::now();
+        let key = |index: usize| (Ipv4Addr::new(203, 0, 113, 1), format!("h{index}"), 1);
+        for index in 0..VERIFIED_LIMIT + 5 {
+            routes.record(key(index), now);
+        }
+        assert_eq!(routes.entries.len(), VERIFIED_LIMIT);
+        assert!(!routes.fresh(&key(0), now));
+        assert!(routes.fresh(&key(VERIFIED_LIMIT + 4), now));
+
+        routes.record(key(VERIFIED_LIMIT + 4), now);
+        assert_eq!(routes.entries.len(), VERIFIED_LIMIT);
+    }
 
     #[test]
     fn blocked_dns_cannot_fall_back_to_a_direct_ai_connection() {
@@ -390,13 +550,21 @@ mod tests {
     #[test]
     fn vpn_reconnect_keeps_the_guard_while_local_dns_is_blocked() {
         let mut route = DnsRoute::default();
-        assert!(!route.update(Some(true), false));
-        assert!(!route.update(Some(false), true));
-        assert!(route.update(Some(true), true));
-        assert!(route.update(Some(true), false));
-        assert!(route.update(None, false));
-        assert!(route.update(Some(true), true));
-        assert!(!route.update(Some(false), false));
+        assert!(!route.update(Some(true), false, false));
+        assert!(!route.update(Some(false), true, false));
+        assert!(route.update(Some(true), true, false));
+        assert!(route.update(Some(true), false, false));
+        assert!(route.update(None, false, false));
+        assert!(route.update(Some(true), true, false));
+        assert!(!route.update(Some(false), false, false));
+    }
+
+    #[test]
+    fn browser_uses_vpn_even_when_local_dns_answers() {
+        let mut route = DnsRoute::default();
+        assert!(route.update(Some(false), true, true));
+        assert!(route.update(Some(true), false, true));
+        assert!(!route.update(Some(false), false, true));
     }
 
     #[test]

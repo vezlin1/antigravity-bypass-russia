@@ -1,4 +1,81 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+enum ProgressLine {
+    Working(String),
+    Detail(String),
+}
+
+pub struct Progress(Option<(mpsc::Sender<ProgressLine>, thread::JoinHandle<()>)>);
+
+impl Progress {
+    pub fn new() -> Self {
+        Self(io::stdout().is_terminal().then(|| {
+            let (sender, lines) = mpsc::channel();
+            let worker = thread::spawn(move || animate_progress(lines));
+            (sender, worker)
+        }))
+    }
+
+    pub fn working(&self, text: &str) {
+        if let Some((worker, _)) = &self.0 {
+            let _ = worker.send(ProgressLine::Working(text.to_owned()));
+        } else {
+            println!("  … {text}");
+        }
+    }
+
+    pub fn detail(&self, text: &str) {
+        if let Some((worker, _)) = &self.0 {
+            let _ = worker.send(ProgressLine::Detail(text.to_owned()));
+        } else {
+            println!("    {text}");
+        }
+    }
+}
+
+impl Drop for Progress {
+    fn drop(&mut self) {
+        if let Some((sender, worker)) = self.0.take() {
+            drop(sender);
+            let _ = worker.join();
+        }
+    }
+}
+
+fn animate_progress(lines: mpsc::Receiver<ProgressLine>) {
+    const FRAMES: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
+    let mut current: Option<(String, Instant)> = None;
+    let tick = Duration::from_millis(100);
+    loop {
+        match lines.recv_timeout(tick) {
+            Ok(ProgressLine::Working(text)) => current = Some((text, Instant::now())),
+            Ok(ProgressLine::Detail(text)) => {
+                current = None;
+                println!("\r\x1b[2K    {text}");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if current.is_some() {
+                    print!("\r\x1b[2K");
+                    let _ = io::stdout().flush();
+                }
+                break;
+            }
+        }
+        if let Some((text, started)) = &current {
+            let elapsed = started.elapsed();
+            let frame = FRAMES[(elapsed.as_millis() / tick.as_millis()) as usize % FRAMES.len()];
+            print!(
+                "\r\x1b[2K  \x1b[96m{frame}\x1b[0m {text}  \x1b[90m{} с\x1b[0m",
+                elapsed.as_secs()
+            );
+            let _ = io::stdout().flush();
+        }
+    }
+}
 
 pub fn init_terminal() {
     #[cfg(target_os = "windows")]

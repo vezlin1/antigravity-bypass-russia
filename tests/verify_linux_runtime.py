@@ -169,10 +169,20 @@ if args.cli_fixture:
     run('patch-files',str(cli),success=False)
     assert hashlib.sha256(cli.read_bytes()).digest()==stock
     subprocess.run(['umount',lsof],check=True)
-    fake.write_text('#!/bin/sh\necho "lsof: WARNING: can\'t stat() fuse.portal file system /run/user/1000/doc" >&2\necho "    Output information may be incomplete." >&2\necho "lsof: WARNING: can\'t stat() fuse.gvfsd-fuse file system /run/user/1000/gvfs" >&2\necho "    Output information may be incomplete." >&2\nexec "'+str(real_lsof)+'" "$@"\n')
+    fake.write_text(
+        '#!/bin/sh\n'
+        'echo "lsof: WARNING: can\'t stat() fuse.portal file system /run/user/1000/doc" >&2\n'
+        'echo "    Output information may be incomplete." >&2\n'
+        'echo "lsof: WARNING: can\'t stat() fuse.portal file system /mnt/wslg/run/user/1000/doc" >&2\n'
+        'echo "    Output information may be incomplete." >&2\n'
+        'echo "lsof: WARNING: can\'t stat() fuse.gvfsd-fuse file system /run/user/1000/gvfs" >&2\n'
+        'echo "    Output information may be incomplete." >&2\n'
+        f'exec "{real_lsof}" "$@"\n'
+    )
     subprocess.run(['mount','--bind',str(fake),lsof],check=True)
     with cli.open('rb'):
-        run('patch-files',str(cli),success=False)
+        busy=run('patch-files',str(cli),success=False)
+        assert f'(PID {os.getpid()})' in busy.stdout + busy.stderr, busy
         assert hashlib.sha256(cli.read_bytes()).digest()==stock
     run('patch-files',str(cli))
     assert hashlib.sha256(cli.read_bytes()).digest()!=stock

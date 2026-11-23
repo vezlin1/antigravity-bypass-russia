@@ -32,7 +32,7 @@ fn command(args: &[&str]) -> Result<std::process::Output, String> {
     command.extend_from_slice(args);
     crate::system::command::output("launchctl", command).map_err(|e| e.to_string())
 }
-fn read() -> Result<Option<String>, String> {
+pub(super) fn read() -> Result<Option<String>, String> {
     let out = command(&["getenv", "CLOUD_CODE_URL"])?;
     if out.status.success() {
         return Ok(Some(String::from_utf8_lossy(&out.stdout).trim().into()));
@@ -42,7 +42,7 @@ fn read() -> Result<Option<String>, String> {
     }
     Err("Не удалось прочитать CLOUD_CODE_URL сессии GUI".into())
 }
-fn write(value: Option<&str>) -> Result<(), String> {
+pub(super) fn write(value: Option<&str>) -> Result<(), String> {
     let out = match value {
         Some(v) => command(&["setenv", "CLOUD_CODE_URL", v]),
         None => command(&["unsetenv", "CLOUD_CODE_URL"]),

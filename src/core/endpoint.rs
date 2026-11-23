@@ -6,91 +6,62 @@ use std::path::{Path, PathBuf};
 pub const DAILY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 pub const IDE_SETTING: &str = "jetski.cloudCodeUrl";
 
-/// Confirm the saved launch settings of the discovered clients. A running
-/// process can still be using its previous endpoint, especially after an
-/// environment change.
-pub fn daily_configured() -> bool {
+/// Whether setup may proceed without the regular Cloud Code endpoint because
+/// `apply_all` switches every discovered client to daily right afterwards.
+/// Windows and macOS switch App and CLI through `CLOUD_CODE_URL`. On Linux only
+/// IDE settings change, so App and CLI still need the regular endpoint there.
+pub fn primary_optional() -> bool {
     use super::detector::{find_asar_in_path, find_targets_in_path, TargetKind};
 
-    let inherited = std::env::var_os("CLOUD_CODE_URL");
-    if inherited
-        .as_deref()
-        .is_some_and(|value| value != DAILY_ENDPOINT)
-    {
-        return false;
+    if cfg!(any(windows, target_os = "macos")) {
+        return true;
     }
+    find_installations().iter().all(|install| {
+        let targets = find_targets_in_path(install);
+        find_asar_in_path(install).is_none()
+            && targets.iter().all(|target| target.kind != TargetKind::AgyCli)
+            && (targets.is_empty()
+                || targets
+                    .iter()
+                    .any(|target| target.kind == TargetKind::IdeMainJs))
+    })
+}
+
+/// What remains for the user after setup skipped the regular endpoint and
+/// `apply_all` switched the clients to daily.
+pub fn primary_skip_hints() -> Vec<String> {
+    use super::detector::{find_targets_in_path, TargetKind};
+
+    let mut hints = Vec::new();
     let mut paths = Vec::new();
-    let mut has_app = false;
     let mut has_cli = false;
     for install in find_installations() {
         let targets = find_targets_in_path(&install);
-        if targets.is_empty() {
-            continue;
-        }
-        let has_ide = targets
-            .iter()
-            .any(|target| target.kind == TargetKind::IdeMainJs);
-        let has_app_here = find_asar_in_path(&install).is_some();
-        if has_ide && !product_settings_path(&install).is_some_and(|path| settings_use_daily(&path))
+        has_cli |= targets.iter().any(|target| target.kind == TargetKind::AgyCli);
+        if targets.iter().any(|target| target.kind == TargetKind::IdeMainJs)
+            && !ide_settings_path(&install).is_some_and(|path| settings_use_daily(&path))
         {
-            return false;
+            hints.push(format!(
+                "{}: в настройках IDE задан собственный jetski.cloudCodeUrl",
+                install.display()
+            ));
         }
-        if !has_ide
-            && !has_app_here
-            && targets
-                .iter()
-                .any(|target| target.kind != TargetKind::AgyCli)
-        {
-            return false;
-        }
-        has_app |= has_app_here;
-        has_cli |= targets
-            .iter()
-            .any(|target| target.kind == TargetKind::AgyCli);
         paths.extend(targets.into_iter().map(|target| target.path));
     }
-    !paths.is_empty()
-        && launch_settings_confirm_daily(
-            has_app,
-            has_cli,
-            inherited.as_deref(),
-            super::endpoint_env::daily_configured,
-        )
-        && crate::system::file_lock::running_applications(&paths)
-            .is_ok_and(|running| running.is_empty())
-        && (!cfg!(windows)
-            || crate::system::file_lock::holders(&paths).is_ok_and(|holders| holders.is_empty()))
-}
-
-fn launch_settings_confirm_daily(
-    has_app: bool,
-    has_cli: bool,
-    inherited: Option<&std::ffi::OsStr>,
-    saved_uses_daily: impl FnOnce() -> bool,
-) -> bool {
-    // A different terminal can still launch CLI with its old environment,
-    // even if no CLI is running and this process inherited the new value.
-    !has_cli
-        && (!has_app
-            || (inherited == Some(std::ffi::OsStr::new(DAILY_ENDPOINT)) && saved_uses_daily()))
-}
-
-#[test]
-fn closed_cli_can_still_launch_from_an_old_terminal() {
-    use std::ffi::OsStr;
-    for inherited in [None, Some(OsStr::new(DAILY_ENDPOINT))] {
-        assert!(!launch_settings_confirm_daily(
-            false,
-            true,
-            inherited,
-            || true
-        ));
+    if crate::system::file_lock::running_applications(&paths)
+        .is_ok_and(|running| !running.is_empty())
+    {
+        hints.push("Перезапустите Antigravity: открытое приложение ещё использует прежний адрес".into());
     }
-    assert!(!launch_settings_confirm_daily(true, false, None, || true));
-    let daily = Some(OsStr::new(DAILY_ENDPOINT));
-    assert!(!launch_settings_confirm_daily(true, false, daily, || false));
-    assert!(launch_settings_confirm_daily(true, false, daily, || true));
-    assert!(launch_settings_confirm_daily(false, false, None, || false));
+    if has_cli {
+        hints.push(if super::endpoint_env::daily_configured() {
+            "CLI: откройте новый терминал, в уже открытых остался прежний CLOUD_CODE_URL".into()
+        } else {
+            "CLI: задан собственный CLOUD_CODE_URL, а основной Cloud Code из этой сети недоступен"
+                .into()
+        });
+    }
+    hints
 }
 
 fn settings_use_daily(path: &Path) -> bool {

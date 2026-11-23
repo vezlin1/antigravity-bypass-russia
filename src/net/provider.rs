@@ -1,5 +1,11 @@
 pub const NRPT_TAG: &str = "ANTIGRAVITY-BYPASS-RUSSIA";
 
+#[cfg(windows)]
+pub const BROWSER_PAGES: &[(&str, &str)] = &[
+    ("gemini.google.com", "/app"),
+    ("aistudio.google.com", "/welcome"),
+];
+
 /// Studio/Gemini canaries. Their substitution results must be checked separately
 /// from Cloud Code: a provider can support one family and pass the other through.
 pub const SUBSTITUTION_CANARIES: &[&str] = &[
