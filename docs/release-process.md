@@ -58,10 +58,21 @@ Workflow `Monitor Google Antigravity versions` ежедневно в 06:23 UTC �
 При изменении сборки сначала проверьте новый архив, затем обновите его версию
 и контрольную сумму в `current`, сохранив предыдущую проверенную сборку в `previous`.
 
+## Проверки без GitHub Actions
+
+В закрытом `antigravity-bypass-russia-dev` GitHub Actions отключены в настройках
+репозитория (минуты для закрытых репозиториев платные). Файлы workflow не
+изменены, поэтому в публичном репозитории CI работает как прежде. Перед
+публикацией проверки выполняются локально: Windows нативно, Linux в WSL 2
+по шагам из [проверки Linux](linux-compatibility.md#воспроизведение), macOS через
+`cargo check --target aarch64-apple-darwin` и при возможности нативно на Mac.
+Включить Actions в dev снова можно в Settings → Actions → General.
+
 ## Тестовая сборка без публикации
 
 Workflow `Release Build`, запущенный вручную на тестовой ветке закрытого
 `antigravity-bypass-russia-dev`, собирает Windows x64, macOS ARM64 и macOS Intel.
+Пока Actions в dev отключены, для такой сборки их нужно временно включить.
 Сборки проходят нативные тесты и проверку версии. Задание `Package release
 candidate` собирает единый `.sh`, сверяет вложенные движки и контрольные суммы.
 

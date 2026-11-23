@@ -27,13 +27,26 @@
 
 Подробности и ссылка на pipeline: [проверка 2.5.0](releases/v2.5.0-validation.md).
 
+## Проверено 24 ноября 2026
+
+- Ubuntu 22.04.5 (glibc 2.35, как в CI) в WSL 2 на Windows 11, ветка 2.6.0: 245 модульных и 5 socket-тестов, официальные CLI-профили с откатом, установщик, обёртки, сборка, настройка и откат в изолированных пространствах (`verify_linux_runtime.py`) и проверка релиза.
+- Сборки Windows, macOS и Linux без предупреждений о неиспользуемом коде.
+- Скрипты `tests/*.py` требуют Python 3.11+: `verify_cli_profiles.py` использует `hashlib.file_digest`, `verify_release.py` — `tomllib`. В Ubuntu 22.04 по умолчанию Python 3.10, поэтому использовался Python 3.12 из `ppa:deadsnakes/ppa`.
+
 ## Воспроизведение
 
 ```sh
 cargo test --locked --bin antigravity-bypass-russia --test socket_tests
 cargo build --locked
 sudo python3 tests/verify_linux_runtime.py target/debug/antigravity-bypass-russia
+python3.12 tests/verify_cli_profiles.py --target x86_64-unknown-linux-gnu
+python3.12 tests/verify_release.py target/debug/antigravity-bypass-russia
 ```
+
+На Windows те же шаги выполняются в WSL 2: `wsl --install -d Ubuntu-22.04`, затем
+`build-essential pkg-config libssl-dev iproute2 procps psmisc lsof`, Rust через rustup и
+Python 3.11+. Клонируйте репозиторий в файловую систему Linux (`~/…`), а не в `/mnt/c`:
+сборка там быстрее, а `git` не требует исключений владельца каталога.
 
 Последняя команда требует `unshare`, `mount`, `iproute2`, `lsof` и OpenSSL. Она создаёт отдельные пространства PID, монтирования и сети: hosts, DNS, системные команды и служба тестируются без изменения рабочей сети WSL.
 
