@@ -3,7 +3,7 @@ use crate::core::patcher::BinaryState;
 use crate::system::env::expand_env_vars;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TargetKind {
     LanguageServer,
     IdeMainJs,
@@ -1328,6 +1328,7 @@ pub fn get_quick_status() -> SystemComponentsStatus {
 fn status_for_installations(installs: &[PathBuf]) -> SystemComponentsStatus {
     let mut status = SystemComponentsStatus::default();
     status.has_installations = !installs.is_empty();
+    let mut scanned = std::collections::HashSet::new();
 
     for inst in installs {
         let app = if inst.join("Contents").is_dir() {
@@ -1369,6 +1370,12 @@ fn status_for_installations(installs: &[PathBuf]) -> SystemComponentsStatus {
         }
         let targets = find_targets_in_path(inst);
         for t in targets {
+            // A CLI on PATH can also sit under an installation root; scan each
+            // large executable once per status refresh.
+            let canonical = std::fs::canonicalize(&t.path).unwrap_or_else(|_| t.path.clone());
+            if !scanned.insert((canonical, t.kind)) {
+                continue;
+            }
             let state = crate::core::patcher::check_target_state(&t);
             match t.kind {
                 TargetKind::LanguageServer => {

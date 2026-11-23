@@ -85,6 +85,138 @@ fn if_entry_meta(if_index: u32) -> Option<(u32, String)> {
     Some((row.dw_type, descr))
 }
 
+/// Adapter description fragments excluded from the physical route search.
+/// Kept identical to the former `Get-NetAdapter` filters.
+#[cfg(any(windows, test))]
+const NON_PHYSICAL_DESCRIPTIONS: &[&str] = &[
+    "wireguard",
+    "tap",
+    "wintun",
+    "openvpn",
+    "tailscale",
+    "cisco",
+    "globalprotect",
+    "pangp",
+    "zerotier",
+    "hamachi",
+    "cloudflare",
+    "warp",
+    "nordlynx",
+    "proton",
+    "outline",
+    "softether",
+    "tun2socks",
+    "hyper-v",
+    "vmware",
+    "virtualbox",
+    "wsl",
+];
+
+#[cfg(any(windows, test))]
+struct AdapterInfo {
+    index: u32,
+    up: bool,
+    hardware: bool,
+    description: String,
+}
+
+#[cfg(any(windows, test))]
+struct DefaultRoute {
+    index: u32,
+    next_hop: std::net::Ipv4Addr,
+    metric: u32,
+}
+
+/// The lowest-metric IPv4 default route with a gateway on an up, hardware,
+/// non-tunnel adapter. Equal metrics keep the routing table order.
+#[cfg(any(windows, test))]
+fn pick_physical_route(adapters: &[AdapterInfo], routes: &[DefaultRoute]) -> Option<(u32, String)> {
+    let physical = |index: u32| {
+        adapters.iter().any(|adapter| {
+            let description = adapter.description.to_lowercase();
+            adapter.index == index
+                && adapter.up
+                && adapter.hardware
+                && !NON_PHYSICAL_DESCRIPTIONS
+                    .iter()
+                    .any(|fragment| description.contains(fragment))
+        })
+    };
+    routes
+        .iter()
+        .filter(|route| !route.next_hop.is_unspecified() && physical(route.index))
+        .min_by_key(|route| route.metric)
+        .map(|route| (route.index, route.next_hop.to_string()))
+}
+
+/// Native replacement for `Get-NetAdapter`/`Get-NetRoute`. The relay runs this
+/// whenever a VPN owns the default route, so it must not start PowerShell.
+#[cfg(windows)]
+fn physical_default_route() -> Option<(u32, String)> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetIfTable2, GetIpForwardTable2, MIB_IF_TABLE2, MIB_IPFORWARD_TABLE2,
+    };
+    use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+    const HARDWARE_INTERFACE: u8 = 0b01;
+    const FILTER_INTERFACE: u8 = 0b10;
+
+    let mut adapters = Vec::new();
+    unsafe {
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        if GetIfTable2(&mut table) != 0 || table.is_null() {
+            return None;
+        }
+        let rows =
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        for row in rows {
+            let flags = row.InterfaceAndOperStatusFlags._bitfield;
+            let length = row
+                .Description
+                .iter()
+                .position(|&unit| unit == 0)
+                .unwrap_or(row.Description.len());
+            adapters.push(AdapterInfo {
+                index: row.InterfaceIndex,
+                up: row.OperStatus == IfOperStatusUp,
+                // NDIS filter instances repeat the adapter description.
+                hardware: flags & HARDWARE_INTERFACE != 0 && flags & FILTER_INTERFACE == 0,
+                description: String::from_utf16_lossy(&row.Description[..length]),
+            });
+        }
+        FreeMibTable(table.cast());
+    }
+
+    let mut routes = Vec::new();
+    unsafe {
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+        if GetIpForwardTable2(AF_INET, &mut table) != 0 || table.is_null() {
+            return None;
+        }
+        let rows =
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        for row in rows {
+            let prefix = &row.DestinationPrefix;
+            if prefix.PrefixLength != 0
+                || prefix.Prefix.si_family != AF_INET
+                || prefix.Prefix.Ipv4.sin_addr.S_un.S_addr != 0
+                || row.NextHop.si_family != AF_INET
+            {
+                continue;
+            }
+            routes.push(DefaultRoute {
+                index: row.InterfaceIndex,
+                next_hop: std::net::Ipv4Addr::from(
+                    row.NextHop.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes(),
+                ),
+                metric: row.Metric,
+            });
+        }
+        FreeMibTable(table.cast());
+    }
+    pick_physical_route(&adapters, &routes)
+}
+
 #[cfg(target_os = "windows")]
 fn is_vpn_iface(if_index: u32) -> bool {
     const IF_TYPE_PPP: u32 = 23;
@@ -179,30 +311,8 @@ pub fn detect_physical() -> Option<(u32, String)> {
             return native;
         }
 
-        let ps = r#"
-$vpn = 'WireGuard|TAP|Wintun|OpenVPN|Tailscale|Cisco|GlobalProtect|PANGP|ZeroTier|Hamachi|Cloudflare|WARP|NordLynx|Proton|Outline|SoftEther|tun2socks'
-$phys = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object {
-    $_.Status -eq 'Up' -and $_.HardwareInterface -and $_.InterfaceDescription -notmatch $vpn -and $_.InterfaceDescription -notmatch 'Hyper-V|VMware|VirtualBox|WSL'
-} | ForEach-Object { $_.ifIndex })
-$def = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -PolicyStore ActiveStore -ErrorAction SilentlyContinue)
-$mine = @($def | Where-Object { $phys -contains $_.ifIndex -and $_.NextHop -ne '0.0.0.0' })
-if ($mine.Count -gt 0) {
-    $best = $mine | Sort-Object { [int]$_.RouteMetric } | Select-Object -First 1
-    Write-Output ("{0}|{1}" -f $best.ifIndex, $best.NextHop)
-}
-"#;
-        let out = crate::system::powershell::output(ps).ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if let Some((idx, gw)) = s.split_once('|') {
-            if let Ok(i) = idx.trim().parse::<u32>() {
-                let gw = gw.trim().to_string();
-                if i > 0 && !gw.is_empty() && gw != "0.0.0.0" {
-                    return Some((i, gw));
-                }
-            }
+        if let Some(found) = physical_default_route() {
+            return Some(found);
         }
 
         #[repr(C)]
@@ -442,4 +552,66 @@ pub fn detect() -> Option<Egress> {
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adapter(index: u32, description: &str) -> AdapterInfo {
+        AdapterInfo {
+            index,
+            up: true,
+            hardware: true,
+            description: description.into(),
+        }
+    }
+
+    fn route(index: u32, next_hop: [u8; 4], metric: u32) -> DefaultRoute {
+        DefaultRoute {
+            index,
+            next_hop: next_hop.into(),
+            metric,
+        }
+    }
+
+    #[test]
+    fn physical_route_skips_tunnels_virtual_and_down_adapters() {
+        let mut down = adapter(4, "Intel(R) Ethernet Connection");
+        down.up = false;
+        let mut software = adapter(5, "Microsoft Loopback Adapter");
+        software.hardware = false;
+        let adapters = [
+            adapter(7, "Realtek PCIe GbE Family Controller"),
+            adapter(9, "Intel(R) Wi-Fi 6 AX201 160MHz"),
+            adapter(11, "WireGuard Tunnel"),
+            adapter(12, "Hyper-V Virtual Ethernet Adapter"),
+            down,
+            software,
+        ];
+        let routes = [
+            route(11, [10, 0, 0, 1], 0),
+            route(12, [172, 16, 0, 1], 1),
+            route(4, [192, 168, 0, 1], 2),
+            route(5, [192, 168, 5, 1], 3),
+            route(9, [0, 0, 0, 0], 5),
+            route(9, [192, 168, 1, 1], 35),
+            route(7, [192, 168, 2, 1], 25),
+        ];
+        assert_eq!(
+            pick_physical_route(&adapters, &routes),
+            Some((7, "192.168.2.1".into()))
+        );
+        assert_eq!(pick_physical_route(&adapters, &routes[..5]), None);
+    }
+
+    #[test]
+    fn equal_metrics_keep_routing_table_order() {
+        let adapters = [adapter(3, "Ethernet"), adapter(8, "Wi-Fi")];
+        let routes = [route(8, [192, 168, 1, 1], 10), route(3, [10, 1, 1, 1], 10)];
+        assert_eq!(
+            pick_physical_route(&adapters, &routes),
+            Some((8, "192.168.1.1".into()))
+        );
+    }
 }

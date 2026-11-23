@@ -61,7 +61,7 @@ pub(super) fn configured_udp_v4(pool: &[ActiveProvider]) -> Vec<String> {
 // Changing/disabling an endpoint cannot reuse an answer from the previous configuration.
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct CacheKey {
-    pool: String,
+    pool: Arc<str>,
     interface: u32,
     network_generation: u64,
     question: Vec<u8>,
@@ -76,9 +76,18 @@ static PACKETS: Mutex<Option<HashMap<CacheKey, Cached>>> = Mutex::new(None);
 // Identical concurrent questions share one upstream race.
 type Flight = Arc<(Mutex<Option<Option<ResolveHit>>>, Condvar)>;
 static IN_FLIGHT: Mutex<Option<HashMap<CacheKey, Flight>>> = Mutex::new(None);
+#[cfg(test)]
 fn cache_key(pool: &[ActiveProvider], query: &[u8], interface: u32) -> CacheKey {
+    snapshot_key(
+        &resolver_pool::Snapshot::new(pool.to_vec()),
+        query,
+        interface,
+    )
+}
+
+fn snapshot_key(pool: &resolver_pool::Snapshot, query: &[u8], interface: u32) -> CacheKey {
     CacheKey {
-        pool: format!("{pool:?}"),
+        pool: Arc::clone(&pool.fingerprint),
         interface,
         network_generation: NETWORK_GENERATION.load(Ordering::Acquire),
         question: query.get(2..).unwrap_or_default().to_vec(),
@@ -505,8 +514,8 @@ fn with_id(mut hit: ResolveHit, query: &[u8]) -> ResolveHit {
 
 pub fn resolve_best(query: &[u8], interface: u32) -> Option<ResolveHit> {
     question_name(query)?;
-    let pool = resolver_pool::load().ok()?;
-    let key = cache_key(&pool, query, interface);
+    let pool = resolver_pool::load_shared().ok()?;
+    let key = snapshot_key(&pool, query, interface);
     match cached(&key) {
         Lookup::Fresh(hit) => return Some(with_id(hit, query)),
         Lookup::Stale(hit) => {
@@ -515,15 +524,21 @@ pub fn resolve_best(query: &[u8], interface: u32) -> Option<ResolveHit> {
         }
         Lookup::Miss => {}
     }
-    shared(key, || resolve_uncached(&pool, query, interface)).map(|hit| with_id(hit, query))
+    shared(key, || resolve_uncached(&pool.providers, query, interface))
+        .map(|hit| with_id(hit, query))
 }
 
-fn refresh_in_background(pool: Vec<ActiveProvider>, query: Vec<u8>, interface: u32, key: CacheKey) {
+fn refresh_in_background(
+    pool: Arc<resolver_pool::Snapshot>,
+    query: Vec<u8>,
+    interface: u32,
+    key: CacheKey,
+) {
     let running = IN_FLIGHT
         .lock()
         .is_ok_and(|guard| guard.as_ref().is_some_and(|f| f.contains_key(&key)));
     if !running {
-        thread::spawn(move || shared(key, || resolve_uncached(&pool, &query, interface)));
+        thread::spawn(move || shared(key, || resolve_uncached(&pool.providers, &query, interface)));
     }
 }
 
@@ -975,7 +990,7 @@ mod tests {
 
     fn test_key(name: &str) -> CacheKey {
         CacheKey {
-            pool: format!("test-{name}"),
+            pool: format!("test-{name}").into(),
             interface: 0,
             network_generation: NETWORK_GENERATION.load(Ordering::Acquire),
             question: build_query(name, 0)[2..].to_vec(),

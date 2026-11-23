@@ -1,11 +1,21 @@
 use super::patcher::{plan_js, Plan};
 use serde_json::Value;
-use std::{fs, path::Path};
+use std::{
+    borrow::Cow,
+    fs,
+    io::{Read, Seek, SeekFrom},
+    path::Path,
+};
 
-fn archive(data: &[u8]) -> Result<(Value, usize), String> {
+const PREFIX_LEN: usize = 16;
+
+/// Header JSON length and payload offset, from the 16-byte prefix and the
+/// total archive length.
+fn layout(prefix: &[u8], length: usize) -> Result<(usize, usize), String> {
     let read_u32 = |offset: usize| -> Result<u32, String> {
         Ok(u32::from_le_bytes(
-            data.get(offset..offset + 4)
+            prefix
+                .get(offset..offset + 4)
                 .ok_or("Короткий ASAR")?
                 .try_into()
                 .unwrap(),
@@ -18,11 +28,19 @@ fn archive(data: &[u8]) -> Result<(Value, usize), String> {
         .checked_add(8)
         .ok_or("ASAR overflow")?;
     let json_len = read_u32(12)? as usize;
-    if json_len > 32 * 1024 * 1024 || payload > data.len() || 16 + json_len > payload {
+    if json_len > 32 * 1024 * 1024 || payload > length || PREFIX_LEN + json_len > payload {
         return Err("Некорректный размер ASAR header".into());
     }
-    let header =
-        serde_json::from_slice(&data[16..16 + json_len]).map_err(|e| format!("ASAR JSON: {e}"))?;
+    Ok((json_len, payload))
+}
+
+fn parse_header(json: &[u8]) -> Result<Value, String> {
+    serde_json::from_slice(json).map_err(|e| format!("ASAR JSON: {e}"))
+}
+
+fn archive(data: &[u8]) -> Result<(Value, usize), String> {
+    let (json_len, payload) = layout(data, data.len())?;
+    let header = parse_header(&data[PREFIX_LEN..PREFIX_LEN + json_len])?;
     Ok((header, payload))
 }
 fn entry<'a>(header: &'a Value, path: &str) -> Option<&'a Value> {
@@ -60,17 +78,31 @@ fn content_range(
         .ok_or("ASAR entry вне файла")?;
     Ok(start..end)
 }
+/// Reads only the header and the package.json entry, not the whole archive.
 pub fn read_asar_package_version(path: &Path) -> Option<String> {
-    let data = fs::read(path).ok()?;
-    let (header, payload) = archive(&data).ok()?;
-    let range = content_range(entry(&header, "package.json")?, payload, data.len()).ok()?;
-    let package: Value = serde_json::from_slice(&data[range]).ok()?;
+    const PACKAGE_LIMIT: usize = 4 * 1024 * 1024;
+    let mut file = fs::File::open(path).ok()?;
+    let length = usize::try_from(file.metadata().ok()?.len()).ok()?;
+    let mut prefix = [0u8; PREFIX_LEN];
+    file.read_exact(&mut prefix).ok()?;
+    let (json_len, payload) = layout(&prefix, length).ok()?;
+    let mut json = vec![0u8; json_len];
+    file.read_exact(&mut json).ok()?;
+    let header = parse_header(&json).ok()?;
+    let range = content_range(entry(&header, "package.json")?, payload, length).ok()?;
+    if range.len() > PACKAGE_LIMIT {
+        return None;
+    }
+    let mut package = vec![0u8; range.len()];
+    file.seek(SeekFrom::Start(range.start as u64)).ok()?;
+    file.read_exact(&mut package).ok()?;
+    let package: Value = serde_json::from_slice(&package).ok()?;
     package.get("version")?.as_str().map(str::to_string)
 }
-pub(crate) fn plan_asar(data: &[u8]) -> Result<Plan, String> {
+pub(crate) fn plan_asar(data: &[u8]) -> Result<Plan<'_>, String> {
     let (header, payload) = archive(data)?;
     let mut result = Plan {
-        data: data.to_vec(),
+        data: Cow::Borrowed(data),
         changes: 0,
         existing: 0,
         profile: "asar-ide-reset-tier-v1".into(),
@@ -90,7 +122,9 @@ pub(crate) fn plan_asar(data: &[u8]) -> Result<Plan, String> {
         }
         result.changes += p.changes;
         result.existing += p.existing;
-        result.data[range].copy_from_slice(&p.data);
+        if p.changes > 0 {
+            result.data.to_mut()[range].copy_from_slice(&p.data);
+        }
     }
     Ok(result)
 }
@@ -123,7 +157,8 @@ mod tests {
     }
     #[test]
     fn unrelated_internal_marker_does_not_trigger_watcher() {
-        let p = plan_asar(&fixture(b"x.isGoogleInternal", false)).unwrap();
+        let input = fixture(b"x.isGoogleInternal", false);
+        let p = plan_asar(&input).unwrap();
         assert_eq!((p.changes, p.existing), (0, 0));
     }
     #[test]

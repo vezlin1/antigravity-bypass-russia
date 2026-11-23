@@ -1,6 +1,11 @@
 //! One configuration snapshot for both UDP and RFC 8484 exchanges.
 use super::{client, config, dns_https};
-use std::{net::Ipv4Addr, sync::mpsc, time::Duration};
+use std::{
+    net::Ipv4Addr,
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc, Mutex},
+    time::{Duration, SystemTime},
+};
 
 pub const UDP_TIMEOUT: Duration = Duration::from_millis(800);
 pub const BUDGET: Duration = Duration::from_millis(2800);
@@ -106,6 +111,85 @@ pub fn load() -> Result<Vec<Provider>, String> {
     from_config(&config::load()?)
 }
 
+/// A validated pool and the identity that DNS cache entries are keyed by.
+pub struct Snapshot {
+    pub providers: Vec<Provider>,
+    pub fingerprint: Arc<str>,
+}
+
+impl Snapshot {
+    pub fn new(providers: Vec<Provider>) -> Self {
+        let fingerprint = format!("{providers:?}").into();
+        Self {
+            providers,
+            fingerprint,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+struct CachedSnapshot {
+    context: Option<FileStamp>,
+    config_path: PathBuf,
+    config: Option<FileStamp>,
+    snapshot: Arc<Snapshot>,
+}
+
+static SNAPSHOT: Mutex<Option<CachedSnapshot>> = Mutex::new(None);
+
+/// The relay resolves every DNS packet through the pool. Reuse the parsed
+/// configuration while network.json and the relay context are unchanged: two
+/// metadata calls replace two file reads, JSON parsing and validation.
+pub fn load_shared() -> Result<Arc<Snapshot>, String> {
+    cached_snapshot(&SNAPSHOT, &config::context_path(), config::path, load)
+}
+
+fn cached_snapshot(
+    cache: &Mutex<Option<CachedSnapshot>>,
+    context_path: &Path,
+    config_path: impl FnOnce() -> PathBuf,
+    load: impl FnOnce() -> Result<Vec<Provider>, String>,
+) -> Result<Arc<Snapshot>, String> {
+    let context = file_stamp(context_path);
+    let mut cached = cache.lock().map_err(|e| e.to_string())?;
+    if let Some(entry) = cached.as_ref() {
+        if entry.context == context && file_stamp(&entry.config_path) == entry.config {
+            return Ok(Arc::clone(&entry.snapshot));
+        }
+    }
+    // Stamps are taken before reading, so a write during the reload is seen
+    // as a change by the next lookup instead of hiding behind the cache.
+    let config_path = config_path();
+    let config_stamp = file_stamp(&config_path);
+    let snapshot = Arc::new(Snapshot::new(load()?));
+    *cached = Some(CachedSnapshot {
+        context,
+        config_path,
+        config: config_stamp,
+        snapshot: Arc::clone(&snapshot),
+    });
+    Ok(snapshot)
+}
+
+pub fn forget_shared() {
+    if let Ok(mut cached) = SNAPSHOT.lock() {
+        *cached = None;
+    }
+}
+
 #[cfg(windows)]
 pub fn bootstrap_v4() -> Result<Vec<Ipv4Addr>, String> {
     Ok(load()?
@@ -127,6 +211,58 @@ pub fn bootstrap_v4() -> Result<Vec<Ipv4Addr>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn relay_pool_is_reused_until_network_json_or_context_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = dir.path().join("network-user.json");
+        let config_path = dir.path().join("network.json");
+        std::fs::write(&context, b"{}").unwrap();
+        let cache = Mutex::new(None);
+        let loads = std::cell::Cell::new(0);
+        let lookup = || {
+            cached_snapshot(
+                &cache,
+                &context,
+                || config_path.clone(),
+                || {
+                    loads.set(loads.get() + 1);
+                    from_config(&config::Config::default())
+                },
+            )
+            .unwrap()
+        };
+        let first = lookup();
+        let second = lookup();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(loads.get(), 1);
+        std::fs::write(&config_path, b"{\"doh\":[]}").unwrap();
+        lookup();
+        assert_eq!(loads.get(), 2);
+        lookup();
+        assert_eq!(loads.get(), 2);
+        std::fs::write(&config_path, b"{\"doh\":[], \"extra_udp\":[]}").unwrap();
+        lookup();
+        assert_eq!(loads.get(), 3);
+        std::fs::write(&context, b"{\"directory\":\"x\"}").unwrap();
+        lookup();
+        assert_eq!(loads.get(), 4);
+        assert!(cached_snapshot(
+            &cache,
+            &context,
+            || config_path.clone(),
+            || Err("bad".into())
+        )
+        .is_ok());
+        std::fs::remove_file(&config_path).unwrap();
+        assert!(cached_snapshot(
+            &cache,
+            &context,
+            || config_path.clone(),
+            || Err("bad".into())
+        )
+        .is_err());
+        assert_eq!(loads.get(), 4);
+    }
     #[test]
     fn configured_transports_order_and_disabling_are_shared() {
         let mut c = config::Config::default();

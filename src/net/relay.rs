@@ -255,6 +255,7 @@ fn clear_upstream_cache() {
 pub(super) fn clear_settings_cache() {
     IF_INDEX_CACHE.store(0, std::sync::atomic::Ordering::SeqCst);
     clear_upstream_cache();
+    super::resolver_pool::forget_shared();
 }
 
 #[cfg(windows)]
