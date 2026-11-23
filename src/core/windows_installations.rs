@@ -130,15 +130,9 @@ impl Product {
         ]
         .into_iter()
         .find_map(|(label, product)| {
-            let version = name.strip_prefix(label)?;
-            (version.is_empty()
-                || version.strip_prefix(' ').is_some_and(|suffix| {
-                    let version = suffix.strip_prefix('v').unwrap_or(suffix);
-                    version.split('.').all(|part| {
-                        !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())
-                    })
-                }))
-            .then_some(product)
+            let suffix = name.strip_prefix(label)?;
+            (suffix.is_empty() || suffix.starts_with(' ') && installer_suffix(suffix))
+                .then_some(product)
         })
     }
 
@@ -191,8 +185,84 @@ impl Product {
     }
 }
 
+/// Installers append versions and scope labels to the product name, such as
+/// "2.34.0", "v1.5.13-beta.1", "(User)" or "(x64)". Any other word belongs to
+/// a different product, for example "Antigravity Bypass".
+fn installer_suffix(suffix: &str) -> bool {
+    let mut rest = suffix.trim();
+    let mut tokens = Vec::new();
+    while !rest.is_empty() {
+        if let Some(inner) = rest.strip_prefix('(') {
+            let Some((scope, after)) = inner.split_once(')') else {
+                return false;
+            };
+            if scope.trim().is_empty()
+                || !scope
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+            {
+                return false;
+            }
+            rest = after.trim_start();
+            continue;
+        }
+        let end = rest.find([' ', '(']).unwrap_or(rest.len());
+        tokens.push(&rest[..end]);
+        rest = rest[end..].trim_start();
+    }
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    let label = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_alphanumeric());
+    tokens.into_iter().all(|token| {
+        let token = token.strip_prefix('v').unwrap_or(token);
+        let (number, prerelease) = match token.split_once('-') {
+            Some((number, prerelease)) => (number, Some(prerelease)),
+            None => (token, None),
+        };
+        number.split('.').all(digits)
+            && prerelease.is_none_or(|prerelease| prerelease.split('.').all(label))
+    })
+}
+
+/// Variables that the elevated process resolves for the initiating user, or
+/// that are the same for every user. Other profile variables, such as
+/// %HOMEPATH% or %TEMP%, would expand into the elevated account's profile.
+const EXPANDABLE: &[&str] = &[
+    "userprofile",
+    "localappdata",
+    "appdata",
+    "programfiles",
+    "programfiles(x86)",
+    "programw6432",
+    "programdata",
+    "commonprogramfiles",
+    "commonprogramfiles(x86)",
+    "commonprogramw6432",
+    "systemdrive",
+    "systemroot",
+    "windir",
+];
+
+fn expandable(text: &str) -> bool {
+    let mut parts = text.split('%');
+    parts.next();
+    let mut names = Vec::new();
+    while let Some(name) = parts.next() {
+        if parts.next().is_none() {
+            return false;
+        }
+        names.push(name);
+    }
+    names
+        .iter()
+        .all(|name| EXPANDABLE.contains(&name.to_ascii_lowercase().as_str()))
+}
+
 fn local_path(text: &str) -> Option<PathBuf> {
-    let path = expand_env_vars(text.trim().trim_matches('"'));
+    let text = text.trim().trim_matches('"');
+    if !expandable(text) {
+        return None;
+    }
+    let path = expand_env_vars(text);
     (path.is_absolute()
         && path.file_name().is_some()
         && matches!(
@@ -252,6 +322,48 @@ mod tests {
         }
         assert!(local_path(r"..\Antigravity").is_none());
         assert!(local_path(r"\\server\share\Antigravity").is_none());
+    }
+
+    #[test]
+    fn accepts_installer_versions_and_scope_labels_but_not_other_products() {
+        for (name, ide, cli) in [
+            ("Antigravity (User)", false, false),
+            ("Antigravity 2.34.0 (User)", false, false),
+            ("Google Antigravity (x64) 2.34.0", false, false),
+            ("Antigravity v2.35.0-beta.1", false, false),
+            ("Antigravity IDE (Machine - x64)", true, false),
+            ("Antigravity CLI 1.5.13 (per_user)", false, true),
+        ] {
+            let product = Product::from_name(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(matches!(product, Product::Ide), ide, "{name}");
+            assert_eq!(matches!(product, Product::Cli), cli, "{name}");
+        }
+        for name in [
+            "Antigravity Bypass 2.6.0",
+            "Antigravity x64",
+            "Antigravity (User",
+            "Antigravity ()",
+            "Antigravity (a.b)",
+            "Antigravity 2.34.0-",
+            "Antigravity 2..0",
+            "Antigravityfix",
+        ] {
+            assert!(Product::from_name(name).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn profile_variables_of_another_account_are_not_expanded() {
+        assert!(local_path(r"%LOCALAPPDATA%\Programs\Antigravity").is_some());
+        assert!(local_path(r"%ProgramFiles%\Antigravity").is_some());
+        for text in [
+            r"%HOMEDRIVE%%HOMEPATH%\Antigravity",
+            r"%TEMP%\Antigravity",
+            r"%OneDrive%\Antigravity",
+            r"C:@%\Antigravity",
+        ] {
+            assert!(local_path(text).is_none(), "{text}");
+        }
     }
 
     #[test]

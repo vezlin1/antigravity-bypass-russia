@@ -1,5 +1,5 @@
 use crate::core::{
-    detector::{is_agy_cli_name, FoundTarget, TargetKind},
+    detector::{FoundTarget, TargetKind},
     opcodes::*,
 };
 use crate::system::journal;
@@ -410,22 +410,6 @@ fn plan(data: &[u8], kind: TargetKind) -> Result<Plan, String> {
         _ => plan_binary(data, kind),
     }
 }
-fn inferred_kind(path: &Path) -> TargetKind {
-    let name = path.file_name().unwrap_or_default().to_string_lossy();
-    if name.ends_with(".asar") {
-        TargetKind::IdeAsar
-    } else if name.ends_with(".js") {
-        TargetKind::IdeMainJs
-    } else if is_agy_cli_name(&name) {
-        TargetKind::AgyCli
-    } else {
-        TargetKind::LanguageServer
-    }
-}
-pub fn check_binary_state(path: &Path) -> BinaryState {
-    state_for_kind(path, inferred_kind(path))
-}
-
 pub fn check_target_state(target: &FoundTarget) -> BinaryState {
     state_for_kind(&target.path, target.kind)
 }

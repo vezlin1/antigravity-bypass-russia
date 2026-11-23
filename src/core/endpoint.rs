@@ -267,36 +267,6 @@ pub fn select_for_test(path: &Path, host: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn restore_automatic_overrides() -> Vec<Result<String, String>> {
-    let mut paths: Vec<_> = find_installations()
-        .iter()
-        .filter_map(|p| ide_settings_path(p))
-        .collect();
-    for folder in ["Antigravity", "Antigravity IDE", "Google Antigravity"] {
-        if let Some(path) = appdata_settings(folder) {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    let mut notes = vec![Ok(
-        "Основной Cloud Code имеет проверенный путь; принудительный daily-endpoint не нужен".into(),
-    )];
-    for path in paths {
-        if crate::system::journal::has_record(&path) {
-            notes.push(
-                remove_settings_file(&path)
-                    .map(|_| "Прежние настройки endpoint восстановлены по журналу".into()),
-            );
-        }
-    }
-    notes.push(
-        super::endpoint_env::restore()
-            .map(|_| "CLI: собственный override снят, пользовательское значение сохранено".into()),
-    );
-    notes
-}
-
 pub fn remove_all() -> Vec<String> {
     let mut errors = Vec::new();
     if let Err(error) = super::endpoint_env::restore_gateway() {

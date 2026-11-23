@@ -1,5 +1,4 @@
-use super::route_health::{self, Key};
-use native_tls::{TlsConnector, TlsStream};
+use native_tls::TlsConnector;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::{mpsc, Arc};
@@ -160,28 +159,6 @@ fn probe_address(addr: SocketAddr, host: &str, deadline: Instant) -> Result<u16,
     probe_connected(stream, host, deadline)
 }
 
-pub fn check_ip(addr: SocketAddr, host: &str, refresh: bool) -> Result<u128, String> {
-    let key = Key::ip(host, addr);
-    let state = route_health::store().snapshot()?;
-    let now = route_health::now_ms();
-    if state.region_blocked(&key, now) {
-        return Err("Маршрут отложен после регионального отказа".into());
-    }
-    if state.blocked(&key, now) {
-        return Err("Маршрут ожидает повторной проверки".into());
-    }
-    if !refresh {
-        match state.cached(&key, now) {
-            Some(true) => return Ok(state.latency(&key).unwrap_or(1) as u128),
-            Some(false) => return Err("Маршрут ожидает повторной проверки".into()),
-            None => {}
-        }
-    }
-    let result = probe_ip(addr, host);
-    route_health::record(&key, result.as_ref().map(|ms| *ms).map_err(|_| ()))?;
-    result
-}
-
 #[derive(Debug, Default)]
 pub struct ConnReport {
     pub host: String,
@@ -192,45 +169,6 @@ pub struct ConnReport {
     pub looks_like_google: bool,
     pub http_status: Option<u16>,
     pub error: Option<String>,
-}
-
-/// Complete TLS handshake with the OS trust store and hostname verification.
-pub fn connect_tls(
-    addr: SocketAddr,
-    host: &str,
-    budget: Duration,
-) -> Result<TlsStream<TcpStream>, String> {
-    let start = Instant::now();
-    let stream = TcpStream::connect_timeout(&addr, budget).map_err(|e| format!("TCP: {e}"))?;
-    let left = budget
-        .checked_sub(start.elapsed())
-        .filter(|d| !d.is_zero())
-        .ok_or("TLS: timeout")?;
-    stream
-        .set_read_timeout(Some(left))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(left))
-        .map_err(|e| e.to_string())?;
-    let connector = TlsConnector::new().map_err(|e| format!("TLS trust store: {e}"))?;
-    connector
-        .connect(host, stream)
-        .map_err(|e| format!("TLS/certificate: {e}"))
-}
-
-fn read_http_status(reader: &mut impl Read) -> Result<u16, String> {
-    let mut header = Vec::new();
-    let mut byte = [0u8; 1];
-    while header.len() < HTTP_HEADER_LIMIT {
-        reader
-            .read_exact(&mut byte)
-            .map_err(|e| format!("HTTP header: {e}"))?;
-        header.push(byte[0]);
-        if header.ends_with(b"\r\n\r\n") {
-            return parse_http_status(&header);
-        }
-    }
-    Err("HTTP: header exceeds 16 KiB".into())
 }
 
 fn parse_http_status(header: &[u8]) -> Result<u16, String> {
@@ -684,33 +622,16 @@ pub(crate) mod tests {
         server.join().unwrap();
     }
     #[test]
-    fn tls_alert_and_plain_http_are_not_valid_handshakes() {
-        for reply in [
-            b"\x15\x03\x03\x00\x02\x02\x28".as_slice(),
-            b"HTTP/1.1 200 OK\r\n\r\n",
-        ] {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let address = listener.local_addr().unwrap();
-            let reply = reply.to_vec();
-            let server = std::thread::spawn(move || {
-                let (mut s, _) = listener.accept().unwrap();
-                s.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
-                let _ = s.read(&mut [0u8; 4096]);
-                let _ = s.write_all(&reply);
-            });
-            assert!(connect_tls(address, "localhost", Duration::from_secs(1)).is_err());
-            server.join().unwrap();
-        }
-    }
-    #[test]
-    fn http_status_is_distinct_from_authorization_and_requires_complete_header() {
+    fn http_status_is_distinct_from_authorization_and_rejects_invalid_lines() {
         for status in [200, 401, 403, 404, 429, 503] {
             assert_eq!(
-                read_http_status(&mut format!("HTTP/1.1 {status} test\r\nX: y\r\n\r\n").as_bytes())
+                parse_http_status(format!("HTTP/1.1 {status} test\r\nX: y\r\n\r\n").as_bytes())
                     .unwrap(),
                 status
             );
         }
-        assert!(read_http_status(&mut b"HTTP/1.1 200 OK\r\n".as_slice()).is_err());
+        for header in ["HTTP/2 200 OK\r\n\r\n", "HTTP/1.1 099 x\r\n\r\n", "garbage\r\n\r\n"] {
+            assert!(parse_http_status(header.as_bytes()).is_err(), "{header}");
+        }
     }
 }
