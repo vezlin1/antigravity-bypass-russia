@@ -607,6 +607,33 @@ pub fn apply_dns_rules(
     apply_dns_rules_with(policy, progress)
 }
 
+/// Each probe waits on the network for up to the resolver budget. Run every
+/// distinct host at once instead of one after another; a host shared by the
+/// Agent rules and the canaries is probed once.
+fn substitutions_by_host<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    probe: impl Fn(&str) -> Vec<String> + Sync,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut hosts: Vec<&str> = Vec::new();
+    for name in names {
+        let host = name.trim_start_matches('.');
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    let probe = &probe;
+    thread::scope(|scope| {
+        let probes: Vec<_> = hosts
+            .iter()
+            .map(|host| (*host, scope.spawn(move || probe(host))))
+            .collect();
+        probes
+            .into_iter()
+            .map(|(host, probe)| (host.to_string(), probe.join().unwrap_or_default()))
+            .collect()
+    })
+}
+
 fn apply_dns_rules_with(
     policy: RoutePolicy,
     progress: &mut dyn FnMut(SetupProgress<'_>),
@@ -651,8 +678,12 @@ fn apply_dns_rules_with(
     let staged = routes::with_probe_routes(policy, |prepare_routes| {
         // DNS probes and the running relay use the same route policy.
         prepare_routes(&[])?;
+        // Give freshly added physical routes time to apply. The system route
+        // policy changes no routes here, so it has nothing to wait for.
         #[cfg(windows)]
-        thread::sleep(Duration::from_millis(400));
+        if policy == RoutePolicy::Physical {
+            thread::sleep(Duration::from_millis(400));
+        }
         let discovery = rank::discover_agent(if_index, policy, prepare_routes, progress)?;
         // Every caller switches client endpoints to daily right after this
         // setup, so the regular endpoint is optional wherever that switch
@@ -723,9 +754,16 @@ fn apply_dns_rules_with(
     let mut studio_subs: Vec<String> = Vec::new();
     if !udp_ips.is_empty() {
         progress(Working("Проверяем резервные DNS-серверы"));
+        let substitutions = substitutions_by_host(
+            agent_rules
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .chain(SUBSTITUTION_CANARIES.iter().copied()),
+            |host| resolvers::substituting_addrs(host, if_index),
+        );
         for (name, subs) in &mut agent_rules {
             let host = name.trim_start_matches('.');
-            *subs = resolvers::substituting_addrs(host, if_index);
+            *subs = substitutions[host].clone();
             if subs.is_empty() {
                 sub_notes.push(format!("{host}: подмена через прямой UDP не подтверждена"));
             } else {
@@ -734,9 +772,9 @@ fn apply_dns_rules_with(
         }
         for name in SUBSTITUTION_CANARIES {
             let host = name.trim_start_matches('.');
-            for s in resolvers::substituting_addrs(host, if_index) {
-                if !studio_subs.contains(&s) {
-                    studio_subs.push(s);
+            for s in &substitutions[host] {
+                if !studio_subs.contains(s) {
+                    studio_subs.push(s.clone());
                 }
             }
         }
@@ -1006,6 +1044,38 @@ pub(crate) fn wait_for_ready(budget: Duration, mut probe: impl FnMut(Duration) -
 #[cfg(test)]
 mod startup_tests {
     use super::*;
+
+    #[test]
+    fn substitution_probes_run_concurrently_once_per_host() {
+        let calls = std::sync::Mutex::new(Vec::new());
+        let started = std::time::Instant::now();
+        let result = substitutions_by_host(
+            NRPT_AGENT
+                .iter()
+                .copied()
+                .chain(SUBSTITUTION_CANARIES.iter().copied())
+                .chain([".gemini.google.com"]),
+            |host| {
+                calls.lock().unwrap().push(host.to_string());
+                std::thread::sleep(Duration::from_millis(200));
+                if host == "generativelanguage.googleapis.com" {
+                    vec!["192.0.2.1".into()]
+                } else {
+                    Vec::new()
+                }
+            },
+        );
+        // Seven distinct hosts at 200 ms each would take 1.4 s sequentially.
+        assert!(started.elapsed() < Duration::from_millis(1000));
+        let mut calls = calls.into_inner().unwrap();
+        calls.sort();
+        let before = calls.len();
+        calls.dedup();
+        assert_eq!(before, calls.len(), "a host was probed twice");
+        assert_eq!(calls.len(), 7);
+        assert_eq!(result["generativelanguage.googleapis.com"], ["192.0.2.1"]);
+        assert!(result["gemini.google.com"].is_empty());
+    }
 
     #[test]
     fn relay_requires_a_matching_address_answer_for_a_public_domain() {

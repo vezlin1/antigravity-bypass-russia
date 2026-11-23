@@ -212,9 +212,50 @@ fn registered_response(output: std::process::Output) -> Result<bool, String> {
     }))
 }
 
+/// Task Scheduler keeps every registered root task under TaskCache\Tree with
+/// its GUID in "Id"; a folder of the same name has no "Id". Reading it avoids
+/// listing every task on the system with `schtasks /Query`.
+#[cfg(windows)]
+fn registered_in_task_cache() -> Option<bool> {
+    root_task_in_cache(TASK_NAME)
+}
+
+#[cfg(windows)]
+fn root_task_in_cache(name: &str) -> Option<bool> {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_ANY, RRF_SUBKEY_WOW6464KEY,
+    };
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let key = wide(&format!(
+        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\{name}"
+    ));
+    let value = wide("Id");
+    let code = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_ANY | RRF_SUBKEY_WOW6464KEY,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    match code {
+        0 => Some(true),
+        ERROR_FILE_NOT_FOUND => Some(false),
+        // Access denied or an unexpected state: ask the scheduler itself.
+        _ => None,
+    }
+}
+
 pub fn registered_state() -> Result<bool, String> {
     #[cfg(windows)]
     {
+        if let Some(registered) = registered_in_task_cache() {
+            return Ok(registered);
+        }
         registered_response(
             crate::system::command::output("schtasks", ["/Query", "/FO", "CSV", "/NH"])
                 .map_err(|e| format!("Проверка задачи DNS-службы: {e}"))?,
@@ -237,32 +278,8 @@ pub fn registered_state() -> Result<bool, String> {
 pub fn running_state() -> Result<bool, String> {
     #[cfg(windows)]
     {
-        let out = crate::system::command::output(
-            "tasklist",
-            [
-                "/FI",
-                &format!("IMAGENAME eq {}", EXE_NAME),
-                "/FO",
-                "CSV",
-                "/NH",
-            ],
-        )
-        .map_err(|e| format!("Проверка процесса DNS-службы: {e}"))?;
-        if !out.status.success() {
-            return Err(format!(
-                "Не удалось проверить процесс DNS-службы ({}): {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            ));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).lines().any(|line| {
-            line.split(',')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .trim_matches('"')
-                .eq_ignore_ascii_case(EXE_NAME)
-        }))
+        crate::system::process::image_running(EXE_NAME)
+            .map_err(|e| format!("Проверка процесса DNS-службы: {e}"))
     }
     #[cfg(target_os = "linux")]
     return linux_worker_pids().map(|pids| !pids.is_empty());
@@ -346,7 +363,10 @@ fn stop_worker() -> Result<(), String> {
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    // The relay's route helpers run as child processes; stop them with it.
+    #[cfg(windows)]
+    crate::system::process::terminate_image_tree(EXE_NAME, std::time::Duration::from_secs(2))?;
+    #[cfg(target_os = "macos")]
     crate::system::process::stop_process_by_name(EXE_NAME);
     Ok(())
 }
@@ -638,11 +658,9 @@ pub fn enable(reuse_registration: bool, replacement_attempted: &mut bool) -> Res
         let staged = prepare_service_binary(&src, &dst)?;
         finish_prepared_service_binary(&staged)?;
         *replacement_attempted = true;
+        // RestartOnFailure is set: end the task before stop_worker kills it.
         #[cfg(target_os = "windows")]
-        {
-            let _ = crate::system::command::output("schtasks", ["/End", "/TN", TASK_NAME]);
-            let _ = crate::system::command::output("taskkill", ["/F", "/T", "/IM", EXE_NAME]);
-        }
+        let _ = crate::system::command::output("schtasks", ["/End", "/TN", TASK_NAME]);
         #[cfg(target_os = "macos")]
         {
             unload_mac_job()?;
@@ -658,7 +676,6 @@ pub fn enable(reuse_registration: bool, replacement_attempted: &mut bool) -> Res
 
         let mut copy_res = Err(std::io::Error::new(std::io::ErrorKind::Other, "init"));
         for attempt in 0..20 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
             // Rename on the same filesystem replaces the old binary atomically.
             // A failed attempt keeps both the old binary and the staged copy.
             copy_res = fs::rename(&staged, &dst);
@@ -667,13 +684,11 @@ pub fn enable(reuse_registration: bool, replacement_attempted: &mut bool) -> Res
             }
             if attempt % 5 == 0 {
                 #[cfg(target_os = "windows")]
-                {
-                    let _ = crate::system::command::output("schtasks", ["/End", "/TN", TASK_NAME]);
-                    let _ =
-                        crate::system::command::output("taskkill", ["/F", "/T", "/IM", EXE_NAME]);
-                }
+                let _ = crate::system::command::output("schtasks", ["/End", "/TN", TASK_NAME]);
                 stop_worker()?;
             }
+            // stop_worker waits for exit; the image file can stay locked briefly.
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         copy_res.map_err(|e| {
@@ -972,7 +987,6 @@ pub fn disable() -> Result<(), String> {
     {
         let _ = crate::system::command::output("schtasks", ["/End", "/TN", TASK_NAME]);
         let _ = crate::system::command::output("schtasks", ["/Delete", "/TN", TASK_NAME, "/F"]);
-        let _ = crate::system::command::output("taskkill", ["/F", "/T", "/IM", EXE_NAME]);
     }
     #[cfg(target_os = "macos")]
     {
