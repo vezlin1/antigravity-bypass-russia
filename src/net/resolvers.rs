@@ -15,6 +15,17 @@ use std::time::{Duration, Instant};
 
 const REFERENCE_V4: &[&str] = &["8.8.8.8", "1.1.1.1"];
 const REFERENCE_STUBS: [Ipv4Addr; 2] = [Ipv4Addr::new(8, 6, 112, 0), Ipv4Addr::new(8, 47, 69, 0)];
+// Reference answers only tell which Google netblocks a name normally uses.
+// Reuse them for a while instead of asking both public resolvers on every miss.
+const REFERENCE_TTL_ANSWER: Duration = Duration::from_secs(300);
+const REFERENCE_TTL_FAILURE: Duration = Duration::from_secs(30);
+type ReferenceKey = (String, u16, Ipv4Addr);
+struct ReferenceEntry {
+    addrs: Option<Vec<IpAddr>>,
+    at: Instant,
+    generation: u64,
+}
+static REFERENCES: Mutex<Option<HashMap<ReferenceKey, ReferenceEntry>>> = Mutex::new(None);
 
 const LIVENESS_PORT: u16 = 443;
 const LIVENESS_BUDGET: Duration = Duration::from_millis(250);
@@ -378,6 +389,66 @@ fn collect_race_with(
     (hits, reference)
 }
 
+fn reference_question(query: &[u8]) -> Option<(String, u16)> {
+    Some((
+        question_name(query)?.to_ascii_lowercase(),
+        question_type(query)?,
+    ))
+}
+
+/// Addresses from every reference resolver, if all of them have a fresh entry
+/// (an answer or a recent failure) for this question.
+fn cached_references(question: &(String, u16)) -> Option<Vec<IpAddr>> {
+    let generation = NETWORK_GENERATION.load(Ordering::Acquire);
+    let guard = REFERENCES.lock().ok()?;
+    let cache = guard.as_ref()?;
+    let mut merged = Vec::new();
+    for ns in REFERENCE_V4 {
+        let key = (question.0.clone(), question.1, ns.parse().ok()?);
+        let entry = cache.get(&key)?;
+        let ttl = if entry.addrs.is_some() {
+            REFERENCE_TTL_ANSWER
+        } else {
+            REFERENCE_TTL_FAILURE
+        };
+        if entry.generation != generation || entry.at.elapsed() >= ttl {
+            return None;
+        }
+        for addr in entry.addrs.iter().flatten() {
+            if !merged.contains(addr) {
+                merged.push(*addr);
+            }
+        }
+    }
+    Some(merged)
+}
+
+fn remember_reference(
+    question: (String, u16),
+    server: Ipv4Addr,
+    addrs: Option<Vec<IpAddr>>,
+    generation: u64,
+) {
+    let Ok(mut guard) = REFERENCES.lock() else {
+        return;
+    };
+    if generation != NETWORK_GENERATION.load(Ordering::Acquire) {
+        return;
+    }
+    let cache = guard.get_or_insert_with(HashMap::new);
+    if cache.len() >= CACHE_CAPACITY {
+        cache.clear();
+    }
+    cache.insert(
+        (question.0, question.1, server),
+        ReferenceEntry {
+            addrs,
+            at: Instant::now(),
+            generation,
+        },
+    );
+}
+
 fn race_providers(
     pool: &[ActiveProvider],
     query: &[u8],
@@ -404,21 +475,34 @@ fn race_providers(
             let _ = tx.send(RaceMsg::Done(idx));
         });
     }
-    for ns in REFERENCE_V4 {
-        let query = query.to_vec();
-        let tx = tx.clone();
-        let ip = ns.parse().unwrap();
-        thread::spawn(move || {
-            if let Ok(reply) = query_raw_via(&query, ip, 0, resolver_pool::UDP_TIMEOUT) {
-                if is_successful_response(&reply) {
-                    let addrs = answer_addrs(&reply)
+    let question = reference_question(query);
+    if let Some(addrs) = question.as_ref().and_then(cached_references) {
+        let _ = tx.send(RaceMsg::Reference(addrs));
+    } else {
+        let generation = NETWORK_GENERATION.load(Ordering::Acquire);
+        for ns in REFERENCE_V4 {
+            let query = query.to_vec();
+            let tx = tx.clone();
+            let question = question.clone();
+            let ip = ns.parse().unwrap();
+            thread::spawn(move || {
+                let reply = query_raw_via(&query, ip, 0, resolver_pool::UDP_TIMEOUT)
+                    .ok()
+                    .filter(|reply| is_successful_response(reply));
+                let addrs = reply.map(|reply| {
+                    answer_addrs(&reply)
                         .into_iter()
                         .filter(|a| !matches!(a, IpAddr::V4(ip) if REFERENCE_STUBS.contains(ip)))
-                        .collect();
+                        .collect::<Vec<_>>()
+                });
+                if let Some(question) = question {
+                    remember_reference(question, ip, addrs.clone(), generation);
+                }
+                if let Some(addrs) = addrs {
                     let _ = tx.send(RaceMsg::Reference(addrs));
                 }
-            }
-        });
+            });
+        }
     }
     drop(tx);
     let settle = early.then(|| Settle {
@@ -740,10 +824,48 @@ pub fn invalidate_network_caches() {
     if let Ok(mut cache) = LIVENESS.lock() {
         *cache = None;
     }
+    if let Ok(mut cache) = REFERENCES.lock() {
+        *cache = None;
+    }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reference_answers_are_reused_only_while_both_resolvers_are_fresh() {
+        let question = ("reference-cache.example".to_string(), 1);
+        let google: Ipv4Addr = "8.8.8.8".parse().unwrap();
+        let cloudflare: Ipv4Addr = "1.1.1.1".parse().unwrap();
+        let generation = NETWORK_GENERATION.load(Ordering::Acquire);
+        remember_reference(
+            question.clone(),
+            google,
+            Some(vec![v4(142, 250, 1, 1)]),
+            generation,
+        );
+        assert_eq!(cached_references(&question), None);
+        remember_reference(question.clone(), cloudflare, None, generation);
+        assert_eq!(cached_references(&question), Some(vec![v4(142, 250, 1, 1)]));
+        remember_reference(
+            question.clone(),
+            cloudflare,
+            Some(vec![v4(142, 250, 1, 1), v4(172, 217, 2, 2)]),
+            generation,
+        );
+        assert_eq!(
+            cached_references(&question),
+            Some(vec![v4(142, 250, 1, 1), v4(172, 217, 2, 2)])
+        );
+        // An answer from before a network change is neither served nor stored.
+        remember_reference(
+            question.clone(),
+            google,
+            Some(vec![]),
+            generation.wrapping_sub(1),
+        );
+        assert_eq!(cached_references(&question).map(|a| a.len()), Some(2));
+    }
 
     fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))

@@ -3,7 +3,7 @@ use super::{client, config, dns_https};
 use std::{
     net::Ipv4Addr,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex},
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
 
@@ -43,33 +43,18 @@ impl Provider {
                 .ok()
                 .map(|reply| (reply, None)),
             Transport::Udp(ips) => {
-                let (tx, rx) = mpsc::channel();
-                for ip in ips {
-                    let ip = *ip;
-                    let query = query.to_vec();
-                    let tx = tx.clone();
-                    std::thread::spawn(move || {
-                        if let Ok(reply) = client::query_raw_via(&query, ip, interface, UDP_TIMEOUT)
-                        {
-                            if client::is_successful_response(&reply) {
-                                let _ = tx.send((reply, Some(ip)));
-                            }
-                        }
-                    });
-                }
-                drop(tx);
-                let deadline = std::time::Instant::now() + UDP_TIMEOUT + Duration::from_millis(50);
+                // One socket for every address of this provider; the first
+                // reply with an address wins, an empty one is the fallback.
                 let wants_address = matches!(client::question_type(query), Some(1 | 28));
-                let mut empty = None;
-                while let Ok(result) =
-                    rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
-                {
-                    if !wants_address || !client::answer_addrs(&result.0).is_empty() {
-                        return Some(result);
-                    }
-                    empty = Some(result);
-                }
-                empty
+                client::query_servers(
+                    query,
+                    ips,
+                    interface,
+                    UDP_TIMEOUT,
+                    client::is_successful_response,
+                    |reply| !wants_address || !client::answer_addrs(reply).is_empty(),
+                )
+                .map(|(reply, ip)| (reply, Some(ip)))
             }
         }
     }

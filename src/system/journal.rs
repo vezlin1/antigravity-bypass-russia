@@ -63,6 +63,9 @@ fn apply_impl(
     if current.as_deref() != before {
         return Err("Файл изменён другим процессом; повторите проверку".into());
     }
+    // `current` equals `before`: hash those bytes once for every comparison
+    // and record field below (a 100 MB executable takes noticeable time).
+    let before_hash = digest(before.unwrap_or_default());
     let dir = directory(path);
     super::fs_utils::create_private_directory(&dir)?;
     let old_bytes = read_optional(&record_path(path))?;
@@ -71,22 +74,23 @@ fn apply_impl(
         .map(|bytes| parse_record(bytes))
         .transpose()?;
     let continuation = old_record.as_ref().filter(|r| {
-        current.as_ref().is_some_and(|b| {
-            let hash = digest(b);
-            hash == r.modified || r.previous.as_ref() == Some(&hash)
-        })
+        current.is_some()
+            && (before_hash == r.modified || r.previous.as_ref() == Some(&before_hash))
     });
     if require_continuation && continuation.is_none() {
         return Err("Журнал прежнего патча недоступен или изменён; обновление отменено".into());
     }
     let original = continuation
         .map(|r| r.original.clone())
-        .unwrap_or_else(|| digest(before.unwrap_or_default()));
+        .unwrap_or_else(|| before_hash.clone());
     let backup = dir.join(format!("{original}.bin"));
-    if !backup.exists() && continuation.is_none() {
+    let wrote_backup = !backup.exists() && continuation.is_none();
+    if wrote_backup {
         guarded_write_file(&backup, None, Some(before.unwrap_or_default()))?;
     }
-    if digest(&fs::read(&backup).map_err(|e| e.to_string())?) != original {
+    // A backup written just now holds exactly the hashed bytes; reading it back
+    // would only hit the page cache. An existing backup is always verified.
+    if !wrote_backup && digest(&fs::read(&backup).map_err(|e| e.to_string())?) != original {
         return Err("Повреждена резервная копия; запись отменена".into());
     }
     let snapshots = profile.ends_with("jsonc");
@@ -105,7 +109,7 @@ fn apply_impl(
         schema: 1,
         original,
         modified: digest(after),
-        previous: continuation.map(|_| digest(before.unwrap_or_default())),
+        previous: continuation.map(|_| before_hash.clone()),
         existed: continuation.map(|r| r.existed).unwrap_or(before.is_some()),
         profile: profile.into(),
         snapshots,
@@ -116,9 +120,8 @@ fn apply_impl(
         old_bytes.as_deref(),
         Some(&serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?),
     )?;
-    if read_optional(path)?.as_deref() != before {
-        return Err("Файл изменился во время подготовки backup".into());
-    }
+    // The guarded write compares the file with `before` under its lock, so a
+    // change during backup preparation is still refused without another read.
     guarded_write_file(path, before, Some(after))
 }
 
@@ -215,13 +218,12 @@ fn archive_record(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// Retire a restored/superseded journal while retaining all exact backups.
 pub fn retire(path: &Path, expected: Option<&[u8]>) -> Result<(), String> {
-    if read_optional(path)?.as_deref() != expected {
-        return Err("Файл изменён во время завершения отката; журнал сохранён".into());
-    }
     let Some(record_bytes) = read_optional(&record_path(path))? else {
         return Ok(());
     };
     parse_record(&record_bytes)?;
+    // Archiving only adds a content-addressed copy; the file is compared once,
+    // right before the active record is removed.
     archive_record(path, &record_bytes)?;
     if read_optional(path)?.as_deref() != expected {
         return Err("Файл обновлён во время завершения отката; журнал сохранён".into());
@@ -296,19 +298,17 @@ fn restore_with(path: &Path, before_commit: impl FnOnce()) -> Result<bool, Strin
     };
     let record = parse_record(&bytes)?;
     let current = read_optional(path)?;
-    if (record.existed
-        && current
-            .as_ref()
-            .is_some_and(|b| digest(b) == record.original))
+    let current_hash = current.as_deref().map(digest);
+    if (record.existed && current_hash.as_ref() == Some(&record.original))
         || (!record.existed && current.is_none())
     {
         retire(path, current.as_deref())?;
         return Ok(true);
     }
-    if !current.as_ref().is_some_and(|b| {
-        let hash = digest(b);
-        hash == record.modified || record.previous.as_ref() == Some(&hash)
-    }) {
+    if !current_hash
+        .as_ref()
+        .is_some_and(|hash| *hash == record.modified || record.previous.as_ref() == Some(hash))
+    {
         return Err("Файл обновлён/отредактирован после патча; старая копия не применена".into());
     }
     let backup = original_bytes(path, &record)?;
@@ -322,6 +322,22 @@ fn restore_with(path: &Path, before_commit: impl FnOnce()) -> Result<bool, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fresh_backup_is_exact_and_a_corrupt_existing_backup_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("app.exe");
+        fs::write(&p, b"stock").unwrap();
+        apply(&p, Some(b"stock"), b"patched", "cli").unwrap();
+        let backup = directory(&p).join(format!("{}.bin", digest(b"stock")));
+        assert_eq!(fs::read(&backup).unwrap(), b"stock");
+        assert!(restore(&p).unwrap());
+        assert_eq!(fs::read(&p).unwrap(), b"stock");
+
+        fs::write(&backup, b"damaged").unwrap();
+        let error = apply(&p, Some(b"stock"), b"patched", "cli").unwrap_err();
+        assert!(error.contains("Повреждена резервная копия"), "{error}");
+        assert_eq!(fs::read(&p).unwrap(), b"stock");
+    }
     #[test]
     fn updater_during_rollback_keeps_new_version_and_original_journal() {
         let d = tempfile::tempdir().unwrap();

@@ -20,6 +20,91 @@ pub const HEALTH_PORT: u16 = 15353;
 pub const HEALTH_NAME: &str = "antigravity-relay-health.invalid";
 // A miss can block a worker for the whole upstream budget; keep queries from queuing behind it.
 const WORKER_THREADS: usize = 32;
+// Workers are added only while every running one is busy and leave after a
+// quiet minute, so an idle relay keeps a couple of small threads.
+const MIN_WORKERS: usize = 2;
+const WORKER_IDLE_EXIT: Duration = Duration::from_secs(60);
+// Upstream lookups and DoH transfers run on their own threads; a worker only
+// parses packets and coordinates them.
+const WORKER_STACK: usize = 512 * 1024;
+
+type Job = (Vec<u8>, std::net::SocketAddr);
+
+/// Grows from MIN_WORKERS to WORKER_THREADS on demand.
+struct WorkerPool {
+    jobs: Mutex<mpsc::Receiver<Job>>,
+    socket: Arc<UdpSocket>,
+    policy: RoutePolicy,
+    total: std::sync::atomic::AtomicUsize,
+    idle: std::sync::atomic::AtomicUsize,
+}
+
+impl WorkerPool {
+    fn spawn_worker(pool: &Arc<Self>) {
+        use std::sync::atomic::Ordering;
+        if pool
+            .total
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |total| {
+                (total < WORKER_THREADS).then_some(total + 1)
+            })
+            .is_err()
+        {
+            return;
+        }
+        let worker = Arc::clone(pool);
+        let spawned = thread::Builder::new()
+            .name("ag-dns-worker".into())
+            .stack_size(WORKER_STACK)
+            .spawn(move || worker.run());
+        if spawned.is_err() {
+            pool.total.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+
+    fn run(&self) {
+        use std::sync::atomic::Ordering;
+        loop {
+            self.idle.fetch_add(1, Ordering::AcqRel);
+            let job = match self.jobs.lock() {
+                Ok(jobs) => jobs.recv_timeout(WORKER_IDLE_EXIT),
+                Err(_) => Err(mpsc::RecvTimeoutError::Disconnected),
+            };
+            self.idle.fetch_sub(1, Ordering::AcqRel);
+            match job {
+                Ok((query, client_addr)) => {
+                    if let Some(resp) = relay(&query, self.policy) {
+                        let _ = self.socket.send_to(&resp, client_addr);
+                    } else {
+                        let name = question_name(&query).unwrap_or_else(|| "?".into());
+                        log_fatal(&format!("no answer for {} from {:?}", name, client_addr));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let retired = self
+                        .total
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |total| {
+                            (total > MIN_WORKERS).then_some(total - 1)
+                        })
+                        .is_ok();
+                    if retired {
+                        return;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.total.fetch_sub(1, Ordering::AcqRel);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Called after queueing a job: add a worker if none is waiting for it.
+    fn ensure_capacity(pool: &Arc<Self>) {
+        if pool.idle.load(std::sync::atomic::Ordering::Acquire) == 0 {
+            Self::spawn_worker(pool);
+        }
+    }
+}
 
 static UPSTREAM_CACHE: std::sync::RwLock<Option<Vec<Ipv4Addr>>> = std::sync::RwLock::new(None);
 static IF_INDEX_CACHE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -417,31 +502,16 @@ pub fn run() -> Result<(), String> {
     });
     let sock_arc = Arc::new(socket);
 
-    let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, std::net::SocketAddr)>(256);
-    let rx = Arc::new(Mutex::new(rx));
-    for _ in 0..WORKER_THREADS {
-        let rx_c = Arc::clone(&rx);
-        let sock_c = Arc::clone(&sock_arc);
-        thread::spawn(move || loop {
-            let job = {
-                let guard = match rx_c.lock() {
-                    Ok(g) => g,
-                    Err(_) => break,
-                };
-                guard.recv()
-            };
-            match job {
-                Ok((query, client_addr)) => {
-                    if let Some(resp) = relay(&query, policy) {
-                        let _ = sock_c.send_to(&resp, client_addr);
-                    } else {
-                        let name = question_name(&query).unwrap_or_else(|| "?".into());
-                        log_fatal(&format!("no answer for {} from {:?}", name, client_addr));
-                    }
-                }
-                Err(_) => break,
-            }
-        });
+    let (tx, rx) = mpsc::sync_channel::<Job>(256);
+    let pool = Arc::new(WorkerPool {
+        jobs: Mutex::new(rx),
+        socket: Arc::clone(&sock_arc),
+        policy,
+        total: Default::default(),
+        idle: Default::default(),
+    });
+    for _ in 0..MIN_WORKERS {
+        WorkerPool::spawn_worker(&pool);
     }
 
     let mut buf = [0u8; 1500];
@@ -452,7 +522,9 @@ pub fn run() -> Result<(), String> {
                 backoff_ms = 100;
                 if n >= 12 {
                     let query = buf[..n].to_vec();
-                    let _ = tx.try_send((query, client_addr));
+                    if tx.try_send((query, client_addr)).is_ok() {
+                        WorkerPool::ensure_capacity(&pool);
+                    }
                 }
             }
             Err(e) => {
@@ -669,6 +741,47 @@ mod tests {
             .unwrap();
         assert!(retried);
         assert_eq!(refresh.applied, changed);
+    }
+
+    #[test]
+    fn worker_pool_starts_small_answers_every_job_and_stays_bounded() {
+        use std::sync::atomic::Ordering;
+        let relay_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let (tx, rx) = mpsc::sync_channel::<Job>(256);
+        let pool = Arc::new(WorkerPool {
+            jobs: Mutex::new(rx),
+            socket: Arc::clone(&relay_socket),
+            policy: RoutePolicy::Physical,
+            total: Default::default(),
+            idle: Default::default(),
+        });
+        for _ in 0..MIN_WORKERS {
+            WorkerPool::spawn_worker(&pool);
+        }
+        assert_eq!(pool.total.load(Ordering::Acquire), MIN_WORKERS);
+        // AAAA questions are answered locally, without upstream traffic.
+        let jobs = 40u16;
+        for id in 0..jobs {
+            let mut query =
+                crate::net::client::build_query("daily-cloudcode-pa.googleapis.com", id);
+            let at = query.len() - 4;
+            query[at..at + 2].copy_from_slice(&28u16.to_be_bytes());
+            tx.send((query, client.local_addr().unwrap())).unwrap();
+            WorkerPool::ensure_capacity(&pool);
+        }
+        let mut answered = std::collections::HashSet::new();
+        let mut bytes = [0u8; 512];
+        while answered.len() < usize::from(jobs) {
+            let (n, _) = client.recv_from(&mut bytes).unwrap();
+            answered.insert(u16::from_be_bytes([bytes[0], bytes[1]]));
+            assert!(n >= 12);
+        }
+        let total = pool.total.load(Ordering::Acquire);
+        assert!((MIN_WORKERS..=WORKER_THREADS).contains(&total), "{total}");
     }
 
     #[test]

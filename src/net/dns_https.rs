@@ -18,6 +18,11 @@ pub(super) fn invalidate_connections() {
             clients.clear();
         }
     }
+    if let Some(preferred) = PREFERRED_BOOTSTRAP.get() {
+        if let Ok(mut preferred) = preferred.lock() {
+            preferred.clear();
+        }
+    }
 }
 
 fn source_address(if_index: u32) -> Result<Option<IpAddr>, String> {
@@ -210,8 +215,40 @@ pub fn query(provider: &DohProvider, query: &[u8], if_index: u32) -> Result<Vec<
 
 #[derive(Clone, Copy)]
 enum Attempt {
-    Bootstrap,
+    Bootstrap(IpAddr),
     System,
+}
+
+/// A further bootstrap address starts only if the earlier ones stay silent this
+/// long (or fail), instead of every address receiving every query.
+const BOOTSTRAP_STAGGER: Duration = Duration::from_millis(200);
+
+/// The bootstrap address that answered last, per provider, tried first.
+static PREFERRED_BOOTSTRAP: OnceLock<Mutex<HashMap<String, IpAddr>>> = OnceLock::new();
+
+fn bootstrap_key(provider: &DohProvider) -> String {
+    format!("{}|{:?}", provider.url, provider.bootstrap)
+}
+
+fn preferred_bootstrap(provider: &DohProvider) -> Option<IpAddr> {
+    PREFERRED_BOOTSTRAP
+        .get()?
+        .lock()
+        .ok()?
+        .get(&bootstrap_key(provider))
+        .copied()
+}
+
+fn remember_bootstrap(provider: &DohProvider, address: IpAddr) {
+    if let Ok(mut preferred) = PREFERRED_BOOTSTRAP
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+    {
+        if preferred.len() >= 32 {
+            preferred.clear();
+        }
+        preferred.insert(bootstrap_key(provider), address);
+    }
 }
 
 fn race_exchanges(
@@ -228,12 +265,29 @@ fn race_exchanges(
     let start = |attempt, candidate| {
         spawn_exchange(&tx, attempt, candidate, deadline, Arc::clone(&exchange));
     };
-    let mut bootstrap_pending = provider.bootstrap.len();
-    for ip in &provider.bootstrap {
-        let mut candidate = provider.clone();
-        candidate.bootstrap = vec![*ip];
-        start(Attempt::Bootstrap, candidate);
+    // The address that answered last goes first; the rest keep their order.
+    let mut queue = provider.bootstrap.clone();
+    if let Some(preferred) = preferred_bootstrap(provider) {
+        if let Some(position) = queue.iter().position(|ip| *ip == preferred) {
+            let preferred = queue.remove(position);
+            queue.insert(0, preferred);
+        }
     }
+    let mut queue = std::collections::VecDeque::from(queue);
+    let start_next_bootstrap = |queue: &mut std::collections::VecDeque<IpAddr>| {
+        let Some(ip) = queue.pop_front() else {
+            return false;
+        };
+        let mut candidate = provider.clone();
+        candidate.bootstrap = vec![ip];
+        start(Attempt::Bootstrap(ip), candidate);
+        true
+    };
+    // Unstarted addresses count as pending: the system fallback still waits
+    // for every bootstrap address to fail or for its own delay.
+    let mut bootstrap_pending = provider.bootstrap.len();
+    let mut next_stagger =
+        start_next_bootstrap(&mut queue).then(|| Instant::now() + BOOTSTRAP_STAGGER);
     let mut system = provider.clone();
     system.bootstrap.clear();
     let mut system_started = bootstrap_pending == 0;
@@ -243,17 +297,21 @@ fn race_exchanges(
     }
     let mut bootstrap_error = None;
     let mut system_error = None;
-    let mut best: Option<(AnswerQuality, Vec<u8>)> = None;
+    let mut best: Option<(AnswerQuality, Vec<u8>, Option<IpAddr>)> = None;
     let mut settle_at = deadline;
     loop {
-        if Instant::now() >= settle_at {
+        let now = Instant::now();
+        if now >= settle_at {
             break;
+        }
+        if next_stagger.is_some_and(|at| now >= at) {
+            next_stagger = start_next_bootstrap(&mut queue).then(|| now + BOOTSTRAP_STAGGER);
         }
         let may_start_system = !system_started
             && best
                 .as_ref()
-                .is_none_or(|(quality, _)| *quality < AnswerQuality::Ordinary);
-        if may_start_system && (bootstrap_pending == 0 || Instant::now() >= fallback_at) {
+                .is_none_or(|(quality, _, _)| *quality < AnswerQuality::Ordinary);
+        if may_start_system && (bootstrap_pending == 0 || now >= fallback_at) {
             // Fast failures need no artificial delay; silent addresses still
             // get the bootstrap preference window. All attempts share a deadline.
             start(Attempt::System, system.clone());
@@ -263,41 +321,68 @@ fn race_exchanges(
         if bootstrap_pending == 0 && !system_pending {
             break;
         }
-        let until = if may_start_system && !system_started {
+        let mut until = if may_start_system && !system_started {
             settle_at.min(fallback_at)
         } else {
             settle_at
         };
+        if let Some(at) = next_stagger {
+            until = until.min(at);
+        }
         match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
             Ok((attempt, result)) => {
-                match attempt {
-                    Attempt::Bootstrap => bootstrap_pending -= 1,
-                    Attempt::System => system_pending = false,
-                }
+                let source = match attempt {
+                    Attempt::Bootstrap(ip) => {
+                        bootstrap_pending -= 1;
+                        Some(ip)
+                    }
+                    Attempt::System => {
+                        system_pending = false;
+                        None
+                    }
+                };
                 match result {
                     Ok(answer) => {
                         let quality = answer_quality(&answer);
                         if quality == AnswerQuality::Preferred {
+                            if let Some(ip) = source {
+                                remember_bootstrap(provider, ip);
+                            }
                             return Ok(answer);
                         }
-                        if best.as_ref().is_none_or(|(old, _)| quality > *old) {
-                            best = Some((quality, answer));
+                        // A weaker answer: let every remaining address compete,
+                        // with as long as this one needed plus the usual grace.
+                        while start_next_bootstrap(&mut queue) {}
+                        next_stagger = None;
+                        if best.as_ref().is_none_or(|(old, _, _)| quality > *old) {
+                            best = Some((quality, answer, source));
                             if quality == AnswerQuality::Ordinary {
-                                settle_at = deadline.min(Instant::now() + ANSWER_GRACE);
+                                let now = Instant::now();
+                                settle_at = deadline.min(now + ANSWER_GRACE + (now - started));
                             }
                         }
                     }
-                    Err(error) => match attempt {
-                        Attempt::Bootstrap => bootstrap_error = Some(error),
-                        Attempt::System => system_error = Some(error),
-                    },
+                    Err(error) => {
+                        if source.is_some() {
+                            // Do not wait for the stagger after a failure.
+                            if start_next_bootstrap(&mut queue) {
+                                next_stagger = Some(Instant::now() + BOOTSTRAP_STAGGER);
+                            }
+                            bootstrap_error = Some(error);
+                        } else {
+                            system_error = Some(error);
+                        }
+                    }
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    if let Some((_, answer)) = best {
+    if let Some((_, answer, source)) = best {
+        if let Some(ip) = source {
+            remember_bootstrap(provider, ip);
+        }
         return Ok(answer);
     }
     let timeout = "DoH: deadline expired";
@@ -380,6 +465,59 @@ mod tests {
 
     fn a_reply(host: &str, ip: [u8; 4]) -> Vec<u8> {
         client::address_response(&client::build_query(host, 71), &[ip.into()]).unwrap()
+    }
+
+    #[test]
+    fn bootstrap_addresses_are_staggered_and_the_last_winner_goes_first() {
+        let mut p = provider(true);
+        p.url = "https://stagger.invalid/dns-query".into();
+        p.bootstrap.push("192.0.2.2".parse().unwrap());
+        let first: IpAddr = "192.0.2.1".parse().unwrap();
+        let second: IpAddr = "192.0.2.2".parse().unwrap();
+        let reply = a_reply("example.test", [192, 0, 2, 9]);
+
+        // A healthy first address answers alone.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        let answer = reply.clone();
+        race_exchanges(&p, TIMEOUT, SYSTEM_DNS_DELAY, move |candidate, _| {
+            seen.lock().unwrap().push(candidate.bootstrap.clone());
+            Ok(answer.clone())
+        })
+        .unwrap();
+        assert_eq!(*calls.lock().unwrap(), [vec![first]]);
+
+        // A silent first address hands over after the stagger, not at once.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        let answer = reply.clone();
+        let started = Instant::now();
+        race_exchanges(&p, TIMEOUT, SYSTEM_DNS_DELAY, move |candidate, _| {
+            seen.lock()
+                .unwrap()
+                .push((candidate.bootstrap.clone(), started.elapsed()));
+            if candidate.bootstrap == [first] {
+                std::thread::sleep(Duration::from_millis(600));
+                Err("silent".into())
+            } else {
+                Ok(answer.clone())
+            }
+        })
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls[1].0, [second]);
+        assert!(calls[1].1 >= BOOTSTRAP_STAGGER - Duration::from_millis(20));
+
+        // The address that answered is tried first next time.
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        race_exchanges(&p, TIMEOUT, SYSTEM_DNS_DELAY, move |candidate, _| {
+            seen.lock().unwrap().push(candidate.bootstrap.clone());
+            Ok(reply.clone())
+        })
+        .unwrap();
+        assert_eq!(*calls.lock().unwrap(), [vec![second]]);
     }
 
     #[test]

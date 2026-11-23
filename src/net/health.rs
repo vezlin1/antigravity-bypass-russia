@@ -73,6 +73,52 @@ pub(super) fn probe_browser_connected(
     Ok(())
 }
 
+/// A blocking socket whose every read and write waits at most until the
+/// shared deadline. Unlike polling a non-blocking socket every 2 ms, the
+/// thread sleeps in the kernel until data arrives or the time is up.
+struct DeadlineStream {
+    stream: TcpStream,
+    deadline: Instant,
+}
+
+impl DeadlineStream {
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|left| !left.is_zero())
+            // Reported like an expired socket timeout; callers check the deadline.
+            .ok_or_else(|| std::io::ErrorKind::WouldBlock.into())
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.remaining()?;
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
+    }
+}
+
+impl Write for DeadlineStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let left = self.remaining()?;
+        self.stream.set_write_timeout(Some(left))?;
+        self.stream.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+/// A socket timeout surfaces as WouldBlock on Unix and TimedOut on Windows.
+fn timed_out(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
 fn probe_response(
     stream: TcpStream,
     host: &str,
@@ -84,8 +130,8 @@ fn probe_response(
     if Instant::now() >= deadline {
         return Err("TLS: общий срок проверки истёк".into());
     }
-    stream.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let mut handshake = connector.connect(host, stream);
+    stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+    let mut handshake = connector.connect(host, DeadlineStream { stream, deadline });
     let mut tls = loop {
         if Instant::now() >= deadline {
             return Err("TLS: общий срок проверки истёк".into());
@@ -93,12 +139,13 @@ fn probe_response(
         match handshake {
             Ok(tls) => break tls,
             Err(native_tls::HandshakeError::Failure(e)) => {
-                return Err(format!("TLS/certificate: {e}"))
+                if Instant::now() >= deadline {
+                    return Err("TLS: общий срок проверки истёк".into());
+                }
+                return Err(format!("TLS/certificate: {e}"));
             }
-            Err(native_tls::HandshakeError::WouldBlock(mid)) => {
-                std::thread::sleep(Duration::from_millis(2));
-                handshake = mid.handshake();
-            }
+            // A read or write waited until its timeout; retry within the deadline.
+            Err(native_tls::HandshakeError::WouldBlock(mid)) => handshake = mid.handshake(),
         }
     };
     let request =
@@ -111,9 +158,7 @@ fn probe_response(
         match tls.write(&request.as_bytes()[sent..]) {
             Ok(0) => return Err("HTTP write: EOF".into()),
             Ok(n) => sent += n,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(2))
-            }
+            Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.to_string()),
         }
     }
@@ -135,9 +180,7 @@ fn probe_response(
                     return Ok(header);
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(2))
-            }
+            Err(e) if timed_out(&e) => {}
             Err(e) => return Err(e.to_string()),
         }
     }
