@@ -716,13 +716,7 @@ pub fn handle_diagnostics() -> bool {
     banner();
     println!("  ПРОВЕРКА ПОДКЛЮЧЕНИЯ\n");
     let reports = crate::net::health::probe_all();
-    let state = crate::net::route_health::store().snapshot();
-    let now = crate::net::route_health::now_ms();
     let mut ok = true;
-    if let Err(e) = &state {
-        operation_error("Не удалось прочитать историю ошибок подключения", e);
-        ok = false;
-    }
     for report in &reports {
         let label = match report.host.as_str() {
             "cloudcode-pa.googleapis.com" => "Основной сервер",
@@ -732,14 +726,6 @@ pub fn handle_diagnostics() -> bool {
         };
         if let Some(error) = &report.error {
             operation_error(&format!("{label}: нет подключения"), error);
-            ok = false;
-        } else if state
-            .as_ref()
-            .is_ok_and(|s| s.host_refused(&report.host, now))
-        {
-            println!(
-                "  \x1b[93m!\x1b[0m {label}: сеть доступна, недавно получен региональный отказ"
-            );
             ok = false;
         } else {
             println!("  \x1b[92m✓\x1b[0m {label}: TLS/HTTP-соединение доступно");

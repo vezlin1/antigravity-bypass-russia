@@ -474,9 +474,12 @@ pub fn tune_os_network_stack() -> Result<Vec<String>, String> {
         return Err("Требуются права администратора".into());
     }
     if tcp_backup_path().exists() && !tcp_state_path().exists() {
-        return Err(
-            "Обнаружен старый неполный TCP backup. Сначала разберите прежний откат.".into(),
-        );
+        // Releases 1.x changed TCP without a complete snapshot. Capturing the
+        // current values now could record their changes as the originals.
+        return Err(format!(
+            "Найден {} от версии 1.x: текущие параметры TCP могли остаться изменёнными. Сбросьте TCP к стандартным значениям (Windows: netsh int tcp reset, затем перезагрузка), удалите этот файл и повторите",
+            tcp_backup_path().display()
+        ));
     }
     if !tcp_state_path().exists() {
         let snapshot = capture_tcp()?;
@@ -504,17 +507,6 @@ pub fn tune_os_network_stack() -> Result<Vec<String>, String> {
     }
     Ok(logs)
 }
-pub fn restore_os_network_stack() -> Result<Vec<String>, String> {
-    if !tcp_state_path().exists() {
-        return if tcp_backup_path().exists() {
-            restore_legacy_tcp()
-        } else {
-            Ok(Vec::new())
-        };
-    }
-    restore_tcp_snapshot()
-}
-
 fn restore_tcp_snapshot() -> Result<Vec<String>, String> {
     let snapshot: TcpSnapshot =
         serde_json::from_slice(&fs::read(tcp_state_path()).map_err(|e| e.to_string())?)
@@ -539,12 +531,7 @@ fn restore_tcp_snapshot() -> Result<Vec<String>, String> {
     ])
 }
 
-pub fn legacy_tcp_pending() -> bool {
-    tcp_backup_path().exists() && !tcp_state_path().exists()
-}
-
-/// Ordinary DNS rollback restores only settings captured by the current engine.
-/// An older incomplete backup remains available for explicit legacy recovery.
+/// Rollback restores only settings captured by the current engine.
 pub fn restore_current_network_stack() -> Result<Vec<String>, String> {
     restore_if_current(&tcp_state_path(), restore_tcp_snapshot)
 }
@@ -556,140 +543,6 @@ fn restore_if_current(
         Ok(_) => restore(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
         Err(e) => Err(e.to_string()),
-    }
-}
-
-fn parse_legacy_tcp(text: &str) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let mut values = std::collections::BTreeMap::new();
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let (key, value) = line
-            .split_once('=')
-            .ok_or("Некорректная строка TCP backup")?;
-        let known = tcp_tunables().iter().any(|(k, _)| *k == key)
-            || cfg!(windows)
-                && matches!(
-                    key,
-                    "heuristics" | "congestion_internet" | "congestion_custom"
-                );
-        if !known
-            || value.is_empty()
-            || !value
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            || values.insert(key.into(), value.into()).is_some()
-        {
-            return Err(
-                "TCP backup содержит неизвестный, повторный или некорректный параметр".into(),
-            );
-        }
-    }
-    if values.is_empty() {
-        return Err("Старый TCP backup пуст".into());
-    }
-    Ok(values)
-}
-
-fn legacy_tcp_plan(
-    original: &std::collections::BTreeMap<String, String>,
-    current: &std::collections::BTreeMap<String, String>,
-) -> (Vec<(String, String)>, Vec<String>, usize) {
-    let mut required = tcp_tunables().to_vec();
-    if cfg!(windows) {
-        required.extend([
-            ("heuristics", "disabled"),
-            ("congestion_internet", "cubic"),
-            ("congestion_custom", "cubic"),
-        ]);
-    }
-    let mut writes = vec![];
-    let mut unresolved = vec![];
-    let mut verified = 0;
-    for (key, applied) in required {
-        match (original.get(key), current.get(key)) {
-            (None, _) => unresolved.push(format!("{key}: исходное значение отсутствует")),
-            (Some(_), None) => unresolved.push(format!("{key}: текущее значение не прочитано")),
-            (Some(before), Some(now)) if before == now => verified += 1,
-            (Some(before), Some(now)) if now == applied => {
-                writes.push((key.into(), before.clone()))
-            }
-            _ => unresolved.push(format!("{key}: изменён после настройки, сохранён")),
-        }
-    }
-    (writes, unresolved, verified)
-}
-
-#[cfg(windows)]
-fn read_legacy_heuristics() -> Option<String> {
-    let output =
-        crate::system::command::output("netsh", ["int", "tcp", "show", "heuristics"]).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let value = text.lines().find_map(|l| {
-        l.split_once(':')
-            .map(|(_, v)| v.trim().to_ascii_lowercase())
-    })?;
-    if matches!(value.as_str(), "enabled" | "disabled") {
-        Some(value)
-    } else {
-        None
-    }
-}
-
-fn restore_legacy_tcp() -> Result<Vec<String>, String> {
-    let original =
-        parse_legacy_tcp(&fs::read_to_string(tcp_backup_path()).map_err(|e| e.to_string())?)?;
-    #[allow(unused_mut)]
-    let mut current = capture_tcp()?.original;
-    #[cfg(windows)]
-    if let Some(value) = read_legacy_heuristics() {
-        current.insert("heuristics".into(), value);
-    }
-    let (writes, mut unresolved, verified) = legacy_tcp_plan(&original, &current);
-    for (key, value) in &writes {
-        #[cfg(windows)]
-        if key == "heuristics" {
-            if !matches!(value.as_str(), "enabled" | "disabled") {
-                unresolved.push("heuristics: неподдерживаемое исходное значение".into());
-                continue;
-            }
-            let output =
-                crate::system::command::output("netsh", ["int", "tcp", "set", "heuristics", value])
-                    .map_err(|e| e.to_string())?;
-            if !output.status.success() {
-                unresolved.push("heuristics: запись не выполнена".into());
-            }
-            continue;
-        }
-        if let Err(e) = write_tcp(key, value) {
-            unresolved.push(e);
-        }
-    }
-    #[allow(unused_mut)]
-    let mut after = capture_tcp()?.original;
-    #[cfg(windows)]
-    if let Some(value) = read_legacy_heuristics() {
-        after.insert("heuristics".into(), value);
-    }
-    let mut restored = verified;
-    for (key, value) in &writes {
-        if after.get(key) == Some(value) {
-            restored += 1;
-        } else {
-            unresolved.push(format!("{key}: восстановление не подтверждено"));
-        }
-    }
-    if unresolved.is_empty() {
-        // Keep the old backup as an archive, but do not retry a completed restore.
-        let bytes = fs::read(tcp_backup_path()).map_err(|e| e.to_string())?;
-        crate::system::journal::archive_legacy(&tcp_backup_path(), &bytes)?;
-        fs::remove_file(tcp_backup_path()).map_err(|e| e.to_string())?;
-        Ok(vec![format!(
-            "Старый TCP backup: восстановлено и проверено {restored} параметров"
-        )])
-    } else {
-        Err(format!("Старый TCP backup: восстановлено/уже совпадает {restored} параметров. Осталось: {}. Backup сохранён: {}. Для отсутствующих значений нужен прежний системный профиль; сброс к стандартным значениям — отдельная операция, не точный откат.", unresolved.join("; "), tcp_backup_path().display()))
     }
 }
 
@@ -720,28 +573,6 @@ mod tests {
             "damaged current backup"
         );
     }
-    #[test]
-    fn legacy_tcp_restores_only_recorded_values_and_preserves_later_edits() {
-        let first = tcp_tunables()[0];
-        let second = tcp_tunables()[1];
-        let original =
-            parse_legacy_tcp(&format!("{}=disabled\n{}=disabled", first.0, second.0)).unwrap();
-        let current = [
-            (first.0.to_string(), first.1.to_string()),
-            (second.0.to_string(), "userchanged".into()),
-        ]
-        .into_iter()
-        .collect();
-        let (writes, unresolved, _) = legacy_tcp_plan(&original, &current);
-        assert_eq!(writes, vec![(first.0.into(), "disabled".into())]);
-        assert!(unresolved
-            .iter()
-            .any(|s| s.contains(second.0) && s.contains("изменён")));
-        assert!(unresolved.iter().any(|s| s.contains("отсутствует")));
-        assert!(parse_legacy_tcp("rss=enabled\nrss=disabled").is_err());
-        assert!(parse_legacy_tcp("rss=enabled & injected").is_err());
-    }
-
     #[test]
     fn tcp_snapshot_must_contain_every_original_setting_before_writing() {
         let mut snapshot = TcpSnapshot {

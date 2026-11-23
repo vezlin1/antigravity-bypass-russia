@@ -368,7 +368,6 @@ pub fn collect() -> Value {
     let started = net::route_health::now_ms();
     let pins = net::hosts::owned_entries();
     let ranks = rank_snapshot(&net::rank::rank_path());
-    let state = net::route_health::store().snapshot();
     let mut candidates: BTreeSet<(String, Ipv4Addr)> = BTreeSet::new();
     for host in net::provider::NRPT_AGENT {
         let mut ips = BTreeSet::new();
@@ -474,7 +473,6 @@ pub fn collect() -> Value {
         "rank": ranks,
         "configured_interface": net::relay::load_if_index(),
         "configured_upstream_dns": net::relay::load_upstream_servers(),
-        "route_health": state.map(|s| s.diagnostic_snapshot(started)).unwrap_or_else(|_| unavailable("unreadable_or_invalid")),
         "recent_recovery": recent_events(&net::config::directory().join("network-events.log")),
         "previous_recovery": recent_events(&net::config::directory().join("network-events.previous.log")),
         "checks": checks
@@ -534,25 +532,6 @@ mod tests {
         assert_eq!(binary_architecture(&file), Some("x86_64"));
         fs::write(&file, b"#!/bin/sh\nSECRET").unwrap();
         assert_eq!(binary_architecture(&file), None);
-    }
-
-    #[test]
-    fn route_report_keeps_bans_but_omits_event_ids_and_unrelated_hosts() {
-        use net::route_health::{Key, State};
-        let mut state = State::default();
-        let host = "cloudcode-pa.googleapis.com";
-        let key = Key::ip(host, "1.2.3.4:443".parse().unwrap());
-        state.record(&key, Ok(12), 1000);
-        state.region_refusal("SECRET_EVENT_ID", Some(host), Some(&key.route), 1100);
-        state.record(
-            &Key::ip("SECRET_HOST", "2.3.4.5:443".parse().unwrap()),
-            Ok(12),
-            1000,
-        );
-        let result = state.diagnostic_snapshot(1200);
-        assert!(!result.to_string().contains("SECRET"));
-        assert_eq!(result["entries"].as_array().unwrap().len(), 1);
-        assert_eq!(result["entries"][0]["blocked_now"], true);
     }
 
     #[test]

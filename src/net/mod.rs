@@ -1087,12 +1087,18 @@ fn remove_dns_configuration(restore_tcp: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     linux_dns::remove()?;
     crate::system::service::disable()?;
-    // Remove only the obsolete marker from the experimental TUN mode.
-    let legacy_mode = relay::log_dir().join("hosts-mode");
-    match std::fs::remove_file(legacy_mode) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.to_string()),
+    // Remove obsolete files: the marker from the experimental TUN mode and
+    // the route score table that releases before 2.2.1 maintained.
+    for legacy in [
+        relay::log_dir().join("hosts-mode"),
+        config::directory().join("route-health.json"),
+        config::directory().join("route-health.lock"),
+    ] {
+        match std::fs::remove_file(legacy) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
     }
     if let Err(e) = crate::net::hosts::remove_entries() {
         errors.push(e);
