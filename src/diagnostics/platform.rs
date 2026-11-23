@@ -57,6 +57,7 @@ fn powershell(script: &str) -> Result<Value, &'static str> {
     serde_json::from_str(text.trim_start_matches('\u{feff}').trim()).map_err(|_| "invalid_response")
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 fn namespace(value: &str) -> Option<String> {
     let name = value.trim_start_matches('.').to_ascii_lowercase();
     if value == "."

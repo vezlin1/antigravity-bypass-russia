@@ -106,6 +106,7 @@ pub fn load() -> Result<Vec<Provider>, String> {
     from_config(&config::load()?)
 }
 
+#[cfg(windows)]
 pub fn bootstrap_v4() -> Result<Vec<Ipv4Addr>, String> {
     Ok(load()?
         .into_iter()

@@ -557,6 +557,7 @@ pub fn log_event(msg: &str) {
     }
 }
 
+#[cfg(windows)]
 pub fn local_dns_available() -> Result<bool, String> {
     match probe_local_dns() {
         Ok(passed) => Ok(passed),
@@ -574,6 +575,7 @@ pub fn local_dns_available() -> Result<bool, String> {
     }
 }
 
+#[cfg(windows)]
 fn probe_local_dns() -> std::io::Result<bool> {
     let receiver = UdpSocket::bind("127.0.0.254:53")?;
     receiver.set_read_timeout(Some(Duration::from_millis(250)))?;

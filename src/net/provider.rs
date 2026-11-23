@@ -1,3 +1,4 @@
+#[cfg(windows)]
 pub const NRPT_TAG: &str = "ANTIGRAVITY-BYPASS-RUSSIA";
 
 #[cfg(windows)]

@@ -1,9 +1,12 @@
 #[cfg(target_os = "windows")]
 use std::fs;
+#[cfg(windows)]
 use std::path::PathBuf;
 
+#[cfg(windows)]
 const BACKUP_NAME: &str = "doh_backup.conf";
 
+#[cfg(windows)]
 fn backup_path() -> PathBuf {
     crate::net::relay::log_dir().join(BACKUP_NAME)
 }
@@ -177,9 +180,12 @@ fn delete_value(subkey: &str, name: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(windows)]
 const DNSCACHE: &str = r"SYSTEM\CurrentControlSet\Services\Dnscache\Parameters";
+#[cfg(windows)]
 const DNSCLIENT: &str = r"SOFTWARE\Policies\Microsoft\Windows NT\DNSClient";
 
+#[cfg(any(windows, target_os = "macos"))]
 pub fn disable_system_doh() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
@@ -209,6 +215,7 @@ pub fn disable_system_doh() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn parse_backup(text: &str) -> Result<[Option<u32>; 2], String> {
     let mut values = Vec::new();
     for key in ["EnableAutoDoh", "DoHPolicy"] {
@@ -272,6 +279,7 @@ pub fn restore_system_doh() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
 pub fn is_doh_disabled() -> bool {
     #[cfg(target_os = "windows")]
     {

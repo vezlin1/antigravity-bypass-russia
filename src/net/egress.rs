@@ -127,6 +127,7 @@ pub(super) fn windows_vpn_route() -> Option<u32> {
 }
 
 /// Physical default route (skips VPN adapters). Used for pinning Xbox-DNS /32 routes.
+#[cfg(not(target_os = "macos"))]
 pub fn detect_physical() -> Option<(u32, String)> {
     #[cfg(target_os = "windows")]
     {

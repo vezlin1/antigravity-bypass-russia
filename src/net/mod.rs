@@ -30,7 +30,9 @@ pub use relay::{detach_console, log_fatal, run as run_dns_relay};
 use provider::nrpt_domains;
 #[cfg(windows)]
 use provider::NRPT_TAG;
-use provider::{NRPT_AGENT, NRPT_STUDIO, PRIMARY_CLOUD_CODE, SUBSTITUTION_CANARIES};
+#[cfg(any(windows, target_os = "macos", test))]
+use provider::NRPT_STUDIO;
+use provider::{NRPT_AGENT, PRIMARY_CLOUD_CODE, SUBSTITUTION_CANARIES};
 use relay::{LISTEN_IP, LISTEN_PORT};
 #[cfg(windows)]
 use routes::remove_static_routes;
@@ -38,6 +40,7 @@ use routes::RoutePolicy;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(any(windows, target_os = "macos", test))]
 fn assemble_nameservers(via_relay: bool, substituters: &[&str], fallback: &[&str]) -> String {
     let servers = if substituters.is_empty() {
         fallback
@@ -52,6 +55,7 @@ fn assemble_nameservers(via_relay: bool, substituters: &[&str], fallback: &[&str
         .join(";")
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 fn assemble_dns_rules(
     agent_rules: &[(String, Vec<&str>)],
     studio_servers: &[&str],

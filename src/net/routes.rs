@@ -1,5 +1,8 @@
+#[cfg(windows)]
 use serde::{Deserialize, Serialize};
-use std::{fs, net::Ipv4Addr, path::PathBuf};
+use std::net::Ipv4Addr;
+#[cfg(windows)]
+use std::{fs, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RoutePolicy {
@@ -8,15 +11,18 @@ pub(super) enum RoutePolicy {
     System,
 }
 
+#[cfg(windows)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct OwnedRoute {
     ip: Ipv4Addr,
     gateway: Ipv4Addr,
     interface: u32,
 }
+#[cfg(windows)]
 fn state_path() -> PathBuf {
     super::relay::log_dir().join("owned_routes.json")
 }
+#[cfg(windows)]
 fn load() -> Result<Vec<OwnedRoute>, String> {
     match fs::read(state_path()) {
         Ok(b) => serde_json::from_slice(&b).map_err(|e| format!("Журнал маршрутов: {e}")),
@@ -24,6 +30,7 @@ fn load() -> Result<Vec<OwnedRoute>, String> {
         Err(e) => Err(e.to_string()),
     }
 }
+#[cfg(windows)]
 fn save(routes: &[OwnedRoute]) -> Result<(), String> {
     fs::create_dir_all(super::relay::log_dir()).map_err(|e| e.to_string())?;
     crate::system::fs_utils::robust_write_file(
@@ -294,19 +301,17 @@ fn inspect_route_script(route: &OwnedRoute, owned: &[OwnedRoute]) -> String {
 fn add_route_script(route: &OwnedRoute) -> String {
     format!("New-NetRoute -DestinationPrefix '{}/32' -InterfaceIndex {} -NextHop '{}' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null", route.ip, route.interface, route.gateway)
 }
+#[cfg(windows)]
 pub fn remove_static_routes() -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        let owned = load()?;
-        let mut remaining = owned.clone();
-        for route in owned {
-            powershell(&remove_route_script(&route))?;
-            remaining.retain(|r| r != &route);
-            save(&remaining)?;
-        }
-        if state_path().exists() {
-            fs::remove_file(state_path()).map_err(|e| e.to_string())?;
-        }
+    let owned = load()?;
+    let mut remaining = owned.clone();
+    for route in owned {
+        powershell(&remove_route_script(&route))?;
+        remaining.retain(|r| r != &route);
+        save(&remaining)?;
+    }
+    if state_path().exists() {
+        fs::remove_file(state_path()).map_err(|e| e.to_string())?;
     }
     Ok(())
 }

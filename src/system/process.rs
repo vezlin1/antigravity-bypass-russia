@@ -221,6 +221,7 @@ pub fn no_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn stop_process_by_name(process_name: &str) {
     #[cfg(target_os = "windows")]
     {

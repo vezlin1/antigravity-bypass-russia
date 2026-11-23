@@ -140,6 +140,7 @@ pub fn classify(candidate: &[IpAddr], reference: &[IpAddr], proxy: &[IpAddr]) ->
 
 /// TLS-ok IPv4s, fastest first. TCP-open is not enough: a proxy can accept
 /// SYN and still RST or stall the handshake.
+#[cfg(windows)]
 pub fn rank_tls_v4(addrs: &[IpAddr], sni: &str) -> Vec<(Ipv4Addr, u128)> {
     rank_tls_v4_report(addrs, sni).0
 }
