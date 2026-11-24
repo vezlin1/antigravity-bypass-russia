@@ -23,24 +23,12 @@ MACOS = "antigravity-bypass-macos.sh"
 LINUX_X64 = "antigravity-bypass-linux-x64"
 LINUX_ARM64 = "antigravity-bypass-linux-arm64"
 DEB = "antigravity-bypass-linux-x64.deb"
-# Copies under the names used up to 2.5.0, so old download links keep
-# working during the transition. Remove in 3.2.
-LEGACY = {
-    "antigravity-bypass-russia.exe": WINDOWS,
-    "unlock_and_restore.sh": MACOS,
-    "antigravity-bypass-russia-linux-x64": LINUX_X64,
-    "antigravity-bypass-russia-linux-arm64": LINUX_ARM64,
-    "antigravity-bypass-russia-linux-x64.deb": DEB,
-}
-payload_names = {WINDOWS, MACOS, LINUX_X64, LINUX_ARM64, DEB, "install.sh"} | set(LEGACY)
+payload_names = {WINDOWS, MACOS, LINUX_X64, LINUX_ARM64, DEB, "install.sh"}
 if args.macos_only:
     payload_names = {"antigravity-bypass-russia-macos-arm64", "antigravity-bypass-russia-macos-x64", MACOS}
 elif args.linux_only:
     payload_names = {LINUX_X64, LINUX_ARM64, DEB, "install.sh"}
 assert {p.name for p in directory.iterdir()} == payload_names | {"SHA256SUMS.txt"}, "Unexpected or missing distribution files"
-for legacy, current in LEGACY.items():
-    if legacy in payload_names:
-        assert (directory / legacy).read_bytes() == (directory / current).read_bytes(), f"{legacy} differs from {current}"
 
 checksums = {}
 for line in (directory / "SHA256SUMS.txt").read_text(encoding="ascii").splitlines():

@@ -11,8 +11,8 @@ ARCH="$(uname -m)"
 case "$OS" in
   Linux)
     case "$ARCH" in
-      x86_64) BIN_NAME="antigravity-bypass-linux-x64"; OLD_NAME="antigravity-bypass-russia-linux-x64" ;;
-      aarch64|arm64) BIN_NAME="antigravity-bypass-linux-arm64"; OLD_NAME="antigravity-bypass-russia-linux-arm64" ;;
+      x86_64) BIN_NAME="antigravity-bypass-linux-x64" ;;
+      aarch64|arm64) BIN_NAME="antigravity-bypass-linux-arm64" ;;
       *)
         printf 'Error: Unsupported Linux architecture: %s\n' "$ARCH" >&2
         exit 1
@@ -21,7 +21,7 @@ case "$OS" in
     ;;
   Darwin)
     case "$ARCH" in
-      arm64|x86_64) BIN_NAME="antigravity-bypass-macos.sh"; OLD_NAME="unlock_and_restore.sh" ;;
+      arm64|x86_64) BIN_NAME="antigravity-bypass-macos.sh" ;;
       *)
         printf 'Error: Unsupported macOS architecture: %s\n' "$ARCH" >&2
         exit 1
@@ -55,11 +55,7 @@ download() {
   fi
 }
 
-# Releases up to 2.5.0 publish the same files under their old names.
-if ! download "$BIN_NAME"; then
-  printf 'Not found under the new name, trying %s\n' "$OLD_NAME"
-  download "$OLD_NAME"
-fi
+download "$BIN_NAME"
 
 chmod +x "$TMP_DIR/antigravity-bypass-russia"
 

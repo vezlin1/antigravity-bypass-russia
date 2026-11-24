@@ -145,9 +145,7 @@ jobs:
           path: dist/raw
           merge-multiple: true
 
-      # Release files are named antigravity-bypass-<system>[-<cpu>]. Copies under
-      # the names used up to 2.5.0 keep old download links working for now;
-      # verify_distribution.py checks they are identical. Remove them in 3.2.
+      # Release files are named antigravity-bypass-<system>[-<cpu>].
       - name: Prepare Windows files
         run: |
           mkdir -p dist/release
@@ -171,18 +169,9 @@ jobs:
       - name: Bundle native macOS engines
         run: python scripts/bundle_macos_launcher.py --arm64 dist/raw/antigravity-bypass-russia-macos-arm64 --x64 dist/raw/antigravity-bypass-russia-macos-x64 --output dist/release/antigravity-bypass-macos.sh
 
-      - name: Copies under the names of 2.5.0
-        working-directory: dist/release
-        run: |
-          cp antigravity-bypass-windows.exe antigravity-bypass-russia.exe
-          cp antigravity-bypass-linux-x64 antigravity-bypass-russia-linux-x64
-          cp antigravity-bypass-linux-arm64 antigravity-bypass-russia-linux-arm64
-          cp antigravity-bypass-linux-x64.deb antigravity-bypass-russia-linux-x64.deb
-          cp antigravity-bypass-macos.sh unlock_and_restore.sh
-
       - name: Generate checksums
         working-directory: dist/release
-        run: sha256sum antigravity-bypass-windows.exe antigravity-bypass-macos.sh antigravity-bypass-linux-x64 antigravity-bypass-linux-arm64 antigravity-bypass-linux-x64.deb install.sh antigravity-bypass-russia.exe unlock_and_restore.sh antigravity-bypass-russia-linux-x64 antigravity-bypass-russia-linux-arm64 antigravity-bypass-russia-linux-x64.deb > SHA256SUMS.txt
+        run: sha256sum antigravity-bypass-windows.exe antigravity-bypass-macos.sh antigravity-bypass-linux-x64 antigravity-bypass-linux-arm64 antigravity-bypass-linux-x64.deb install.sh > SHA256SUMS.txt
 
       - name: Verify exact distribution contents and embedded engines
         run: python tests/verify_distribution.py dist/release --engines dist/raw
@@ -224,11 +213,6 @@ jobs:
             dist/antigravity-bypass-linux-arm64
             dist/antigravity-bypass-linux-x64.deb
             dist/install.sh
-            dist/antigravity-bypass-russia.exe
-            dist/unlock_and_restore.sh
-            dist/antigravity-bypass-russia-linux-x64
-            dist/antigravity-bypass-russia-linux-arm64
-            dist/antigravity-bypass-russia-linux-x64.deb
           body_path: docs/releases/${{ github.ref_name }}.md
           draft: true
           generate_release_notes: false
