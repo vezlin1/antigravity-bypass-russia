@@ -360,6 +360,7 @@ fn windows_version() -> Result<(u64, u64, u64, u64), String> {
     use windows_sys::Win32::System::Registry::{
         RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
     };
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
     let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
     let key = wide(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion");
     let dword = |name: &str| -> Result<u64, String> {
@@ -376,10 +377,13 @@ fn windows_version() -> Result<(u64, u64, u64, u64), String> {
                 &mut size,
             )
         };
-        if code == 0 {
-            Ok(u64::from(value))
-        } else {
-            Err(format!("{name}: {code}"))
+        match code {
+            0 => Ok(u64::from(value)),
+            // Older builds lack UBR and the major/minor values; report 0 as
+            // the former PowerShell query did, instead of failing the whole
+            // version.
+            ERROR_FILE_NOT_FOUND => Ok(0),
+            _ => Err(format!("{name}: {code}")),
         }
     };
     // CurrentBuildNumber is stored as text.
