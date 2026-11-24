@@ -413,7 +413,7 @@ const FILES_STEP: (&str, &str) = ("Настраиваем файлы Antigravity
 
 fn patch_targets(targets: Vec<FoundTarget>, steps: &Steps) -> FileSetupOutcome {
     let paths: Vec<_> = targets.iter().map(|target| target.path.clone()).collect();
-    if !ensure_application_closed(&paths, "включение обхода") {
+    if !ensure_application_closed(&paths, "настроить файлы") {
         return FileSetupOutcome::Stopped;
     }
     FileSetupOutcome::Completed(run_file_step(steps, FILES_STEP, targets, patch_target))
@@ -974,7 +974,7 @@ fn remove_manual_path(saved: &[std::path::PathBuf]) {
 /// Restores the given files after the application is closed.
 fn restore_targets(targets: Vec<FoundTarget>) -> bool {
     let paths: Vec<_> = targets.iter().map(|target| target.path.clone()).collect();
-    if !ensure_application_closed(&paths, "возврат исходных файлов") {
+    if !ensure_application_closed(&paths, "вернуть исходные файлы") {
         return false;
     }
     run_file_step(&Steps::unnumbered(), RESTORE_STEP, targets, restore_target)
@@ -1034,6 +1034,102 @@ fn choose(options: &[&'static str]) -> &'static str {
         }
     }
 }
+/// "Antigravity (12 процессов), служебный процесс Antigravity": open programs
+/// by name, each process once. PIDs only help support; they go to the log.
+fn describe_holders(holders: &[String]) -> String {
+    let mut programs: Vec<(String, std::collections::BTreeSet<String>)> = Vec::new();
+    for holder in holders {
+        let (name, pid) = holder
+            .rsplit_once(" (PID ")
+            .map(|(name, pid)| (name, pid.trim_end_matches(')')))
+            .unwrap_or((holder.as_str(), holder.as_str()));
+        let program = program_name(name);
+        match programs.iter_mut().find(|(known, _)| *known == program) {
+            Some((_, pids)) => {
+                pids.insert(pid.to_owned());
+            }
+            None => programs.push((program, [pid.to_owned()].into())),
+        }
+    }
+    programs
+        .into_iter()
+        .map(|(program, pids)| match pids.len() {
+            1 => program,
+            count => format!("{program} ({count} {})", processes_word(count)),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn program_name(executable: &str) -> String {
+    let name = executable
+        .strip_suffix(".exe")
+        .or_else(|| executable.strip_suffix(".EXE"))
+        .unwrap_or(executable);
+    let lower = name.to_lowercase();
+    if lower.starts_with("language_server") {
+        "служебный процесс Antigravity".into()
+    } else if lower == "agy" || lower.starts_with("agy-") || lower.contains("antigravity-cli") {
+        "Antigravity CLI".into()
+    } else if lower.contains("antigravity") && lower.contains("ide") {
+        "Antigravity IDE".into()
+    } else if lower.starts_with("antigravity") {
+        "Antigravity".into()
+    } else {
+        name.to_owned()
+    }
+}
+
+fn processes_word(count: usize) -> &'static str {
+    match (count % 10, count % 100) {
+        (_, 11..=14) => "процессов",
+        (1, _) => "процесс",
+        (2..=4, _) => "процесса",
+        _ => "процессов",
+    }
+}
+
+#[cfg(test)]
+mod holder_tests {
+    use super::{describe_holders, processes_word};
+
+    #[test]
+    fn processes_are_grouped_by_program_without_pids() {
+        let mut holders = vec!["Antigravity (PID 17752)".to_string()];
+        for pid in [
+            11744, 13344, 17752, 20256, 20584, 26420, 29872, 31588, 35268, 5964, 6628,
+        ] {
+            holders.push(format!("Antigravity.exe (PID {pid})"));
+        }
+        holders.push("language_server.exe (PID 38816)".into());
+        assert_eq!(
+            describe_holders(&holders),
+            "Antigravity (11 процессов), служебный процесс Antigravity"
+        );
+        assert_eq!(
+            describe_holders(&[
+                "Antigravity IDE.exe (PID 1)".into(),
+                "agy.exe (PID 2)".into(),
+                "agy.exe (PID 3)".into(),
+                "Code.exe (PID 4)".into(),
+            ]),
+            "Antigravity IDE, Antigravity CLI (2 процесса), Code"
+        );
+        assert_eq!(
+            [1, 2, 5, 11, 21, 22, 112].map(processes_word),
+            [
+                "процесс",
+                "процесса",
+                "процессов",
+                "процессов",
+                "процесс",
+                "процесса",
+                "процессов"
+            ]
+        );
+    }
+}
+
 fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool {
     let running = crate::system::file_lock::running_applications(paths).and_then(|mut running| {
         running.extend(crate::system::file_lock::holders(paths)?);
@@ -1043,66 +1139,67 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
     });
     match running {
         Ok(holders) if !holders.is_empty() => {
+            crate::net::relay::log_event(&format!(
+                "Открытые процессы Antigravity: {}",
+                holders.join(", ")
+            ));
             println!(
                 "  {}",
-                style::status(Tone::Warn, "Нужно закрыть Antigravity")
+                style::status(Tone::Warn, "Antigravity сейчас открыт")
             );
-            println!("    Пока он открыт, его файлы нельзя изменить.");
+            println!("    Чтобы изменить его файлы, его нужно закрыть.");
             println!(
                 "    {}",
                 paint(
                     Tone::Muted,
-                    &format!("Открыто сейчас: {}", holders.join(", "))
+                    &format!("Открыто: {}", describe_holders(&holders))
                 )
             );
-            println!("    Сохраните работу: несохранённые изменения будут потеряны.\n");
+            println!("    Несохранённые изменения будут потеряны — сохраните работу.\n");
             if crate::system::env::args().len() > 1 {
-                operation_error(
-                    "Закройте Antigravity и повторите команду",
-                    &holders.join(", "),
+                print_problem(
+                    2,
+                    "Antigravity открыт",
+                    "",
+                    Some("закройте Antigravity и повторите команду."),
                 );
                 return false;
             }
-            println!("  {}", paint(Tone::Accent, "Выберите действие"));
             #[cfg(any(windows, unix))]
-            style::menu_item(
-                "1",
-                &format!("Закрыть Antigravity и продолжить: {action}"),
-                Tone::Ok,
-            );
+            style::menu_item("1", &format!("Закрыть Antigravity и {action}"), Tone::Ok);
             #[cfg(not(any(windows, unix)))]
-            style::menu_item(
-                "1",
-                "Я закрыл Antigravity — проверить и продолжить",
-                Tone::Ok,
-            );
-            style::menu_item("0", "Отмена — вернуться в меню", Tone::Plain);
+            style::menu_item("1", &format!("Я закрыл Antigravity — {action}"), Tone::Ok);
+            style::menu_item("0", "Отмена", Tone::Plain);
             println!();
-            loop {
-                match prompt("  Введите 1 или 0 и нажмите Enter: ").as_str() {
-                    "1" => break,
-                    "0" => {
-                        println!("  Операция отменена.");
-                        return false;
-                    }
-                    _ => println!("  Введите номер действия: 1 — продолжить, 0 — отмена."),
-                }
+            if choose(&["1", "0"]) == "0" {
+                println!("  Отменено, ничего не изменено.");
+                return false;
             }
-            #[cfg(any(windows, unix))]
-            println!("\n  Закрываем Antigravity…");
-            #[cfg(not(any(windows, unix)))]
-            println!("\n  Проверяем открытые файлы…");
-            if let Err(error) = crate::system::file_lock::close_application(paths) {
+            println!();
+            let closed = {
+                let progress = Progress::new();
                 #[cfg(any(windows, unix))]
-                let message = "Не удалось закрыть приложение. Закройте его вручную";
+                progress.working("Закрываем Antigravity");
                 #[cfg(not(any(windows, unix)))]
-                let message = "Не удалось подтвердить, что файлы Antigravity свободны";
-                operation_error(message, &error);
+                progress.working("Проверяем, что Antigravity закрыт");
+                crate::system::file_lock::close_application(paths)
+            };
+            if let Err(error) = closed {
+                #[cfg(any(windows, unix))]
+                let message = "Не удалось закрыть Antigravity";
+                #[cfg(not(any(windows, unix)))]
+                let message = "Antigravity ещё открыт";
+                print_problem(
+                    2,
+                    message,
+                    &error,
+                    Some("закройте Antigravity вручную и повторите."),
+                );
                 print_error_details();
                 pause();
                 return false;
             }
-            println!("  {} Antigravity закрыт.\n", mark(Tone::Ok));
+            println!("  {} Antigravity закрыт\n", mark(Tone::Ok));
         }
         Err(error) => {
             operation_error("Не удалось проверить, закрыто ли приложение", &error);
@@ -1138,7 +1235,7 @@ pub fn handle_rollback() -> bool {
     clear_screen();
     banner();
     style::screen_title("ОТКЛЮЧЕНИЕ ОБХОДА");
-    if !ensure_application_closed(&paths, "отключение обхода") {
+    if !ensure_application_closed(&paths, "отключить обход") {
         return false;
     }
     let steps = Steps::new(2);
