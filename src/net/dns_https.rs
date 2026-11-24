@@ -274,6 +274,8 @@ fn race_exchanges(
         }
     }
     let mut queue = std::collections::VecDeque::from(queue);
+    // When the most recent bootstrap address was started, relative to the race.
+    let last_start = std::cell::Cell::new(started);
     let start_next_bootstrap = |queue: &mut std::collections::VecDeque<IpAddr>| {
         let Some(ip) = queue.pop_front() else {
             return false;
@@ -281,6 +283,7 @@ fn race_exchanges(
         let mut candidate = provider.clone();
         candidate.bootstrap = vec![ip];
         start(Attempt::Bootstrap(ip), candidate);
+        last_start.set(Instant::now());
         true
     };
     // Unstarted addresses count as pending: the system fallback still waits
@@ -350,15 +353,18 @@ fn race_exchanges(
                             }
                             return Ok(answer);
                         }
-                        // A weaker answer: let every remaining address compete,
-                        // with as long as this one needed plus the usual grace.
+                        // A weaker answer: let every remaining address compete.
+                        // The usual grace is extended only by how much later
+                        // than the race the last address actually started, so
+                        // each one gets the run time it had without staggering.
                         while start_next_bootstrap(&mut queue) {}
                         next_stagger = None;
                         if best.as_ref().is_none_or(|(old, _, _)| quality > *old) {
                             best = Some((quality, answer, source));
                             if quality == AnswerQuality::Ordinary {
                                 let now = Instant::now();
-                                settle_at = deadline.min(now + ANSWER_GRACE + (now - started));
+                                let start_delay = last_start.get() - started;
+                                settle_at = deadline.min(now + ANSWER_GRACE + start_delay);
                             }
                         }
                     }
@@ -518,6 +524,32 @@ mod tests {
         })
         .unwrap();
         assert_eq!(*calls.lock().unwrap(), [vec![second]]);
+    }
+
+    #[test]
+    fn a_staggered_silent_address_does_not_stretch_the_answer_grace() {
+        let host = "cloudcode-pa.googleapis.com";
+        let mut p = provider(true);
+        p.url = "https://grace.invalid/dns-query".into();
+        p.bootstrap.push("192.0.2.2".parse().unwrap());
+        let first: IpAddr = "192.0.2.1".parse().unwrap();
+        let started = Instant::now();
+        let answer = race_exchanges(&p, TIMEOUT, Duration::from_secs(2), move |candidate, _| {
+            if candidate.bootstrap == [first] {
+                std::thread::sleep(Duration::from_millis(600));
+                Ok(a_reply(host, [142, 250, 1, 1]))
+            } else {
+                std::thread::sleep(Duration::from_secs(3));
+                Err("silent".into())
+            }
+        })
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(answer, a_reply(host, [142, 250, 1, 1]));
+        // 600 ms answer + 300 ms grace + 200 ms start delay of the second
+        // address; adding the whole first wait would end near 1.5 s.
+        assert!(elapsed >= Duration::from_millis(1000), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(1300), "{elapsed:?}");
     }
 
     #[test]
