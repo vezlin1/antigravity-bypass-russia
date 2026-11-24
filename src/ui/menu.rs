@@ -577,25 +577,30 @@ const BROWSER_UNCHECKED: &str =
     "Доступ к Gemini и AI Studio в браузере проверить не удалось. На Antigravity это не влияет.";
 
 #[cfg(windows)]
+const BROWSER_VPN: &str =
+    "Веб-версии Gemini и AI Studio могут не работать: во время настройки был \
+     включён VPN. Если они не открываются в браузере, отключите VPN и включите обход ещё раз. \
+     На Antigravity это не влияет.";
+
+#[cfg(windows)]
 fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupStatus {
     use crate::net::windows_connect;
-    use crate::system::windows_connect_launch::{launch_desktop, DesktopLaunch};
+    use crate::system::windows_connect_launch::{
+        launch_desktop, remove_retired_browser_profile, DesktopLaunch,
+    };
 
+    remove_retired_browser_profile();
     let setup = configure_connection_with(|| configure_network(steps), apply_endpoints);
     let browser_dns = setup
         .as_ref()
         .is_ok_and(|setup| setup.browser_dns_confirmed);
-    let try_browser = !browser_dns && windows_connect::vpn_present();
+    let vpn = windows_connect::vpn_present();
     let try_app = setup.is_ok() || windows_connect::fallback_available();
     match &setup {
         Ok(setup) => {
             network_result(setup, summary);
-            if try_browser {
-                // The browser fallback below reports its own result.
-                summary.notes.retain(|note| note != BROWSER_UNCHECKED);
-            }
         }
-        Err(error) if try_app || try_browser => {
+        Err(error) if try_app => {
             crate::net::relay::log_event(&format!("Настройка DNS: {error}"));
             summary.notes.push(
                 "Обычная настройка не удалась из-за VPN, поэтому используется резервный канал."
@@ -607,6 +612,11 @@ fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupSta
             return SetupStatus::Failed;
         }
     };
+    if !browser_dns && vpn {
+        // With a VPN the reason is known: say it instead of the generic note.
+        summary.notes.retain(|note| note != BROWSER_UNCHECKED);
+        summary.notes.push(BROWSER_VPN.into());
+    }
     let progress = Progress::new();
     progress.stage(steps, "Запускаем Antigravity", "Antigravity запущен");
     let antigravity_ok = if try_app {
@@ -637,44 +647,15 @@ fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupSta
     } else {
         false
     };
-    let browser_ok = browser_dns || (try_browser && launch_browser_fallback(&progress, summary));
     progress.finish(antigravity_ok);
     drop(progress);
-    if setup.is_ok() && antigravity_ok && browser_ok {
+    if setup.is_ok() && antigravity_ok && browser_dns {
         SetupStatus::Complete
-    } else if setup.is_ok() || antigravity_ok || browser_ok {
+    } else if setup.is_ok() || antigravity_ok {
         SetupStatus::Limited
     } else {
         SetupStatus::Failed
     }
-}
-
-#[cfg(windows)]
-fn launch_browser_fallback(progress: &Progress, summary: &mut Summary) -> bool {
-    use crate::system::windows_connect_launch::{launch_browser, DesktopLaunch};
-
-    progress.working("открываем Gemini и AI Studio в отдельном Chrome");
-    let (ok, note) = match launch_browser() {
-        Ok(DesktopLaunch::Started | DesktopLaunch::AlreadyRunning) => (
-            true,
-            "Gemini и AI Studio открыты в отдельном окне Chrome — для них пользуйтесь этим окном."
-                .to_owned(),
-        ),
-        Ok(DesktopLaunch::NotInstalled) => (
-            false,
-            "Для Gemini и AI Studio в браузере нужен Google Chrome. Установите его и включите обход ещё раз."
-                .to_owned(),
-        ),
-        Ok(DesktopLaunch::ElevatedSession(reason)) | Err(reason) => {
-            crate::net::relay::log_event(&format!("Браузерный CONNECT не запущен: {reason}"));
-            (
-                false,
-                format!("Gemini и AI Studio не открылись через резервный канал: {reason}"),
-            )
-        }
-    };
-    summary.notes.push(note);
-    ok
 }
 
 /// The verdict titles of one operation: complete, limited, failed.
@@ -1279,12 +1260,13 @@ pub fn handle_rollback() -> bool {
     let mut problems = Vec::new();
     match remove_dns_rules() {
         Err(error) => problems.push(("Не удалось вернуть настройки подключения", error)),
-        Ok(()) =>
-        {
+        Ok(()) => {
             #[cfg(windows)]
             if let Err(error) = crate::net::windows_connect::disable() {
                 problems.push(("Не удалось отключить резервный канал", error));
             }
+            #[cfg(windows)]
+            crate::system::windows_connect_launch::remove_retired_browser_profile();
         }
     }
     progress.finish(problems.is_empty());

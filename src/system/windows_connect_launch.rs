@@ -1,6 +1,5 @@
 //! Start the CONNECT helper in the Explorer user's desktop and security context.
 use super::{powershell, privilege, user_context};
-use crate::net::provider::BROWSER_PAGES;
 use crate::net::windows_connect;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -60,14 +59,6 @@ fn desktop_app() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn chrome() -> Option<PathBuf> {
-    ["%PROGRAMFILES%", "%PROGRAMFILES(X86)%", "%LOCALAPPDATA%"]
-        .into_iter()
-        .map(super::env::expand_env_vars)
-        .map(|folder| folder.join(r"Google\Chrome\Application\chrome.exe"))
-        .find(|path| path.is_file())
-}
-
 fn ps_string(value: &str) -> String {
     let characters: Vec<_> = value.encode_utf16().map(|unit| unit.to_string()).collect();
     format!("[string]::new([char[]]@({}))", characters.join(","))
@@ -103,12 +94,23 @@ $desktop.Document.Application.ShellExecute({}, {}, '', 'open', 0)
     }
 }
 
-pub fn launch_desktop() -> Result<DesktopLaunch, String> {
-    launch_in_session("app", desktop_app().is_some())
+/// Earlier versions opened Gemini and AI Studio in a separate Chrome profile
+/// kept in the settings folder. That browser is no longer started; remove
+/// what it left behind. Best effort: a Chrome still using it keeps it until
+/// the next run.
+pub fn remove_retired_browser_profile() {
+    let directory = crate::net::config::directory();
+    let profile = directory.join("connect-chrome");
+    if profile.exists() {
+        if let Err(error) = fs::remove_dir_all(&profile) {
+            crate::net::relay::log_event(&format!("Старый профиль Chrome не удалён: {error}"));
+        }
+    }
+    let _ = fs::remove_file(directory.join("connect-browser.lock"));
 }
 
-pub fn launch_browser() -> Result<DesktopLaunch, String> {
-    launch_in_session("web", chrome().is_some())
+pub fn launch_desktop() -> Result<DesktopLaunch, String> {
+    launch_in_session("app", desktop_app().is_some())
 }
 
 fn launch_in_session(kind: &str, installed: bool) -> Result<DesktopLaunch, String> {
@@ -159,74 +161,17 @@ fn launch_in_session(kind: &str, installed: bool) -> Result<DesktopLaunch, Strin
     }
 }
 
-fn lock_browser_session() -> Result<Option<fs::File>, String> {
-    let directory = crate::net::config::directory();
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(directory.join("connect-browser.lock"))
-        .map_err(|error| error.to_string())?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
-        Err(fs::TryLockError::WouldBlock) => Ok(None),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-fn verify_browser_pages() -> Result<(), String> {
-    std::thread::scope(|scope| {
-        let checks: Vec<_> = BROWSER_PAGES
-            .iter()
-            .map(|&(host, _)| {
-                (
-                    host,
-                    scope.spawn(move || windows_connect::verify_fallback(host)),
-                )
-            })
-            .collect();
-        for (host, check) in checks {
-            check
-                .join()
-                .map_err(|_| format!("{host}: проверка оборвалась"))?
-                .map_err(|error| format!("{host}: {error}"))?;
-        }
-        Ok(())
-    })
-}
-
-fn start(kind: &str, browser_session: &mut Option<fs::File>) -> Result<Option<Child>, String> {
-    let web = kind == "web";
-    let executable = if web {
-        *browser_session = lock_browser_session()?;
-        if browser_session.is_none() {
-            return Ok(None);
-        }
-        chrome().ok_or("Chrome не найден")?
-    } else {
-        desktop_app().ok_or("Antigravity App или IDE не найдены")?
-    };
-    if !web
-        && !super::file_lock::running_applications(std::slice::from_ref(&executable))?.is_empty()
-    {
+/// The Antigravity App or IDE, started with the local proxy.
+fn start() -> Result<Child, String> {
+    let executable = desktop_app().ok_or("Antigravity App или IDE не найдены")?;
+    if !super::file_lock::running_applications(std::slice::from_ref(&executable))?.is_empty() {
         return Err("Закройте открытый Antigravity перед запуском через CONNECT".into());
     }
-    let vpn_fallback = if web {
-        let vpn = windows_connect::vpn_present();
-        if vpn {
-            verify_browser_pages()?;
-        }
-        vpn
-    } else {
-        let vpn = windows_connect::fallback_available();
-        if vpn {
-            windows_connect::verify_fallback(crate::net::provider::DAILY_CLOUD_CODE)?;
-        }
-        vpn
-    };
-    let port = windows_connect::listen(web).map_err(|e| format!("Локальный CONNECT: {e}"))?;
+    let vpn_fallback = windows_connect::fallback_available();
+    if vpn_fallback {
+        windows_connect::verify_fallback(crate::net::provider::DAILY_CLOUD_CODE)?;
+    }
+    let port = windows_connect::listen(false).map_err(|e| format!("Локальный CONNECT: {e}"))?;
     let mut command = Command::new(&executable);
     if let Some(directory) = executable.parent() {
         command.current_dir(directory);
@@ -237,46 +182,24 @@ fn start(kind: &str, browser_session: &mut Option<fs::File>) -> Result<Option<Ch
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if web {
-        command.arg(format!(
-            "--user-data-dir={}",
-            crate::net::config::directory()
-                .join("connect-chrome")
-                .display()
-        ));
-        command.args([
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-mode",
-            "--disable-sync",
-            "--disable-extensions",
-            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-        ]);
-        command.args(
-            BROWSER_PAGES
-                .iter()
-                .map(|(host, path)| format!("https://{host}{path}")),
+    let proxy = format!("http://127.0.0.1:{port}");
+    command
+        .env("HTTP_PROXY", &proxy)
+        .env("HTTPS_PROXY", &proxy)
+        .env("NO_PROXY", "localhost,127.0.0.1,::1")
+        .env_remove("ALL_PROXY");
+    if vpn_fallback {
+        command.env(
+            "CLOUD_CODE_URL",
+            "https://daily-cloudcode-pa.googleapis.com",
         );
-    } else {
-        let proxy = format!("http://127.0.0.1:{port}");
-        command
-            .env("HTTP_PROXY", &proxy)
-            .env("HTTPS_PROXY", &proxy)
-            .env("NO_PROXY", "localhost,127.0.0.1,::1")
-            .env_remove("ALL_PROXY");
-        if vpn_fallback {
-            command.env(
-                "CLOUD_CODE_URL",
-                "https://daily-cloudcode-pa.googleapis.com",
-            );
-        }
     }
     let mut child = command.spawn().map_err(|e| e.to_string())?;
     std::thread::sleep(Duration::from_millis(350));
     if child.try_wait().map_err(|e| e.to_string())?.is_some() {
         return Err("Клиент завершил запуск, проверьте уже открытые экземпляры".into());
     }
-    Ok(Some(child))
+    Ok(child)
 }
 
 pub fn run(args: &[OsString]) -> Result<(), String> {
@@ -292,7 +215,7 @@ pub fn run(args: &[OsString]) -> Result<(), String> {
             }
             (kind, Some(receipt))
         }
-        _ => return Err("Использование: --connect-launch app | web".into()),
+        _ => return Err("Использование: --connect-launch app".into()),
     };
     let previously_enabled = windows_connect::enabled();
     // When Explorer itself runs with the user's only (unfiltered) admin token,
@@ -300,27 +223,25 @@ pub fn run(args: &[OsString]) -> Result<(), String> {
     // handoff, keeping the regular elevation guard elsewhere.
     let blocked_by_elevation =
         privilege::is_admin() && !(receipt.is_some() && unfiltered_admin_session());
-    let mut browser_session = None;
     let started = if blocked_by_elevation {
         Err("CONNECT запустился с правами администратора. Нужен обычный пользовательский сеанс Windows.".into())
     } else if receipt.is_none() && !previously_enabled {
         Err("Сначала включите CONNECT через пункт [1] утилиты".into())
-    } else if let Some(kind @ ("app" | "web")) = kind.to_str() {
+    } else if kind == "app" {
         if receipt.is_some() {
-            windows_connect::enable().and_then(|()| start(kind, &mut browser_session))
+            windows_connect::enable().and_then(|()| start())
         } else {
-            start(kind, &mut browser_session)
+            start()
         }
     } else {
-        Err("Использование: --connect-launch app | web".into())
+        Err("Использование: --connect-launch app".into())
     };
     if let Some(receipt) = receipt {
         if started.is_err() && !previously_enabled && !blocked_by_elevation {
             let _ = windows_connect::disable();
         }
         let message = match &started {
-            Ok(Some(_)) => "ready\n".to_owned(),
-            Ok(None) => "already-running\n".to_owned(),
+            Ok(_) => "ready\n".to_owned(),
             Err(error) if blocked_by_elevation => format!("elevated: {error}\n"),
             Err(error) => format!("error: {error}\n"),
         };
@@ -328,8 +249,6 @@ pub fn run(args: &[OsString]) -> Result<(), String> {
             crate::net::relay::log_event(&format!("Подтверждение запуска CONNECT: {error}"));
         }
     }
-    if let Some(mut child) = started? {
-        child.wait().map_err(|error| error.to_string())?;
-    }
+    started?.wait().map_err(|error| error.to_string())?;
     Ok(())
 }
