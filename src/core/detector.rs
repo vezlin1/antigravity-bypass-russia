@@ -1255,6 +1255,53 @@ mod detection_tests {
         assert_eq!(status.ide_status, Some(BinaryState::Unknown));
     }
     #[test]
+    fn app_archive_without_ide_code_does_not_set_ide_status() {
+        fn archive(dir: &str) -> Vec<u8> {
+            let js = b"// main process";
+            let header = serde_json::to_vec(&serde_json::json!({"files": {dir: {"files": {
+                "main.js": {"size": js.len(), "offset": "0"}}}}}))
+            .unwrap();
+            let header_size = 8 + (header.len() + 3) / 4 * 4;
+            let mut data = Vec::new();
+            for value in [
+                4,
+                header_size as u32,
+                (header_size - 4) as u32,
+                header.len() as u32,
+            ] {
+                data.extend(value.to_le_bytes());
+            }
+            data.extend(header);
+            data.resize(8 + header_size, 0);
+            data.extend(js);
+            data
+        }
+        let root = tempfile::tempdir().unwrap();
+        let roots = vec![root.path().to_path_buf()];
+        let asar = root.path().join("resources/app.asar");
+        std::fs::create_dir_all(asar.parent().unwrap()).unwrap();
+
+        // The separate Antigravity app: Electron code under dist/.
+        std::fs::write(&asar, archive("dist")).unwrap();
+        let status = status_for_installations(&roots);
+        assert_eq!(status.ide_status, None);
+        assert!(status.ide_installations.is_empty());
+
+        // An IDE archive with an unrecognised main.js still needs a check.
+        std::fs::write(&asar, archive("out")).unwrap();
+        assert_eq!(
+            status_for_installations(&roots).ide_status,
+            Some(BinaryState::Unknown)
+        );
+
+        // An unreadable archive is not silently dropped either.
+        std::fs::write(&asar, b"not an archive").unwrap();
+        assert_eq!(
+            status_for_installations(&roots).ide_status,
+            Some(BinaryState::Unknown)
+        );
+    }
+    #[test]
     fn cli_scripts_and_backups_are_not_binary_patch_targets() {
         let root = tempfile::tempdir().unwrap();
         for name in ["agy", "agy-helper.js", "agy-x64.exe.bak"] {
@@ -1429,6 +1476,13 @@ fn status_for_installations(installs: &[PathBuf]) -> SystemComponentsStatus {
             // large executable once per status refresh.
             let canonical = std::fs::canonicalize(&t.path).unwrap_or_else(|_| t.path.clone());
             if !scanned.insert((canonical, t.kind)) {
+                continue;
+            }
+            // The separate Antigravity app also ships resources/app.asar; an
+            // archive without IDE code says nothing about the IDE.
+            if t.kind == TargetKind::IdeAsar
+                && crate::core::asar::has_ide_entry(&t.path) == Some(false)
+            {
                 continue;
             }
             let state = crate::core::patcher::check_target_state(&t);

@@ -9,6 +9,13 @@ use std::{
 
 const PREFIX_LEN: usize = 16;
 
+/// Archive entries that hold the IDE main process code.
+const IDE_ENTRIES: [&str; 3] = [
+    "out/main.js",
+    "out/vs/code/electron-main/main.js",
+    "main.js",
+];
+
 /// Header JSON length and payload offset, from the 16-byte prefix and the
 /// total archive length.
 fn layout(prefix: &[u8], length: usize) -> Result<(usize, usize), String> {
@@ -78,6 +85,28 @@ fn content_range(
         .ok_or("ASAR entry вне файла")?;
     Ok(start..end)
 }
+fn read_header(path: &Path) -> Option<Value> {
+    let mut file = fs::File::open(path).ok()?;
+    let length = usize::try_from(file.metadata().ok()?.len()).ok()?;
+    let mut prefix = [0u8; PREFIX_LEN];
+    file.read_exact(&mut prefix).ok()?;
+    let (json_len, _) = layout(&prefix, length).ok()?;
+    let mut json = vec![0u8; json_len];
+    file.read_exact(&mut json).ok()?;
+    parse_header(&json).ok()
+}
+
+/// `Some(false)` only for a readable archive with none of the IDE entries,
+/// such as the separate Antigravity app; `None` when the header is unreadable.
+pub fn has_ide_entry(path: &Path) -> Option<bool> {
+    let header = read_header(path)?;
+    Some(
+        IDE_ENTRIES
+            .iter()
+            .any(|name| entry(&header, name).is_some()),
+    )
+}
+
 /// Reads only the header and the package.json entry, not the whole archive.
 pub fn read_asar_package_version(path: &Path) -> Option<String> {
     const PACKAGE_LIMIT: usize = 4 * 1024 * 1024;
@@ -112,11 +141,7 @@ pub(crate) fn plan_asar_mode(data: &[u8], mode: Mode) -> Result<Plan<'_>, String
         existing: 0,
         profile: "asar-ide-reset-tier-v1".into(),
     };
-    for name in [
-        "out/main.js",
-        "out/vs/code/electron-main/main.js",
-        "main.js",
-    ] {
+    for name in IDE_ENTRIES {
         let Some(file) = entry(&header, name) else {
             continue;
         };
@@ -159,6 +184,21 @@ mod tests {
         data.resize(8 + header_size, 0);
         data.extend(js);
         data
+    }
+    #[test]
+    fn ide_entry_check_reads_only_a_valid_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.asar");
+        fs::write(&path, fixture(b"// main", false)).unwrap();
+        assert_eq!(has_ide_entry(&path), Some(true));
+        let mut other = fixture(b"// main", false);
+        // Rename the "out" directory so no IDE entry remains; sizes are unchanged.
+        let at = other.windows(5).position(|w| w == b"\"out\"").unwrap();
+        other[at + 1..at + 4].copy_from_slice(b"src");
+        fs::write(&path, other).unwrap();
+        assert_eq!(has_ide_entry(&path), Some(false));
+        fs::write(&path, b"garbage").unwrap();
+        assert_eq!(has_ide_entry(&path), None);
     }
     #[test]
     fn unrelated_internal_marker_does_not_trigger_watcher() {
