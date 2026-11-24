@@ -560,7 +560,13 @@ pub fn check_target_state(target: &FoundTarget) -> BinaryState {
             }
         }
     }
-    let state = state_for_kind(&target.path, target.kind);
+    // A read error (for example a file briefly locked by the IDE or an
+    // updater) is reported as Unknown but never cached: the next refresh
+    // reads the unchanged file again.
+    let Ok(data) = fs::read(&target.path) else {
+        return BinaryState::Unknown;
+    };
+    let state = state_for_data(&data, target.kind);
     // A file replaced during the scan is not cached under either stamp.
     if let Some(stamp) = before.filter(|stamp| file_stamp(&target.path) == Some(*stamp)) {
         if let Ok(mut cache) = STATES.lock() {
@@ -572,13 +578,6 @@ pub fn check_target_state(target: &FoundTarget) -> BinaryState {
         }
     }
     state
-}
-
-fn state_for_kind(path: &Path, kind: TargetKind) -> BinaryState {
-    let Ok(data) = fs::read(path) else {
-        return BinaryState::Unknown;
-    };
-    state_for_data(&data, kind)
 }
 
 fn state_for_data(data: &[u8], kind: TargetKind) -> BinaryState {
@@ -1959,5 +1958,41 @@ mod tests {
         fs::write(&target.path, &patched).unwrap();
         stamp(&target.path, 1_700_000_001);
         assert_eq!(check_target_state(&target), BinaryState::Patched);
+
+        // A failed read is not remembered for the unchanged file.
+        let missing = FoundTarget {
+            path: dir.path().join("absent.exe"),
+            kind: TargetKind::LanguageServer,
+            name: "absent".into(),
+        };
+        assert_eq!(check_target_state(&missing), BinaryState::Unknown);
+        assert!(STATES
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|cache| !cache.contains_key(&(missing.path.clone(), missing.kind))));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_briefly_locked_file_is_read_again_on_the_next_refresh() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let code = b"\x80\x78\x08\x00\x74\x0a\x48\x8b\x44\x24\x20\x48\x89\x44\x60";
+        let dir = tempfile::tempdir().unwrap();
+        let target = FoundTarget {
+            path: dir.path().join("language_server.exe"),
+            kind: TargetKind::LanguageServer,
+            name: "language_server".into(),
+        };
+        fs::write(&target.path, pe_fixture(code, 0x8664)).unwrap();
+        // Share mode 0 denies other readers, like an exclusive updater lock.
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&target.path)
+            .unwrap();
+        assert_eq!(check_target_state(&target), BinaryState::Unknown);
+        drop(lock);
+        assert_eq!(check_target_state(&target), BinaryState::Stock);
     }
 }
