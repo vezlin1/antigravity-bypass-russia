@@ -83,12 +83,13 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - name: Build tests and CLI
         run: python .github/scripts/ci.py build-tests --locked --target ${{ matrix.target }} --bin antigravity-bypass-russia --test cli
+      # Zipped on purpose: with archive: false upload-artifact names the artifact
+      # after the file and ignores `name`, so the waiting jobs never find it.
       - name: Upload unit-test executable for CLI fixtures
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-bin-${{ matrix.target }}
           path: ${{ env.TEST_BIN }}
-          archive: false
           retention-days: 1
           if-no-files-found: error
       - name: Upload CLI for Linux namespace checks
@@ -97,7 +98,6 @@ jobs:
         with:
           name: cli-${{ matrix.target }}
           path: ${{ env.CLI_BIN }}
-          archive: false
           retention-days: 1
           if-no-files-found: error
       - name: Isolated regression tests
@@ -259,7 +259,7 @@ jobs:
       - name: Cross toolchain
         run: |
           rustup target add aarch64-unknown-linux-gnu
-          bash .github/scripts/apt-ensure.sh gcc-aarch64-linux-gnu
+          bash .github/scripts/apt-ensure.sh gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Rust cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:

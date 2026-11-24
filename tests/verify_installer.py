@@ -34,7 +34,7 @@ fi
 export PATH="$tools:$PATH"
 exec bash "$installer"
 '''
-        result=subprocess.run([bash,'-c',invocation,'installer-test',tools.as_posix(),(root/'scripts/install.sh').as_posix()],env=env,capture_output=True,text=True,timeout=15)
+        result=subprocess.run([bash,'-c',invocation,'installer-test',tools.as_posix(),(root/'scripts/install.sh').as_posix()],env=env,capture_output=True,text=True,encoding='utf-8',errors='replace',timeout=15)
         assert result.returncode==0,(result.stdout,result.stderr)
         base='https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/'
         assert log.read_text().split()==[base+new_name]+([base+old_name] if legacy else []),log.read_text()

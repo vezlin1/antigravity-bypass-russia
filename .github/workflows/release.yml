@@ -93,7 +93,7 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           rustup target add aarch64-unknown-linux-gnu
-          bash .github/scripts/apt-ensure.sh gcc-aarch64-linux-gnu
+          bash .github/scripts/apt-ensure.sh gcc-aarch64-linux-gnu libc6-dev-arm64-cross
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
           echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
