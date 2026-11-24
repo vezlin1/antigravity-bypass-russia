@@ -39,7 +39,13 @@ impl FailureStage {
         if let Some(detail) = error.strip_prefix("TLS/certificate:") {
             let detail = detail.to_lowercase();
             let certificate = [
-                "certif", "trust", "verify", "issuer", "self signed", "self-signed", "сертифик",
+                "certif",
+                "trust",
+                "verify",
+                "issuer",
+                "self signed",
+                "self-signed",
+                "сертифик",
                 "довер",
             ]
             .iter()
@@ -725,11 +731,8 @@ mod tests {
         };
 
         let mut paused = false;
-        let (recovered, remaining) = retry_failed(
-            Vec::new(),
-            || paused = true,
-            |_| panic!("nothing to retry"),
-        );
+        let (recovered, remaining) =
+            retry_failed(Vec::new(), || paused = true, |_| panic!("nothing to retry"));
         assert!(!paused && recovered.is_empty() && remaining.is_empty());
 
         let mut pauses = 0;
@@ -769,7 +772,10 @@ mod tests {
             ("TCP: connection timed out", Tcp),
             ("TCP/TLS/HTTP: общий срок проверки истёк", Tcp),
             ("TLS: общий срок проверки истёк", Tls),
-            ("TLS/certificate: connection reset by peer (os error 10054)", Tls),
+            (
+                "TLS/certificate: connection reset by peer (os error 10054)",
+                Tls,
+            ),
             ("TLS/certificate: certificate verify failed", Certificate),
             (
                 "TLS/certificate: Цепочка сертификатов выпущена центром, не имеющим доверия",
@@ -781,7 +787,10 @@ mod tests {
             assert_eq!(FailureStage::classify(error), stage, "{error}");
         }
         assert_eq!(FailureStage::furthest(&[]), NoAddresses);
-        let mixed = ["TCP: timed out".to_string(), "TLS: общий срок проверки истёк".into()];
+        let mixed = [
+            "TCP: timed out".to_string(),
+            "TLS: общий срок проверки истёк".into(),
+        ];
         assert_eq!(FailureStage::furthest(&mixed), Tls);
     }
 
@@ -803,11 +812,20 @@ mod tests {
             },
         ];
         let error = check_agent_routes(&ranked, &failures, true).unwrap_err();
-        assert!(error.contains(&format!("{PRIMARY_CLOUD_CODE} — обрыв TLS (проверено адресов: 7)")));
+        assert!(error.contains(&format!(
+            "{PRIMARY_CLOUD_CODE} — обрыв TLS (проверено адресов: 7)"
+        )));
         assert!(error.contains(&format!("{daily} — обрыв TLS (проверено адресов: 5)")));
-        assert_eq!(error.matches(FailureStage::Tls.advice()).count(), 1, "{error}");
+        assert_eq!(
+            error.matches(FailureStage::Tls.advice()).count(),
+            1,
+            "{error}"
+        );
         assert!(!error.contains("Daily доступен"), "{error}");
-        assert!(error.ends_with("Прежние hosts и рейтинг сохранены"), "{error}");
+        assert!(
+            error.ends_with("Прежние hosts и рейтинг сохранены"),
+            "{error}"
+        );
     }
 
     #[test]

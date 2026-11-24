@@ -673,7 +673,11 @@ pub(crate) mod tests {
                 status
             );
         }
-        for header in ["HTTP/2 200 OK\r\n\r\n", "HTTP/1.1 099 x\r\n\r\n", "garbage\r\n\r\n"] {
+        for header in [
+            "HTTP/2 200 OK\r\n\r\n",
+            "HTTP/1.1 099 x\r\n\r\n",
+            "garbage\r\n\r\n",
+        ] {
             assert!(parse_http_status(header.as_bytes()).is_err(), "{header}");
         }
     }

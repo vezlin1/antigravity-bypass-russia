@@ -17,13 +17,19 @@ fn test_t3_01_socket_tuning_with_proxy_racing() {
     let start = Instant::now();
     let mut streams = Vec::new();
     for target in candidates {
-        if let Ok(s) = TcpStream::connect_timeout(&target.parse().unwrap(), Duration::from_millis(500)) {
+        if let Ok(s) =
+            TcpStream::connect_timeout(&target.parse().unwrap(), Duration::from_millis(500))
+        {
             let _ = s.set_nodelay(true);
             streams.push(s);
         }
     }
     let elapsed = start.elapsed();
-    assert_eq!(streams.len(), 2, "Both racing candidates should be connected and tuned");
+    assert_eq!(
+        streams.len(),
+        2,
+        "Both racing candidates should be connected and tuned"
+    );
     assert!(elapsed < Duration::from_millis(500));
 }
 
@@ -34,7 +40,8 @@ fn test_t3_02_direct_nrpt_with_bandwidth_gated_hosts() {
     assert!(!ns_string.contains("127.0.0.53"));
 
     let temp = TempTestDir::new("nrpt_hosts");
-    let mut hosts_content = String::from("127.0.0.1 localhost\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n");
+    let mut hosts_content =
+        String::from("127.0.0.1 localhost\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n");
     for ip in &fast_relays {
         hosts_content.push_str(&format!("{} generativelanguage.googleapis.com\n", ip));
     }
@@ -49,9 +56,30 @@ fn test_t3_02_direct_nrpt_with_bandwidth_gated_hosts() {
 #[test]
 fn test_t3_03_benchmark_leader_selection_with_route_preference() {
     let candidates = vec![
-        ("192.0.2.10", "Example Frankfurt 10G", 50u64, 110u64, 50i32, 10000u64),
-        ("37.230.192.51", "Geohide Moscow", 15u64, 800u64, 0i32, 500u64),
-        ("111.88.96.50", "Xbox-DNS Anycast", 35u64, 130u64, 40i32, 8000u64),
+        (
+            "192.0.2.10",
+            "Example Frankfurt 10G",
+            50u64,
+            110u64,
+            50i32,
+            10000u64,
+        ),
+        (
+            "37.230.192.51",
+            "Geohide Moscow",
+            15u64,
+            800u64,
+            0i32,
+            500u64,
+        ),
+        (
+            "111.88.96.50",
+            "Xbox-DNS Anycast",
+            35u64,
+            130u64,
+            40i32,
+            8000u64,
+        ),
     ];
 
     let mut scored: Vec<(&str, &str, u64)> = candidates
@@ -60,13 +88,22 @@ fn test_t3_03_benchmark_leader_selection_with_route_preference() {
             (
                 *ip,
                 *name,
-                compute_composite_score(RoutingPreference::PreferEurope10G, *tls, *ttft, *weight, *bw),
+                compute_composite_score(
+                    RoutingPreference::PreferEurope10G,
+                    *tls,
+                    *ttft,
+                    *weight,
+                    *bw,
+                ),
             )
         })
         .collect();
 
     scored.sort_by_key(|(_, _, score)| *score);
-    assert_eq!(scored[0].0, "192.0.2.10", "Leader must be Example Frankfurt 10G under PreferEurope10G");
+    assert_eq!(
+        scored[0].0, "192.0.2.10",
+        "Leader must be Example Frankfurt 10G under PreferEurope10G"
+    );
 }
 
 #[test]
@@ -79,9 +116,13 @@ fn test_t3_04_os_tuning_with_high_throughput_streaming_proxy() {
     let mut buffer = [0u8; 1024];
     let mut total_bytes = 0;
     while let Ok(n) = client.read(&mut buffer) {
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         total_bytes += n;
-        if total_bytes > 500 { break; }
+        if total_bytes > 500 {
+            break;
+        }
     }
     let elapsed = start.elapsed();
     let throughput_kb_s = (total_bytes as f64 / 1024.0) / elapsed.as_secs_f64().max(0.001);
@@ -93,7 +134,10 @@ fn test_t3_05_direct_resolution_with_static_routes() {
     let smartdns_ips = vec!["111.88.96.50", "192.0.2.10", "192.0.2.11"];
     let mut sync_routes = Vec::new();
     for ip in &smartdns_ips {
-        sync_routes.push(format!("route add {} mask 255.255.255.255 192.168.1.1 metric 1 if 10", ip));
+        sync_routes.push(format!(
+            "route add {} mask 255.255.255.255 192.168.1.1 metric 1 if 10",
+            ip
+        ));
     }
     assert_eq!(sync_routes.len(), 3);
     assert!(sync_routes[0].contains("111.88.96.50"));
@@ -107,12 +151,17 @@ fn test_t3_06_proxy_racing_fallback_to_european_anycast() {
 
     let mut chosen_stream = None;
     for target in [&candidate_dead, &candidate_anycast.as_str()] {
-        if let Ok(s) = TcpStream::connect_timeout(&target.parse().unwrap(), Duration::from_millis(50)) {
+        if let Ok(s) =
+            TcpStream::connect_timeout(&target.parse().unwrap(), Duration::from_millis(50))
+        {
             chosen_stream = Some(s);
             break;
         }
     }
-    assert!(chosen_stream.is_some(), "Must fall back to alive European Anycast mock node");
+    assert!(
+        chosen_stream.is_some(),
+        "Must fall back to alive European Anycast mock node"
+    );
 }
 
 #[test]
@@ -122,7 +171,11 @@ fn test_t3_07_circuit_breaker_trip_and_cooldown_with_ranking() {
         threshold: u32,
         tripped: bool,
     }
-    let mut breaker = MockBreaker { failures: 0, threshold: 2, tripped: false };
+    let mut breaker = MockBreaker {
+        failures: 0,
+        threshold: 2,
+        tripped: false,
+    };
 
     breaker.failures += 1;
     assert_eq!(breaker.tripped, false);

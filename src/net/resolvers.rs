@@ -177,7 +177,10 @@ pub fn rank_tls_v4_report(addrs: &[IpAddr], sni: &str) -> (Vec<(Ipv4Addr, u128)>
         let sni = sni.to_string();
         let tx = tx.clone();
         thread::spawn(move || {
-            let _ = tx.send((addr, super::health::probe_ip(SocketAddr::new(addr, 443), &sni)));
+            let _ = tx.send((
+                addr,
+                super::health::probe_ip(SocketAddr::new(addr, 443), &sni),
+            ));
         });
     }
     drop(tx);

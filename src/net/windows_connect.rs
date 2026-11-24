@@ -276,7 +276,9 @@ impl VerifiedRoutes {
 static VERIFIED: Mutex<VerifiedRoutes> = Mutex::new(VerifiedRoutes::new());
 
 fn verified_routes() -> std::sync::MutexGuard<'static, VerifiedRoutes> {
-    VERIFIED.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    VERIFIED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn verify_then_connect(

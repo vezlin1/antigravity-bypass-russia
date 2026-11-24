@@ -25,12 +25,19 @@ fn test_f1_02_socket_rcvbuf_512k_configuration() {
 
     // Verify 512 KB buffer constant
     const EXPECTED_BUFFER: i32 = 512 * 1024;
-    assert_eq!(EXPECTED_BUFFER, 524288, "Buffer size must be 512 KB (524288 bytes)");
+    assert_eq!(
+        EXPECTED_BUFFER, 524288,
+        "Buffer size must be 512 KB (524288 bytes)"
+    );
 
     // Configure stream with nodelay and timeouts
     stream.set_nodelay(true).unwrap();
-    stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
     assert!(stream.nodelay().unwrap());
 }
 
@@ -66,7 +73,9 @@ fn test_f1_05_streaming_chunk_no_delay_jitter() {
     let mock = MockTlsServer::spawn_streaming_mock(10, Duration::from_millis(1));
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", mock.port)).unwrap();
     stream.set_nodelay(true).unwrap();
-    stream.set_read_timeout(Some(Duration::from_millis(2000))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_millis(2000)))
+        .unwrap();
 
     let start = Instant::now();
     let mut buf = [0u8; 512];
@@ -82,7 +91,10 @@ fn test_f1_05_streaming_chunk_no_delay_jitter() {
     }
     let elapsed = start.elapsed();
     assert!(total_read > 0, "Should read streaming data");
-    assert!(elapsed < Duration::from_millis(1500), "Tuned stream should experience no Nagle jitter");
+    assert!(
+        elapsed < Duration::from_millis(1500),
+        "Tuned stream should experience no Nagle jitter"
+    );
 }
 
 // =========================================================================
@@ -216,37 +228,50 @@ pub const TEST_MULTI_PROVIDER_RELAYS: &[RelayNode] = &[
 
 #[test]
 fn test_f3_01_multi_provider_pool_contains_example_10g() {
-    let example_frankfurt = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "192.0.2.10");
+    let example_frankfurt = TEST_MULTI_PROVIDER_RELAYS
+        .iter()
+        .find(|r| r.ip == "192.0.2.10");
     assert!(example_frankfurt.is_some());
     let node = example_frankfurt.unwrap();
     assert_eq!(node.bandwidth_mbps, 10000);
     assert_eq!(node.region, RelayRegion::EuropeCentral);
 
-    let example_amsterdam = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "192.0.2.11");
+    let example_amsterdam = TEST_MULTI_PROVIDER_RELAYS
+        .iter()
+        .find(|r| r.ip == "192.0.2.11");
     assert!(example_amsterdam.is_some());
     assert_eq!(example_amsterdam.unwrap().bandwidth_mbps, 10000);
 }
 
 #[test]
 fn test_f3_02_multi_provider_pool_contains_xbox_anycast() {
-    let xbox_primary = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "111.88.96.50");
+    let xbox_primary = TEST_MULTI_PROVIDER_RELAYS
+        .iter()
+        .find(|r| r.ip == "111.88.96.50");
     assert!(xbox_primary.is_some());
     assert_eq!(xbox_primary.unwrap().region, RelayRegion::AnycastGlobal);
 
-    let xbox_secondary = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "111.88.96.51");
+    let xbox_secondary = TEST_MULTI_PROVIDER_RELAYS
+        .iter()
+        .find(|r| r.ip == "111.88.96.51");
     assert!(xbox_secondary.is_some());
 }
 
 #[test]
 fn test_f3_03_multi_provider_pool_contains_helsinki_edge() {
-    let helsinki = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "192.0.2.12");
+    let helsinki = TEST_MULTI_PROVIDER_RELAYS
+        .iter()
+        .find(|r| r.ip == "192.0.2.12");
     assert!(helsinki.is_some());
     assert_eq!(helsinki.unwrap().region, RelayRegion::EuropeNorth);
 }
 
 #[test]
 fn test_f3_04_relay_region_classification() {
-    let regions: Vec<RelayRegion> = TEST_MULTI_PROVIDER_RELAYS.iter().map(|r| r.region).collect();
+    let regions: Vec<RelayRegion> = TEST_MULTI_PROVIDER_RELAYS
+        .iter()
+        .map(|r| r.region)
+        .collect();
     assert!(regions.contains(&RelayRegion::EuropeCentral));
     assert!(regions.contains(&RelayRegion::EuropeNorth));
     assert!(regions.contains(&RelayRegion::AnycastGlobal));
@@ -255,8 +280,14 @@ fn test_f3_04_relay_region_classification() {
 
 #[test]
 fn test_f3_05_provider_priority_weights() {
-    let european_node = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "192.0.2.10").unwrap();
-    let domestic_node = TEST_MULTI_PROVIDER_RELAYS.iter().find(|r| r.ip == "37.230.192.51").unwrap();
+    let european_node = TEST_MULTI_PROVIDER_RELAYS
+        .iter()
+        .find(|r| r.ip == "192.0.2.10")
+        .unwrap();
+    let domestic_node = TEST_MULTI_PROVIDER_RELAYS
+        .iter()
+        .find(|r| r.ip == "37.230.192.51")
+        .unwrap();
     assert!(european_node.priority_weight > domestic_node.priority_weight);
     assert_eq!(european_node.priority_weight, 50);
     assert_eq!(domestic_node.priority_weight, 0);
@@ -274,7 +305,10 @@ fn test_f4_01_synthetic_tls_client_hello_format() {
     // TLS Record header
     assert_eq!(hello[0], 0x16, "Must be TLS Handshake record type");
     assert_eq!(hello[1], 0x03, "Must be TLS Major version 3");
-    assert_eq!(hello[2], 0x01, "Must be TLS Minor version 1 (TLS 1.0 container)");
+    assert_eq!(
+        hello[2], 0x01,
+        "Must be TLS Minor version 1 (TLS 1.0 container)"
+    );
 
     // Check SNI string inside payload
     let sni_bytes = sni.as_bytes();
@@ -298,7 +332,10 @@ fn test_f4_03_tls_rtt_and_ttft_calculation() {
     let tls_rtt_ms = 40u128;
     let est_ttft_ms = tcp_rtt_ms + tls_rtt_ms;
     assert_eq!(est_ttft_ms, 65);
-    assert!(est_ttft_ms < 400, "TTFT must satisfy acceptance criteria < 400ms");
+    assert!(
+        est_ttft_ms < 400,
+        "TTFT must satisfy acceptance criteria < 400ms"
+    );
 }
 
 #[test]
@@ -352,23 +389,16 @@ pub fn compute_composite_score(
 
 #[test]
 fn test_f5_01_prefer_europe_10g_scoring() {
-    let europe_score = compute_composite_score(
-        RoutingPreference::PreferEurope10G,
-        50,
-        110,
-        50,
-        10000,
-    );
+    let europe_score =
+        compute_composite_score(RoutingPreference::PreferEurope10G, 50, 110, 50, 10000);
 
-    let domestic_score = compute_composite_score(
-        RoutingPreference::PreferEurope10G,
-        15,
-        800,
-        0,
-        500,
-    );
+    let domestic_score =
+        compute_composite_score(RoutingPreference::PreferEurope10G, 15, 800, 0, 500);
 
-    assert!(europe_score < domestic_score, "European node must score better than congested domestic node under PreferEurope10G");
+    assert!(
+        europe_score < domestic_score,
+        "European node must score better than congested domestic node under PreferEurope10G"
+    );
 }
 
 #[test]
@@ -389,20 +419,34 @@ fn test_f5_03_balanced_preference_scoring() {
 
 #[test]
 fn test_f5_04_composite_score_dead_node_penalty() {
-    let dead_score = compute_composite_score(RoutingPreference::PreferEurope10G, 10000, 10000, 0, 0);
-    let alive_score = compute_composite_score(RoutingPreference::PreferEurope10G, 50, 110, 50, 10000);
+    let dead_score =
+        compute_composite_score(RoutingPreference::PreferEurope10G, 10000, 10000, 0, 0);
+    let alive_score =
+        compute_composite_score(RoutingPreference::PreferEurope10G, 50, 110, 50, 10000);
     assert!(dead_score > alive_score * 10);
 }
 
 #[test]
 fn test_f5_05_composite_ranking_sorting_order() {
     let mut nodes = vec![
-        ("37.230.192.51", compute_composite_score(RoutingPreference::PreferEurope10G, 15, 800, 0, 500)),
-        ("192.0.2.10", compute_composite_score(RoutingPreference::PreferEurope10G, 50, 110, 50, 10000)),
-        ("192.0.2.11", compute_composite_score(RoutingPreference::PreferEurope10G, 55, 120, 45, 10000)),
+        (
+            "37.230.192.51",
+            compute_composite_score(RoutingPreference::PreferEurope10G, 15, 800, 0, 500),
+        ),
+        (
+            "192.0.2.10",
+            compute_composite_score(RoutingPreference::PreferEurope10G, 50, 110, 50, 10000),
+        ),
+        (
+            "192.0.2.11",
+            compute_composite_score(RoutingPreference::PreferEurope10G, 55, 120, 45, 10000),
+        ),
     ];
     nodes.sort_by_key(|(_, score)| *score);
-    assert_eq!(nodes[0].0, "192.0.2.10", "Example Frankfurt 10G must be sorted first");
+    assert_eq!(
+        nodes[0].0, "192.0.2.10",
+        "Example Frankfurt 10G must be sorted first"
+    );
 }
 
 // =========================================================================
@@ -417,7 +461,10 @@ pub fn format_direct_nrpt_nameservers(substituters: &[&str]) -> String {
 fn test_f6_01_direct_nrpt_omits_127_0_0_53() {
     let servers = &["111.88.96.50", "192.0.2.10", "192.0.2.11"];
     let ns_string = format_direct_nrpt_nameservers(servers);
-    assert!(!ns_string.contains("127.0.0.53"), "Direct NRPT must omit local daemon hop 127.0.0.53");
+    assert!(
+        !ns_string.contains("127.0.0.53"),
+        "Direct NRPT must omit local daemon hop 127.0.0.53"
+    );
 }
 
 #[test]
@@ -536,8 +583,12 @@ fn test_f7_05_hosts_atomic_write_simulation() {
     let temp = TempTestDir::new("hosts_atomic");
     let target = temp.write_file("hosts", "127.0.0.1 localhost\n");
 
-    let updated_content = format!("{}\n{}\n192.0.2.10 generativelanguage.googleapis.com\n{}\n",
-        temp.read_file("hosts").trim_end(), START_MARK, END_MARK);
+    let updated_content = format!(
+        "{}\n{}\n192.0.2.10 generativelanguage.googleapis.com\n{}\n",
+        temp.read_file("hosts").trim_end(),
+        START_MARK,
+        END_MARK
+    );
 
     let tmp_path = temp.file_path("hosts.tmp");
     std::fs::write(&tmp_path, &updated_content).unwrap();
@@ -574,13 +625,19 @@ fn test_f8_02_nrpt_rules_clean_removal() {
         .filter(|k| k.starts_with("ANTIGRAVITY_BYPASS_"))
         .collect();
     assert_eq!(to_remove.len(), 2);
-    assert_eq!(to_remove, vec!["ANTIGRAVITY_BYPASS_001", "ANTIGRAVITY_BYPASS_002"]);
+    assert_eq!(
+        to_remove,
+        vec!["ANTIGRAVITY_BYPASS_001", "ANTIGRAVITY_BYPASS_002"]
+    );
 }
 
 #[test]
 fn test_f8_03_macos_resolver_cleanup() {
     let temp = TempTestDir::new("macos_resolver");
-    let file1 = temp.write_file("generativelanguage.googleapis.com", "# ANTIGRAVITY-BYPASS-RUSSIA\nnameserver 111.88.96.50\n");
+    let file1 = temp.write_file(
+        "generativelanguage.googleapis.com",
+        "# ANTIGRAVITY-BYPASS-RUSSIA\nnameserver 111.88.96.50\n",
+    );
     let file2 = temp.write_file("custom.domain", "# OTHER\nnameserver 8.8.8.8\n");
 
     for entry in std::fs::read_dir(&temp.path).unwrap() {
@@ -718,7 +775,11 @@ fn test_f9_03_benchmark_status_formatting() {
 fn test_f9_04_benchmark_live_telemetry_integration() {
     use std::collections::VecDeque;
     let mut ring: VecDeque<(String, f64, Duration)> = VecDeque::with_capacity(10);
-    ring.push_back(("daily-cloudcode-pa.googleapis.com".into(), 15.4, Duration::from_millis(45)));
+    ring.push_back((
+        "daily-cloudcode-pa.googleapis.com".into(),
+        15.4,
+        Duration::from_millis(45),
+    ));
     assert_eq!(ring.len(), 1);
     assert_eq!(ring.front().unwrap().1, 15.4);
 }
@@ -772,7 +833,15 @@ fn test_f10_03_cli_unknown_flag_handling() {
 
 #[test]
 fn test_f10_04_cli_subcommand_dispatch_diagnostics() {
-    let cli_commands = ["benchmark", "speedtest", "diagnostics", "tune", "status", "unlock", "rollback"];
+    let cli_commands = [
+        "benchmark",
+        "speedtest",
+        "diagnostics",
+        "tune",
+        "status",
+        "unlock",
+        "rollback",
+    ];
     assert!(cli_commands.contains(&"diagnostics"));
     assert!(cli_commands.contains(&"benchmark"));
     assert!(cli_commands.contains(&"tune"));

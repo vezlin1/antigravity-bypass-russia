@@ -28,10 +28,10 @@ pub use relay::{detach_console, log_fatal, run as run_dns_relay};
 
 #[cfg(any(target_os = "macos", test))]
 use provider::nrpt_domains;
-#[cfg(windows)]
-use provider::NRPT_TAG;
 #[cfg(any(windows, target_os = "macos", test))]
 use provider::NRPT_STUDIO;
+#[cfg(windows)]
+use provider::NRPT_TAG;
 use provider::{NRPT_AGENT, PRIMARY_CLOUD_CODE, SUBSTITUTION_CANARIES};
 use relay::{LISTEN_IP, LISTEN_PORT};
 #[cfg(windows)]

@@ -23,7 +23,10 @@ fn test_t4_01_antigravity_ide_cold_start_european_anycast() {
     let elapsed = start.elapsed();
 
     assert!(n >= 5 && buf[0] == 0x16, "Must receive TLS ServerHello");
-    assert!(elapsed < Duration::from_millis(400), "Cold start TTFT must be under 400ms");
+    assert!(
+        elapsed < Duration::from_millis(400),
+        "Cold start TTFT must be under 400ms"
+    );
 }
 
 #[test]
@@ -39,7 +42,9 @@ fn test_t4_02_high_speed_gemini_streaming_zero_stutter() {
     let mut first_token_time = None;
 
     while let Ok(n) = stream.read(&mut buffer) {
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         if first_token_time.is_none() {
             first_token_time = Some(start.elapsed());
         }
@@ -50,8 +55,15 @@ fn test_t4_02_high_speed_gemini_streaming_zero_stutter() {
     }
 
     let ttft = first_token_time.unwrap_or(Duration::from_millis(999));
-    assert!(ttft < Duration::from_millis(400), "TTFT must be < 400ms (got {:?})", ttft);
-    assert!(chunks_received >= 10, "Should receive streaming token chunks with zero stutter");
+    assert!(
+        ttft < Duration::from_millis(400),
+        "TTFT must be < 400ms (got {:?})",
+        ttft
+    );
+    assert!(
+        chunks_received >= 10,
+        "Should receive streaming token chunks with zero stutter"
+    );
 }
 
 #[test]
@@ -100,14 +112,21 @@ fn test_t4_04_live_benchmark_probing_7_relays_leader_selection() {
             est_ttft_ms: est_ttft,
             throughput_kb_s: bw,
             est_tokens_sec: est_tokens,
-            status: if est_ttft < 80 { "Отлично".into() } else { "В норме".into() },
+            status: if est_ttft < 80 {
+                "Отлично".into()
+            } else {
+                "В норме".into()
+            },
             is_leader: false,
         });
     }
 
     // Rank under PreferEurope10G
     results.sort_by_key(|r| {
-        let node = TEST_MULTI_PROVIDER_RELAYS.iter().find(|n| n.ip == r.ip).unwrap();
+        let node = TEST_MULTI_PROVIDER_RELAYS
+            .iter()
+            .find(|n| n.ip == r.ip)
+            .unwrap();
         compute_composite_score(
             RoutingPreference::PreferEurope10G,
             r.tls_rtt_ms as u64,
@@ -121,7 +140,10 @@ fn test_t4_04_live_benchmark_probing_7_relays_leader_selection() {
     let table = format_benchmark_table(&results);
 
     assert_eq!(results.len(), 7);
-    assert_eq!(results[0].ip, "192.0.2.10", "Example Frankfurt 10G Anycast must be the leader");
+    assert_eq!(
+        results[0].ip, "192.0.2.10",
+        "Example Frankfurt 10G Anycast must be the leader"
+    );
     assert!(table.contains("[✓ Лидер]"));
 }
 
@@ -139,7 +161,9 @@ fn test_t4_05_full_lifecycle_activation_traffic_clean_rollback() {
         END_MARK
     );
     std::fs::write(&hosts_file, &active_block).unwrap();
-    assert!(temp.read_file("hosts").contains("daily-cloudcode-pa.googleapis.com"));
+    assert!(temp
+        .read_file("hosts")
+        .contains("daily-cloudcode-pa.googleapis.com"));
 
     // 2. Traffic Generation over mock
     let mock = MockTlsServer::spawn_tls_mock();
@@ -176,12 +200,16 @@ fn test_t4_06_unstable_network_failover_and_circuit_recovery() {
     let mut connected_stream = None;
 
     for addr in &candidates {
-        if let Ok(s) = TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(50)) {
+        if let Ok(s) = TcpStream::connect_timeout(&addr.parse().unwrap(), Duration::from_millis(50))
+        {
             let _ = s.set_nodelay(true);
             connected_stream = Some(s);
             break;
         }
     }
 
-    assert!(connected_stream.is_some(), "Failover to secondary must succeed");
+    assert!(
+        connected_stream.is_some(),
+        "Failover to secondary must succeed"
+    );
 }

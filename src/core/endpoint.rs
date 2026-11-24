@@ -19,7 +19,9 @@ pub fn primary_optional() -> bool {
     find_installations().iter().all(|install| {
         let targets = find_targets_in_path(install);
         find_asar_in_path(install).is_none()
-            && targets.iter().all(|target| target.kind != TargetKind::AgyCli)
+            && targets
+                .iter()
+                .all(|target| target.kind != TargetKind::AgyCli)
             && (targets.is_empty()
                 || targets
                     .iter()
@@ -37,8 +39,12 @@ pub fn primary_skip_hints() -> Vec<String> {
     let mut has_cli = false;
     for install in find_installations() {
         let targets = find_targets_in_path(&install);
-        has_cli |= targets.iter().any(|target| target.kind == TargetKind::AgyCli);
-        if targets.iter().any(|target| target.kind == TargetKind::IdeMainJs)
+        has_cli |= targets
+            .iter()
+            .any(|target| target.kind == TargetKind::AgyCli);
+        if targets
+            .iter()
+            .any(|target| target.kind == TargetKind::IdeMainJs)
             && !ide_settings_path(&install).is_some_and(|path| settings_use_daily(&path))
         {
             hints.push(format!(
@@ -51,7 +57,9 @@ pub fn primary_skip_hints() -> Vec<String> {
     if crate::system::file_lock::running_applications(&paths)
         .is_ok_and(|running| !running.is_empty())
     {
-        hints.push("Перезапустите Antigravity: открытое приложение ещё использует прежний адрес".into());
+        hints.push(
+            "Перезапустите Antigravity: открытое приложение ещё использует прежний адрес".into(),
+        );
     }
     if has_cli {
         hints.push(if super::endpoint_env::daily_configured() {

@@ -242,7 +242,8 @@ mod platform {
         }
         if state.agent {
             let path = agent_path();
-            if read_profile(&path).is_ok_and(|text| text.as_deref() == Some(agent_plist().as_str())) {
+            if read_profile(&path).is_ok_and(|text| text.as_deref() == Some(agent_plist().as_str()))
+            {
                 if let Err(error) = fs::remove_file(&path) {
                     errors.push(format!("{}: {error}", path.display()));
                 }

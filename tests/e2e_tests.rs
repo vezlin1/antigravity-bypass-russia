@@ -31,6 +31,12 @@ fn test_e2e_suite_integrity_and_coverage_metadata() {
     let tier4_count = 6;
     let total_count = tier1_count + tier2_count + tier3_count + tier4_count;
 
-    assert!(total_count >= 116, "E2E Test suite must contain at least 116 tests");
-    println!("=== E2E TEST SUITE INTEGRITY VERIFIED ({} tests across 4 Tiers) ===", total_count);
+    assert!(
+        total_count >= 116,
+        "E2E Test suite must contain at least 116 tests"
+    );
+    println!(
+        "=== E2E TEST SUITE INTEGRITY VERIFIED ({} tests across 4 Tiers) ===",
+        total_count
+    );
 }

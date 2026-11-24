@@ -73,7 +73,9 @@ fn test_f1_b04_rapid_back_to_back_tcp_writes() {
     let mut buf = [0u8; 128];
     while total_received < 800 {
         if let Ok(n) = server.read(&mut buf) {
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             total_received += n;
         }
     }
@@ -100,7 +102,9 @@ fn test_f1_b05_half_duplex_shutdown_handling() {
 fn test_f2_b01_malformed_netsh_output_parsing() {
     let parse_autotuning = |output: &str| -> Option<String> {
         for line in output.lines() {
-            if line.to_lowercase().contains("autotuninglevel") || line.to_lowercase().contains("auto-tuning") {
+            if line.to_lowercase().contains("autotuninglevel")
+                || line.to_lowercase().contains("auto-tuning")
+            {
                 if let Some((_, val)) = line.split_once(':') {
                     return Some(val.trim().to_string());
                 }
@@ -122,7 +126,10 @@ fn test_f2_b01_malformed_netsh_output_parsing() {
 #[test]
 fn test_f2_b02_missing_netsh_binary_simulation() {
     let res = Command::new("non_existent_netsh_binary_404").output();
-    assert!(res.is_err(), "Missing binary should safely return io::Error without panic");
+    assert!(
+        res.is_err(),
+        "Missing binary should safely return io::Error without panic"
+    );
 }
 
 #[test]
@@ -184,7 +191,11 @@ fn test_f3_b02_duplicate_ip_entries_filter() {
     use std::collections::HashSet;
     let ips = ["192.0.2.10", "111.88.96.50", "192.0.2.10", "192.0.2.11"];
     let mut unique = HashSet::new();
-    let dedup: Vec<&str> = ips.iter().copied().filter(|ip| unique.insert(*ip)).collect();
+    let dedup: Vec<&str> = ips
+        .iter()
+        .copied()
+        .filter(|ip| unique.insert(*ip))
+        .collect();
     assert_eq!(dedup.len(), 3);
     assert_eq!(dedup, vec!["192.0.2.10", "111.88.96.50", "192.0.2.11"]);
 }
@@ -232,7 +243,8 @@ fn test_f3_b05_zero_bandwidth_node_handling() {
 #[test]
 fn test_f4_b01_instant_connection_refused() {
     let start = Instant::now();
-    let res = TcpStream::connect_timeout(&"127.0.0.1:1".parse().unwrap(), Duration::from_millis(100));
+    let res =
+        TcpStream::connect_timeout(&"127.0.0.1:1".parse().unwrap(), Duration::from_millis(100));
     let elapsed = start.elapsed();
     assert!(res.is_err());
     assert!(elapsed < Duration::from_millis(500));
@@ -295,15 +307,22 @@ fn test_f5_b02_negative_priority_weight_handling() {
 
 #[test]
 fn test_f5_b03_extreme_throughput_value() {
-    let score = compute_composite_score(RoutingPreference::PreferEurope10G, 50, 100, 50, 100_000_000);
+    let score =
+        compute_composite_score(RoutingPreference::PreferEurope10G, 50, 100, 50, 100_000_000);
     assert_eq!(score, (50 + 100) - (50 * 2) - 50);
 }
 
 #[test]
 fn test_f5_b04_all_nodes_dead_pool() {
     let mut nodes = vec![
-        ("1.1.1.1", compute_composite_score(RoutingPreference::PreferEurope10G, 10000, 10000, 0, 0)),
-        ("2.2.2.2", compute_composite_score(RoutingPreference::PreferEurope10G, 10000, 10000, 0, 0)),
+        (
+            "1.1.1.1",
+            compute_composite_score(RoutingPreference::PreferEurope10G, 10000, 10000, 0, 0),
+        ),
+        (
+            "2.2.2.2",
+            compute_composite_score(RoutingPreference::PreferEurope10G, 10000, 10000, 0, 0),
+        ),
     ];
     nodes.sort_by_key(|(_, score)| *score);
     assert_eq!(nodes.len(), 2);
@@ -311,9 +330,10 @@ fn test_f5_b04_all_nodes_dead_pool() {
 
 #[test]
 fn test_f5_b05_single_node_pool() {
-    let mut nodes = vec![
-        ("192.0.2.10", compute_composite_score(RoutingPreference::PreferEurope10G, 40, 80, 50, 10000)),
-    ];
+    let mut nodes = vec![(
+        "192.0.2.10",
+        compute_composite_score(RoutingPreference::PreferEurope10G, 40, 80, 50, 10000),
+    )];
     nodes.sort_by_key(|(_, score)| *score);
     assert_eq!(nodes[0].0, "192.0.2.10");
 }
@@ -363,7 +383,10 @@ fn test_f6_b05_corrupted_multi_sz_bytes() {
         if bytes.len() % 2 != 0 || bytes.is_empty() {
             return Vec::new();
         }
-        let u16s: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_ne_bytes([c[0], c[1]])).collect();
+        let u16s: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_ne_bytes([c[0], c[1]]))
+            .collect();
         String::from_utf16_lossy(&u16s)
             .split('\0')
             .filter(|s| !s.is_empty())
@@ -441,17 +464,15 @@ fn test_f8_b02_rollback_missing_backup_files() {
     let temp = TempTestDir::new("rollback_missing");
     let backup_path = temp.file_path("doh_backup.conf");
     assert!(!backup_path.exists());
-    let restore_res: Result<(), String> = if backup_path.exists() {
-        Ok(())
-    } else {
-        Ok(())
-    };
+    let restore_res: Result<(), String> = if backup_path.exists() { Ok(()) } else { Ok(()) };
     assert!(restore_res.is_ok());
 }
 
 #[test]
 fn test_f8_b03_repeated_rollback_calls() {
-    let mut hosts = "127.0.0.1 localhost\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n# END ANTIGRAVITY-BYPASS-RUSSIA\n".to_string();
+    let mut hosts =
+        "127.0.0.1 localhost\n# BEGIN ANTIGRAVITY-BYPASS-RUSSIA\n# END ANTIGRAVITY-BYPASS-RUSSIA\n"
+            .to_string();
     for _ in 0..3 {
         hosts = strip_hosts_block(&hosts);
     }
@@ -493,19 +514,17 @@ fn test_f9_b01_empty_benchmark_results_table() {
 
 #[test]
 fn test_f9_b02_all_failed_nodes_table() {
-    let failed = vec![
-        BenchmarkResult {
-            name: "Node 1".into(),
-            ip: "1.1.1.1".into(),
-            tcp_rtt_ms: 0,
-            tls_rtt_ms: 0,
-            est_ttft_ms: 0,
-            throughput_kb_s: 0.0,
-            est_tokens_sec: 0.0,
-            status: "Таймаут".into(),
-            is_leader: false,
-        },
-    ];
+    let failed = vec![BenchmarkResult {
+        name: "Node 1".into(),
+        ip: "1.1.1.1".into(),
+        tcp_rtt_ms: 0,
+        tls_rtt_ms: 0,
+        est_ttft_ms: 0,
+        throughput_kb_s: 0.0,
+        est_tokens_sec: 0.0,
+        status: "Таймаут".into(),
+        is_leader: false,
+    }];
     let table = format_benchmark_table(&failed);
     assert!(table.contains("Таймаут"));
     assert!(!table.contains("[✓ Лидер]"));
@@ -513,19 +532,17 @@ fn test_f9_b02_all_failed_nodes_table() {
 
 #[test]
 fn test_f9_b03_extreme_ttft_display() {
-    let extreme = vec![
-        BenchmarkResult {
-            name: "Laggy Node".into(),
-            ip: "2.2.2.2".into(),
-            tcp_rtt_ms: 9999,
-            tls_rtt_ms: 9999,
-            est_ttft_ms: 19998,
-            throughput_kb_s: 1.0,
-            est_tokens_sec: 0.2,
-            status: "Перегружен".into(),
-            is_leader: false,
-        },
-    ];
+    let extreme = vec![BenchmarkResult {
+        name: "Laggy Node".into(),
+        ip: "2.2.2.2".into(),
+        tcp_rtt_ms: 9999,
+        tls_rtt_ms: 9999,
+        est_ttft_ms: 19998,
+        throughput_kb_s: 1.0,
+        est_tokens_sec: 0.2,
+        status: "Перегружен".into(),
+        is_leader: false,
+    }];
     let table = format_benchmark_table(&extreme);
     assert!(table.contains("19998 мс"));
 }

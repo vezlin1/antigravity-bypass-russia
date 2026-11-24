@@ -27,7 +27,12 @@ pub struct TempTestDir {
 
 impl TempTestDir {
     pub fn new(prefix: &str) -> Self {
-        let unique = format!("{}_{}_{}", prefix, std::process::id(), Instant::now().elapsed().as_nanos());
+        let unique = format!(
+            "{}_{}_{}",
+            prefix,
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        );
         let path = std::env::temp_dir().join("antigravity_test").join(unique);
         std::fs::create_dir_all(&path).expect("Failed to create temp test directory");
         Self { path }
@@ -102,7 +107,8 @@ impl MockTlsServer {
 
     /// Spawns a mock streaming server that emits Gemini SSE token chunks.
     pub fn spawn_streaming_mock(chunk_count: usize, delay_per_chunk: Duration) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind mock streaming listener");
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("Failed to bind mock streaming listener");
         let port = listener.local_addr().unwrap().port();
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
@@ -120,7 +126,10 @@ impl MockTlsServer {
                         if !running_clone.load(Ordering::Relaxed) {
                             break;
                         }
-                        let chunk_data = format!("data: {{\"token_id\": {}, \"text\": \"chunk_{}\"}}\n\n", i, i);
+                        let chunk_data = format!(
+                            "data: {{\"token_id\": {}, \"text\": \"chunk_{}\"}}\n\n",
+                            i, i
+                        );
                         let chunk = format!("{:X}\r\n{}\r\n", chunk_data.len(), chunk_data);
                         let _ = stream.write_all(chunk.as_bytes());
                         let _ = stream.flush();

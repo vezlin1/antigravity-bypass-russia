@@ -18,21 +18,32 @@ fn test_high_throughput_bidirectional_data_transfer() {
     let server_handle = thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("Accept failed");
         let _ = stream.set_nodelay(true);
-        stream.set_read_timeout(Some(Duration::from_secs(5))).expect("Set timeout failed");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("Set timeout failed");
 
         let mut received = vec![0u8; PAYLOAD_SIZE];
-        stream.read_exact(&mut received).expect("Server read_exact failed");
-        assert_eq!(received, test_data_clone, "Server received payload mismatch");
+        stream
+            .read_exact(&mut received)
+            .expect("Server read_exact failed");
+        assert_eq!(
+            received, test_data_clone,
+            "Server received payload mismatch"
+        );
 
-        stream.write_all(&received).expect("Server echo write_all failed");
+        stream
+            .write_all(&received)
+            .expect("Server echo write_all failed");
         stream.flush().expect("Server flush failed");
     });
 
     // Client thread: send 1MB in 64KB chunks, read echo
-    let mut client = TcpStream::connect_timeout(&addr, Duration::from_secs(3))
-        .expect("Client connect failed");
+    let mut client =
+        TcpStream::connect_timeout(&addr, Duration::from_secs(3)).expect("Client connect failed");
     let _ = client.set_nodelay(true);
-    client.set_read_timeout(Some(Duration::from_secs(5))).expect("Set timeout failed");
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("Set timeout failed");
 
     // Write in chunks
     for chunk in test_data.chunks(65536) {
@@ -41,7 +52,9 @@ fn test_high_throughput_bidirectional_data_transfer() {
     client.flush().expect("Client flush failed");
 
     let mut echo_back = vec![0u8; PAYLOAD_SIZE];
-    client.read_exact(&mut echo_back).expect("Client read echo failed");
+    client
+        .read_exact(&mut echo_back)
+        .expect("Client read echo failed");
     assert_eq!(echo_back, test_data, "Client echo back mismatch");
 
     server_handle.join().expect("Server thread join failed");
@@ -117,9 +130,13 @@ fn test_half_duplex_shutdown_and_flush() {
 
     let mut client = TcpStream::connect(addr).expect("Connect failed");
     let _ = client.set_nodelay(true);
-    client.write_all(b"FINAL DATA BEFORE SHUTDOWN").expect("Write failed");
+    client
+        .write_all(b"FINAL DATA BEFORE SHUTDOWN")
+        .expect("Write failed");
     client.flush().expect("Flush failed");
-    client.shutdown(std::net::Shutdown::Write).expect("Shutdown failed");
+    client
+        .shutdown(std::net::Shutdown::Write)
+        .expect("Shutdown failed");
 
     server_handle.join().expect("Server join failed");
 }
@@ -135,7 +152,9 @@ fn test_large_burst_transfer_with_nodelay() {
         let mut buf = [0u8; 1024];
         while total < 50 * 1024 {
             let n = s.read(&mut buf).expect("Read failed");
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             total += n;
         }
         assert_eq!(total, 50 * 1024);
