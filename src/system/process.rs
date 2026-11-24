@@ -444,21 +444,56 @@ pub fn terminate_image_tree(
         .iter()
         .map(|(pid, (_, created))| (*pid, *created))
         .collect();
-    let tree = verified_tree(&entries, &roots, &created, own_pid);
-    for pid in &tree {
-        if let Some((handle, _)) = held.get(pid) {
-            unsafe {
-                TerminateProcess(handle.0, 1);
+    let mut tree = verified_tree(&entries, &roots, &created, own_pid);
+    let deadline = std::time::Instant::now() + wait;
+    let mut start = 0;
+    // A member may start a child between the snapshot and its own termination
+    // (cmd.exe launching ping, a server launching a helper). Once the members
+    // have exited, look for such children while their handles still pin the
+    // PIDs, and stop them too, until a pass finds none.
+    loop {
+        for pid in &tree[start..] {
+            if let Some((handle, _)) = held.get(pid) {
+                unsafe {
+                    TerminateProcess(handle.0, 1);
+                }
             }
         }
-    }
-    let deadline = std::time::Instant::now() + wait;
-    for pid in &tree {
-        if let Some((handle, _)) = held.get(pid) {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            unsafe {
-                WaitForSingleObject(handle.0, remaining.as_millis().min(u32::MAX as u128) as u32);
+        for pid in &tree[start..] {
+            if let Some((handle, _)) = held.get(pid) {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                unsafe {
+                    WaitForSingleObject(
+                        handle.0,
+                        remaining.as_millis().min(u32::MAX as u128) as u32,
+                    );
+                }
             }
+        }
+        start = tree.len();
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        for entry in process_entries()? {
+            if entry.pid == 0 || entry.pid == own_pid || tree.contains(&entry.pid) {
+                continue;
+            }
+            let Some((_, parent_created)) = held.get(&entry.parent) else {
+                continue;
+            };
+            let parent_created = *parent_created;
+            if !tree.contains(&entry.parent) {
+                continue;
+            }
+            if let Some(opened) = open_for_termination(entry.pid) {
+                if opened.1 >= parent_created {
+                    held.insert(entry.pid, opened);
+                    tree.push(entry.pid);
+                }
+            }
+        }
+        if start == tree.len() {
+            break;
         }
     }
     Ok(())
@@ -533,9 +568,14 @@ mod tree_windows_tests {
         std::fs::copy(&cmd, &expected).unwrap();
         std::fs::copy(&cmd, &other).unwrap();
         let spawn = |path: &std::path::Path| {
+            // No inherited handles: ping outlives a killed cmd.exe and would otherwise keep
+            // the test harness's stdout open, stalling whoever reads it for ~29s.
             std::process::Command::new(path)
                 .args(["/d", "/c", "ping -n 30 127.0.0.1 >nul"])
                 .creation_flags(0x0800_0000)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()
                 .unwrap()
         };
@@ -550,6 +590,9 @@ mod tree_windows_tests {
         // The copy left running is not mistaken for the stopped service, so
         // rollback and restart do not wait for it.
         let blocked = super::image_running_at(&image, &expected).unwrap();
+        // Stop the stranger's whole tree (cmd.exe and its ping), not just cmd.exe.
+        let _ =
+            super::terminate_image_tree(&image, Some(&other), std::time::Duration::from_secs(2));
         let _ = stranger.kill();
         let _ = stranger.wait();
         assert!(survived, "a process from another folder was terminated");
@@ -603,5 +646,11 @@ mod tree_windows_tests {
                 "PID {pid} survived"
             );
         }
+        // The ping cmd.exe starts may appear after the snapshot above; it must not survive either.
+        assert!(
+            alive.iter().all(|entry| !(entry.parent == parent.id()
+                && entry.image.eq_ignore_ascii_case("PING.EXE"))),
+            "a child started during termination survived"
+        );
     }
 }
