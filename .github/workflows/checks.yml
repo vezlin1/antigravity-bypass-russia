@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # ci.py waits for this run's uploads
 
 concurrency:
   group: checks-${{ github.ref }}
@@ -15,40 +16,14 @@ concurrency:
 
 env:
   CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
   # CI never attaches a debugger; without debug info the crate builds ~25% faster.
   CARGO_PROFILE_TEST_DEBUG: 0
+  PYTHONUNBUFFERED: 1
 
 jobs:
-  upstream-fixtures:
-    name: Pinned App, IDE and CLI artifacts
-    runs-on: ubuntu-22.04
-    timeout-minutes: 12
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: '3.12'
-      # Pinned App, IDE and CLI archives; digests are verified on every use. Saved only
-      # from main so a download failure there is the only way this step touches the network.
-      - name: Restore pinned upstream archives
-        id: upstream
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .ci/upstream
-          key: upstream-artifacts-v1-${{ hashFiles('tests/upstream-versions.json') }}
-      - run: python tests/verify_upstream_artifacts.py --fixture-dir .ci/upstream
-      - name: Save verified upstream archives
-        if: >-
-          steps.upstream.outputs.cache-hit != 'true' &&
-          github.event_name == 'push' &&
-          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .ci/upstream
-          key: ${{ steps.upstream.outputs.cache-primary-key }}
-
-  test:
-    name: Test - ${{ matrix.target }}
+  rust:
+    name: Rust - ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -63,94 +38,230 @@ jobs:
             target: x86_64-apple-darwin
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-22.04
-            target: aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # The runner images ship rustup with a current stable toolchain; only the
-      # aarch64 cross target is missing.
-      - name: Cross target
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: rustup target add aarch64-unknown-linux-gnu
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-      - name: Install Linux dependencies (x86_64)
-        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu'
+      - name: Linux packages
+        if: runner.os == 'Linux'
         run: bash .github/scripts/apt-ensure.sh libssl-dev pkg-config lsof iproute2 openssl
-      - name: Install Linux dependencies (ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          bash .github/scripts/apt-ensure.sh gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-      - name: Restore compiled Cargo dependencies
+      - name: Rust cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
           cache-bin: false
           cache-on-failure: true
           save-if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - name: Build tests and CLI
+        run: python .github/scripts/ci.py build-tests --locked --target ${{ matrix.target }} --bin antigravity-bypass-russia --test socket_tests
+      - name: Upload unit-test executable for CLI fixtures
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-bin-${{ matrix.target }}
+          path: ${{ env.TEST_BIN }}
+          archive: false
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload CLI for Linux namespace checks
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cli-${{ matrix.target }}
+          path: ${{ env.CLI_BIN }}
+          archive: false
+          retention-days: 1
+          if-no-files-found: error
       - name: Isolated regression tests
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: ${{ runner.os == 'Linux' && 'bash tests/run_linux_ci_check.sh' || '' }} cargo test --locked --bin antigravity-bypass-russia --target ${{ matrix.target }}
+        run: ${{ runner.os == 'Linux' && 'bash tests/run_linux_ci_check.sh' || '' }} cargo test --locked --target ${{ matrix.target }} --bin antigravity-bypass-russia
       - name: Socket regression tests
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: cargo test --locked --test socket_tests --target ${{ matrix.target }}
-      # Pinned and checksum-verified on every use, so one copy (~1 GB) serves every OS.
-      - name: Restore official CLI fixtures
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        id: cli-fixtures
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --target ${{ matrix.target }} --test socket_tests
+      - name: Read-only CLI and diagnostic export
+        if: ${{ !cancelled() }}
+        run: python tests/verify_release.py "${{ env.CLI_BIN }}"
+
+  checks:
+    name: Checks - ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            fixture-jobs: 3
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            fixture-jobs: 2
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            fixture-jobs: 3
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            fixture-jobs: 3
+    env:
+      FIXTURES: .ci/cli-fixtures
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
-          path: .ci/cli-fixtures
-          key: cli-fixtures-v2-${{ hashFiles('tests/verify_cli_profiles.py', 'tests/upstream-versions.json') }}
-          enableCrossOsArchive: true
-      - name: Official CLI profiles and rollback
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: ${{ runner.os == 'Linux' && 'bash tests/run_linux_ci_check.sh' || '' }} python tests/verify_cli_profiles.py --target ${{ matrix.target }} --fixture-dir "${{ github.workspace }}/.ci/cli-fixtures" --parallel
-      # Linux reads every fixture; macOS reads only the Mach-O ones, so Linux saves.
-      - name: Save verified official CLI fixtures
-        if: >-
-          matrix.target == 'x86_64-unknown-linux-gnu' &&
-          steps.cli-fixtures.outputs.cache-hit != 'true' &&
-          github.event_name == 'push' &&
-          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .ci/cli-fixtures
-          key: ${{ steps.cli-fixtures.outputs.cache-primary-key }}
-          enableCrossOsArchive: true
+          python-version: '3.12'
+      # Pure-Python checks need no Rust build; they run while the Rust job compiles.
       - name: Installer platform selection
         run: python tests/verify_installer.py
-
       - name: Launcher compatibility
+        if: ${{ !cancelled() }}
         run: python tests/verify_wrappers.py
       - name: macOS bundle format
+        if: ${{ !cancelled() }}
         run: python tests/verify_macos_bundle.py
       - name: macOS source launcher
+        if: ${{ !cancelled() }}
         run: python tests/verify_macos_source_bundle.py
       - name: macOS owner build kit
+        if: ${{ !cancelled() }}
         run: python tests/verify_macos_build_kit.py
-      # Elsewhere the socket tests already built this binary (test profile) for the smoke checks.
-      - name: Build executable
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cargo build --locked --bin antigravity-bypass-russia --target ${{ matrix.target }} --features vendored-openssl
-      - name: Linux setup and rollback in isolated namespaces
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: sudo python3 tests/verify_linux_runtime.py target/${{ matrix.target }}/debug/antigravity-bypass-russia
-      - name: Read-only CLI and diagnostic export
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: python tests/verify_release.py target/${{ matrix.target }}/debug/antigravity-bypass-russia${{ runner.os == 'Windows' && '.exe' || '' }}
-      - name: Install Python 3.9 for packaging compatibility
-        if: runner.os == 'Windows'
+      - name: Python 3.9
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.9'
       - name: Python 3.9 launcher and packaging checks
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: |
           foreach ($check in @('verify_macos_bundle.py', 'verify_macos_source_bundle.py', 'verify_wrappers.py')) {
             python "tests/$check"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+      - name: Python
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Linux packages
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        run: bash .github/scripts/apt-ensure.sh lsof iproute2
+      # Pinned and checksum-verified, so one copy serves every OS; saved only from main.
+      - name: Fixture cache
+        if: ${{ !cancelled() }}
+        id: fixtures
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.FIXTURES }}
+          key: cli-fixtures-v2-${{ hashFiles('tests/verify_cli_profiles.py', 'tests/upstream-versions.json') }}
+          enableCrossOsArchive: true
+      - name: Wait for the unit-test executable
+        if: ${{ !cancelled() }}
+        run: python .github/scripts/ci.py wait-artifact test-bin-${{ matrix.target }} "Rust - ${{ matrix.target }}"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Download build
+        if: ${{ !cancelled() }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: test-bin-${{ matrix.target }}
+          path: .ci/bin
+      - name: Official CLI profiles and rollback
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          test_bin=$(ls .ci/bin/*)
+          chmod +x "$test_bin"
+          ${{ runner.os == 'Linux' && 'bash tests/run_linux_ci_check.sh' || '' }} python tests/verify_cli_profiles.py \
+            --fixture-dir "$PWD/$FIXTURES" --parallel --jobs ${{ matrix.fixture-jobs }} --test-binary "$test_bin"
+      # Linux and Windows read every fixture; macOS reads only Mach-O ones, so Linux saves.
+      - name: Save verified fixtures
+        if: >-
+          !cancelled() && runner.os == 'Linux' &&
+          steps.fixtures.outputs.cache-hit != 'true' &&
+          github.event_name == 'push' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.FIXTURES }}
+          key: ${{ steps.fixtures.outputs.cache-primary-key }}
+          enableCrossOsArchive: true
+
+  linux-runtime:
+    name: Linux namespaces
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Linux packages
+        run: bash .github/scripts/apt-ensure.sh lsof iproute2 openssl
+      - name: Wait for the Linux CLI
+        run: python3 .github/scripts/ci.py wait-artifact cli-x86_64-unknown-linux-gnu "Rust - x86_64-unknown-linux-gnu"
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Download build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cli-x86_64-unknown-linux-gnu
+          path: .ci/bin
+      - name: Linux setup and rollback in isolated namespaces
+        run: |
+          chmod +x .ci/bin/antigravity-bypass-russia
+          sudo python3 tests/verify_linux_runtime.py .ci/bin/antigravity-bypass-russia
+
+  aarch64:
+    name: Build - aarch64-unknown-linux-gnu
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Cross toolchain
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          bash .github/scripts/apt-ensure.sh gcc-aarch64-linux-gnu
+      - name: Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: aarch64-unknown-linux-gnu
+          cache-bin: false
+          cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - name: Build executable
+        run: cargo build --locked --target aarch64-unknown-linux-gnu --bin antigravity-bypass-russia --features vendored-openssl
+
+  upstream-fixtures:
+    name: Pinned App, IDE and CLI artifacts
+    runs-on: ubuntu-22.04
+    timeout-minutes: 12
+    env:
+      UPSTREAM: .ci/upstream
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Upstream cache
+        id: upstream
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.UPSTREAM }}
+          key: upstream-artifacts-v1-${{ hashFiles('tests/upstream-versions.json') }}
+      - name: Verify pinned artifacts
+        run: python tests/verify_upstream_artifacts.py --fixture-dir "$UPSTREAM"
+      - name: Save verified artifacts
+        if: >-
+          steps.upstream.outputs.cache-hit != 'true' &&
+          github.event_name == 'push' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.UPSTREAM }}
+          key: ${{ steps.upstream.outputs.cache-primary-key }}
