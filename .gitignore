@@ -6,6 +6,7 @@
 /target/
 /target-*/
 /dist/
+/.ci/
 /.agents/
 **/*.rs.bk
 *.pdb

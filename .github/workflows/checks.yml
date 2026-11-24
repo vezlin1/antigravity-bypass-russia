@@ -28,7 +28,24 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-      - run: python tests/verify_upstream_artifacts.py
+      # Pinned App, IDE and CLI archives; digests are verified on every use. Saved only
+      # from main so a download failure there is the only way this step touches the network.
+      - name: Restore pinned upstream archives
+        id: upstream
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ci/upstream
+          key: upstream-artifacts-v1-${{ hashFiles('tests/upstream-versions.json') }}
+      - run: python tests/verify_upstream_artifacts.py --fixture-dir .ci/upstream
+      - name: Save verified upstream archives
+        if: >-
+          steps.upstream.outputs.cache-hit != 'true' &&
+          github.event_name == 'push' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .ci/upstream
+          key: ${{ steps.upstream.outputs.cache-primary-key }}
 
   test:
     name: Test - ${{ matrix.target }}
@@ -80,26 +97,30 @@ jobs:
       - name: Socket regression tests
         if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo test --locked --test socket_tests --target ${{ matrix.target }}
+      # Pinned and checksum-verified on every use, so one copy (~1 GB) serves every OS.
       - name: Restore official CLI fixtures
         if: matrix.target != 'aarch64-unknown-linux-gnu'
         id: cli-fixtures
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/ag-cli-fixtures
-          key: cli-fixtures-v1-${{ matrix.target }}-${{ hashFiles('tests/verify_cli_profiles.py', 'tests/upstream-versions.json') }}
+          path: .ci/cli-fixtures
+          key: cli-fixtures-v2-${{ hashFiles('tests/verify_cli_profiles.py', 'tests/upstream-versions.json') }}
+          enableCrossOsArchive: true
       - name: Official CLI profiles and rollback
         if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: ${{ runner.os == 'Linux' && 'bash tests/run_linux_ci_check.sh' || '' }} python tests/verify_cli_profiles.py --target ${{ matrix.target }} --fixture-dir "${{ runner.temp }}/ag-cli-fixtures" --parallel
+        run: ${{ runner.os == 'Linux' && 'bash tests/run_linux_ci_check.sh' || '' }} python tests/verify_cli_profiles.py --target ${{ matrix.target }} --fixture-dir "${{ github.workspace }}/.ci/cli-fixtures" --parallel
+      # Linux reads every fixture; macOS reads only the Mach-O ones, so Linux saves.
       - name: Save verified official CLI fixtures
         if: >-
-          matrix.target != 'aarch64-unknown-linux-gnu' &&
+          matrix.target == 'x86_64-unknown-linux-gnu' &&
           steps.cli-fixtures.outputs.cache-hit != 'true' &&
           github.event_name == 'push' &&
           github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/ag-cli-fixtures
+          path: .ci/cli-fixtures
           key: ${{ steps.cli-fixtures.outputs.cache-primary-key }}
+          enableCrossOsArchive: true
       - name: Installer platform selection
         run: python tests/verify_installer.py
 
