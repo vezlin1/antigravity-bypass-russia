@@ -11,7 +11,7 @@ for tool in cargo rustup python3; do
   command -v "$tool" >/dev/null || { echo "Builder prerequisite missing: $tool" >&2; exit 1; }
 done
 rustup target add aarch64-apple-darwin x86_64-apple-darwin
-cargo test --locked --bin antigravity-bypass-russia --test socket_tests
+cargo test --locked --bin antigravity-bypass-russia --test cli
 python3 tests/verify_macos_bundle.py
 python3 tests/verify_wrappers.py
 for target in aarch64-apple-darwin x86_64-apple-darwin; do
@@ -29,8 +29,8 @@ mkdir -p dist/macos-ready
 python3 scripts/bundle_macos_launcher.py \
   --arm64 target/aarch64-apple-darwin/release/antigravity-bypass-russia \
   --x64 target/x86_64-apple-darwin/release/antigravity-bypass-russia \
-  --output dist/macos-ready/unlock_and_restore.sh
-bash -n dist/macos-ready/unlock_and_restore.sh
-bash dist/macos-ready/unlock_and_restore.sh --version
-(cd dist/macos-ready && shasum -a 256 unlock_and_restore.sh > SHA256SUMS.txt)
-printf '\nReady: %s/dist/macos-ready/unlock_and_restore.sh\nUsers need neither Xcode, Rust nor Python.\n' "$PWD"
+  --output dist/macos-ready/antigravity-bypass-macos.sh
+bash -n dist/macos-ready/antigravity-bypass-macos.sh
+bash dist/macos-ready/antigravity-bypass-macos.sh --version
+(cd dist/macos-ready && shasum -a 256 antigravity-bypass-macos.sh > SHA256SUMS.txt)
+printf '\nReady: %s/dist/macos-ready/antigravity-bypass-macos.sh\nUsers need neither Xcode, Rust nor Python.\n' "$PWD"

@@ -31,15 +31,15 @@ Rust with rustup (https://rustup.rs), Python 3.9 or newer, internet access.
 Full Xcode is not required. Install Command Line Tools using:
   xcode-select --install
 
-Output: dist/macos-ready/unlock_and_restore.sh and SHA256SUMS.txt.
+Output: dist/macos-ready/antigravity-bypass-macos.sh and SHA256SUMS.txt.
 Distribute the generated .sh to users. It embeds both Apple Silicon and Intel
 native engines and needs no Xcode, Rust, Python or build downloads at runtime.
-Users can run: bash unlock_and_restore.sh
+Users can run: bash antigravity-bypass-macos.sh
 
 The builder runs tests and a read-only --version check. It does not apply
 the bypass, change DNS/VPN settings, publish releases or create Git tags.
 Do not distribute scripts/unlock_and_restore.sh from the source folder;
-use the generated dist/macos-ready/unlock_and_restore.sh.
+use the generated dist/macos-ready/antigravity-bypass-macos.sh.
 ''')
     print(output)
 

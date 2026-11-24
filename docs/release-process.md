@@ -78,13 +78,21 @@ candidate` собирает единый `.sh`, сверяет вложенны�
 
 Артефакт `release-candidate` содержит только:
 
-- `antigravity-bypass-russia.exe`
-- `unlock_and_restore.ps1`
-- `unlock_and_restore.sh` с готовыми движками Intel и Apple Silicon
+- `antigravity-bypass-windows.exe`
+- `antigravity-bypass-macos.sh` с готовыми движками Intel и Apple Silicon
+- `antigravity-bypass-linux-x64`, `antigravity-bypass-linux-arm64` и
+  `antigravity-bypass-linux-x64.deb`
+- `install.sh`
+- копии под именами 2.5.0 (`antigravity-bypass-russia.exe`, `unlock_and_restore.sh`,
+  `antigravity-bypass-russia-linux-x64`, `antigravity-bypass-russia-linux-arm64`,
+  `antigravity-bypass-russia-linux-x64.deb`), чтобы старые ссылки работали; их
+  убирают в 3.2
 - `SHA256SUMS.txt`
 
-В GitHub Release публикуются только три запускаемых файла. `SHA256SUMS.txt`
-остаётся во внутреннем артефакте для проверки сборки.
+В GitHub Release публикуются все файлы, кроме `SHA256SUMS.txt`: он остаётся во
+внутреннем артефакте для проверки сборки. `unlock_and_restore.ps1` с 3.0.0 не
+публикуется: он только запускает `.exe`, лежащий рядом, и нужен для запуска из
+репозитория.
 
 Вручную запущенная сборка ветки пропускает `Create GitHub Release`. Создание
 черновика релиза предусмотрено только для тега `v*`; даже этот шаг выполняется

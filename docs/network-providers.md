@@ -112,7 +112,7 @@ Gemini и AI Studio — через VPN. Входные данные этих п�
 
 Пункт **[1]** запускает Antigravity App или IDE с локальным прокси в сеансе
 текущего пользователя Windows. После включения CONNECT приложение можно
-запустить повторно командой `antigravity-bypass-russia.exe --connect-launch app`
+запустить повторно командой `antigravity-bypass-windows.exe --connect-launch app`
 (без повышения прав).
 Если при активном VPN DNS для Gemini и AI Studio не подтверждается, пункт [1]
 сообщает, как веб-версии будут работать: через VPN, а после его отключения —

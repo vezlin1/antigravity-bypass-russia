@@ -46,7 +46,7 @@
 
 ### 🪟 Windows 10 / 11
 
-1. Скачайте [**`antigravity-bypass-russia.exe`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest).
+1. Скачайте [**`antigravity-bypass-windows.exe`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest).
 2. Запустите его двойным кликом и разрешите запуск от имени администратора.
 3. Нажмите **`1`** (**Включить обход**) и **Enter**.
 4. Когда появится «Готово», откроется Antigravity — войдите в свой Google-аккаунт.
@@ -63,7 +63,7 @@
 
 1. Откройте **Терминал** и выполните:
    ```bash
-   curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh
+   curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-macos.sh -o antigravity-bypass-macos.sh && chmod +x antigravity-bypass-macos.sh && ./antigravity-bypass-macos.sh
    ```
 2. Нажмите **`1`** (**Включить обход**) и **Enter**. При необходимости утилита
    спросит пароль администратора.
@@ -72,10 +72,10 @@
 <details>
 <summary>Скачать скрипт вручную</summary>
 
-Скачайте [**`unlock_and_restore.sh`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest)
+Скачайте [**`antigravity-bypass-macos.sh`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest)
 и запустите его в Терминале:
 ```bash
-chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh
+chmod +x antigravity-bypass-macos.sh && ./antigravity-bypass-macos.sh
 ```
 </details>
 
@@ -94,19 +94,19 @@ chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh
 <summary>Пакет .deb или отдельный файл</summary>
 
 **Пакет `.deb` (Ubuntu, Debian, Linux Mint).** Скачайте
-[**`antigravity-bypass-russia-linux-x64.deb`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest)
+[**`antigravity-bypass-linux-x64.deb`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest)
 и установите:
 ```bash
-sudo dpkg -i antigravity-bypass-russia-linux-x64.deb
+sudo dpkg -i antigravity-bypass-linux-x64.deb
 ```
 
 **Отдельный файл:**
 ```bash
 # Обычный компьютер (x86_64)
-curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
+curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
 
 # ARM64 (Raspberry Pi, Asahi Linux, ARM-серверы)
-curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-arm64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
+curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-linux-arm64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
 ```
 </details>
 

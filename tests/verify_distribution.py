@@ -17,20 +17,30 @@ parser.add_argument("--macos-only", action="store_true", help="Verify a local Ma
 parser.add_argument("--linux-only", action="store_true", help="Verify a local Linux build without Windows/Mac files")
 args = parser.parse_args()
 directory = args.directory
-payload_names = {
-    "antigravity-bypass-russia.exe",
-    "antigravity-bypass-russia-linux-x64",
-    "antigravity-bypass-russia-linux-arm64",
-    "antigravity-bypass-russia-linux-x64.deb",
-    "unlock_and_restore.ps1",
-    "unlock_and_restore.sh",
-    "install.sh",
+# Release files: antigravity-bypass-<system>[-<cpu>].
+WINDOWS = "antigravity-bypass-windows.exe"
+MACOS = "antigravity-bypass-macos.sh"
+LINUX_X64 = "antigravity-bypass-linux-x64"
+LINUX_ARM64 = "antigravity-bypass-linux-arm64"
+DEB = "antigravity-bypass-linux-x64.deb"
+# Copies under the names used up to 2.5.0, so old download links keep
+# working during the transition. Remove in 3.2.
+LEGACY = {
+    "antigravity-bypass-russia.exe": WINDOWS,
+    "unlock_and_restore.sh": MACOS,
+    "antigravity-bypass-russia-linux-x64": LINUX_X64,
+    "antigravity-bypass-russia-linux-arm64": LINUX_ARM64,
+    "antigravity-bypass-russia-linux-x64.deb": DEB,
 }
+payload_names = {WINDOWS, MACOS, LINUX_X64, LINUX_ARM64, DEB, "install.sh"} | set(LEGACY)
 if args.macos_only:
-    payload_names = {"antigravity-bypass-russia-macos-arm64", "antigravity-bypass-russia-macos-x64", "unlock_and_restore.sh"}
+    payload_names = {"antigravity-bypass-russia-macos-arm64", "antigravity-bypass-russia-macos-x64", MACOS}
 elif args.linux_only:
-    payload_names = {"antigravity-bypass-russia-linux-x64", "antigravity-bypass-russia-linux-arm64", "antigravity-bypass-russia-linux-x64.deb", "unlock_and_restore.sh", "install.sh"}
+    payload_names = {LINUX_X64, LINUX_ARM64, DEB, "install.sh"}
 assert {p.name for p in directory.iterdir()} == payload_names | {"SHA256SUMS.txt"}, "Unexpected or missing distribution files"
+for legacy, current in LEGACY.items():
+    if legacy in payload_names:
+        assert (directory / legacy).read_bytes() == (directory / current).read_bytes(), f"{legacy} differs from {current}"
 
 checksums = {}
 for line in (directory / "SHA256SUMS.txt").read_text(encoding="ascii").splitlines():
@@ -43,30 +53,30 @@ for name, digest in checksums.items():
     assert hashlib.sha256((directory / name).read_bytes()).hexdigest() == digest, f"Checksum mismatch: {name}"
 
 if not args.macos_only and not args.linux_only:
-    exe = (directory / "antigravity-bypass-russia.exe").read_bytes()
+    exe = (directory / WINDOWS).read_bytes()
     assert exe[:2] == b"MZ", "Windows engine is not PE"
     pe = struct.unpack_from("<I", exe, 60)[0]
     assert exe[pe:pe + 4] == b"PE\0\0" and struct.unpack_from("<H", exe, pe + 4)[0] == 0x8664, "Expected a Windows x64 engine"
     assert exe == (args.engines / "antigravity-bypass-russia.exe").read_bytes(), "Windows engine changed during packaging"
 
-if (directory / "antigravity-bypass-russia-linux-x64").is_file():
-    elf = (directory / "antigravity-bypass-russia-linux-x64").read_bytes()
+if (directory / LINUX_X64).is_file():
+    elf = (directory / LINUX_X64).read_bytes()
     assert elf[:4] == b"\x7fELF", "Linux engine is not ELF"
     assert elf[4] == 2, "Expected 64-bit ELF"
     assert elf[18:20] == b"\x3e\x00", "Expected x86-64 ELF"
     assert elf == (args.engines / "antigravity-bypass-russia-linux-x64").read_bytes(), "Linux engine changed during packaging"
 
-if (directory / "antigravity-bypass-russia-linux-arm64").is_file():
-    elf = (directory / "antigravity-bypass-russia-linux-arm64").read_bytes()
+if (directory / LINUX_ARM64).is_file():
+    elf = (directory / LINUX_ARM64).read_bytes()
     assert elf[:4] == b"\x7fELF", "Linux ARM64 engine is not ELF"
     assert elf[4] == 2, "Expected 64-bit ELF"
     assert elf[18:20] == b"\xb7\x00", "Expected AArch64 ELF"
     assert elf == (args.engines / "antigravity-bypass-russia-linux-arm64").read_bytes(), "Linux ARM64 engine changed during packaging"
 
-launcher = directory / "unlock_and_restore.sh"
-script = launcher.read_bytes()
-assert b"\r" not in script, "macOS/Linux launcher must use LF"
+launcher = directory / MACOS
 if not args.linux_only:
+    script = launcher.read_bytes()
+    assert b"\r" not in script, "macOS launcher must use LF"
     payloads = re.findall(rb"<<'ANTIGRAVITY_ENGINE'[^\n]*\n(.*?)\nANTIGRAVITY_ENGINE", script, re.S)
     assert len(payloads) == 2, "Both native Mac engines must be embedded"
     for payload, arch, cpu in zip(payloads, ["arm64", "x64"], [0x100000C, 0x1000007]):
@@ -76,5 +86,7 @@ if not args.linux_only:
 
 bash = str(Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "Git/bin/bash.exe") if os.name == "nt" else shutil.which("bash")
 assert bash, "Bash is required for launcher syntax validation"
-subprocess.run([bash, "-n", str(launcher.resolve())], check=True, timeout=10)
+for shell_script in [directory / name for name in (MACOS, "install.sh") if name in payload_names]:
+    assert b"\r" not in shell_script.read_bytes(), f"{shell_script.name} must use LF"
+    subprocess.run([bash, "-n", str(shell_script.resolve())], check=True, timeout=10)
 print("PASS: exact distribution, SHA-256, native engine payloads and shell syntax")

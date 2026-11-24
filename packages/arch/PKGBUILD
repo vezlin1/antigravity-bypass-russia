@@ -10,8 +10,8 @@ depends=('openssl' 'glibc' 'gcc-libs' 'iproute2' 'procps-ng' 'psmisc' 'lsof' 'su
 provides=('antigravity-bypass-russia')
 conflicts=('antigravity-bypass-russia')
 
-source_x86_64=("antigravity-bypass-russia-x86_64-${pkgver}::https://github.com/vezlin1/antigravity-bypass-russia/releases/download/v${pkgver}/antigravity-bypass-russia-linux-x64")
-source_aarch64=("antigravity-bypass-russia-aarch64-${pkgver}::https://github.com/vezlin1/antigravity-bypass-russia/releases/download/v${pkgver}/antigravity-bypass-russia-linux-arm64")
+source_x86_64=("antigravity-bypass-russia-x86_64-${pkgver}::https://github.com/vezlin1/antigravity-bypass-russia/releases/download/v${pkgver}/antigravity-bypass-linux-x64")
+source_aarch64=("antigravity-bypass-russia-aarch64-${pkgver}::https://github.com/vezlin1/antigravity-bypass-russia/releases/download/v${pkgver}/antigravity-bypass-linux-arm64")
 sha256sums_x86_64=('SKIP')
 sha256sums_aarch64=('SKIP')
 

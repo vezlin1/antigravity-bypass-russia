@@ -4,11 +4,12 @@ $ErrorActionPreference = 'Stop'
 $engineArgs = @($args)
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $candidates = @(
+    (Join-Path $PSScriptRoot 'antigravity-bypass-windows.exe'),
     (Join-Path $PSScriptRoot 'antigravity-bypass-russia.exe'),
     (Join-Path $repoRoot 'target\release\antigravity-bypass-russia.exe'),
     (Join-Path $repoRoot 'antigravity-bypass-russia.exe')
 )
-if (-not (Test-Path -LiteralPath $candidates[0] -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $repoRoot 'Cargo.toml')) -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
+if (-not (Test-Path -LiteralPath $candidates[0] -PathType Leaf) -and -not (Test-Path -LiteralPath $candidates[1] -PathType Leaf) -and (Test-Path -LiteralPath (Join-Path $repoRoot 'Cargo.toml')) -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
     & cargo build --release --locked --manifest-path (Join-Path $repoRoot 'Cargo.toml')
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }

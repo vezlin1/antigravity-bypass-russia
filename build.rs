@@ -14,7 +14,7 @@ fn main() {
                 "Antigravity Bypass Russia & Rollback Tool",
             );
             res.set("ProductName", "ANTIGRAVITY-BYPASS-RUSSIA");
-            res.set("OriginalFilename", "antigravity-bypass-russia.exe");
+            res.set("OriginalFilename", "antigravity-bypass-windows.exe");
             res.set(
                 "LegalCopyright",
                 "Copyright (c) 2026 Antigravity Contributors",

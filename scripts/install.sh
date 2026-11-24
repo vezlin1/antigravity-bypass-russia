@@ -11,8 +11,8 @@ ARCH="$(uname -m)"
 case "$OS" in
   Linux)
     case "$ARCH" in
-      x86_64) BIN_NAME="antigravity-bypass-russia-linux-x64" ;;
-      aarch64|arm64) BIN_NAME="antigravity-bypass-russia-linux-arm64" ;;
+      x86_64) BIN_NAME="antigravity-bypass-linux-x64"; OLD_NAME="antigravity-bypass-russia-linux-x64" ;;
+      aarch64|arm64) BIN_NAME="antigravity-bypass-linux-arm64"; OLD_NAME="antigravity-bypass-russia-linux-arm64" ;;
       *)
         printf 'Error: Unsupported Linux architecture: %s\n' "$ARCH" >&2
         exit 1
@@ -21,7 +21,7 @@ case "$OS" in
     ;;
   Darwin)
     case "$ARCH" in
-      arm64|x86_64) BIN_NAME="unlock_and_restore.sh" ;;
+      arm64|x86_64) BIN_NAME="antigravity-bypass-macos.sh"; OLD_NAME="unlock_and_restore.sh" ;;
       *)
         printf 'Error: Unsupported macOS architecture: %s\n' "$ARCH" >&2
         exit 1
@@ -29,28 +29,36 @@ case "$OS" in
     esac
     ;;
   *)
-    printf 'Error: Unsupported OS: %s (Windows users should use unlock_and_restore.ps1 or the .exe binary)\n' "$OS" >&2
+    printf 'Error: Unsupported OS: %s (on Windows download antigravity-bypass-windows.exe)\n' "$OS" >&2
     exit 1
     ;;
 esac
 
-DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${BIN_NAME}"
-
 printf '==> Antigravity Bypass Russia Installer\n'
 printf 'Detected OS: %s, Architecture: %s\n' "$OS" "$ARCH"
-printf 'Downloading: %s\n' "$DOWNLOAD_URL"
 
 TMP_DIR="$(mktemp -d)"
 cleanup() { rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$DOWNLOAD_URL" -o "$TMP_DIR/antigravity-bypass-russia"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$TMP_DIR/antigravity-bypass-russia" "$DOWNLOAD_URL"
-else
-  printf 'Error: curl or wget is required to download.\n' >&2
-  exit 1
+# Downloads a file of the latest release; fails when it is not there.
+download() {
+  local url="https://github.com/${REPO}/releases/latest/download/$1"
+  printf 'Downloading: %s\n' "$url"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$TMP_DIR/antigravity-bypass-russia"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$TMP_DIR/antigravity-bypass-russia" "$url"
+  else
+    printf 'Error: curl or wget is required to download.\n' >&2
+    exit 1
+  fi
+}
+
+# Releases up to 2.5.0 publish the same files under their old names.
+if ! download "$BIN_NAME"; then
+  printf 'Not found under the new name, trying %s\n' "$OLD_NAME"
+  download "$OLD_NAME"
 fi
 
 chmod +x "$TMP_DIR/antigravity-bypass-russia"

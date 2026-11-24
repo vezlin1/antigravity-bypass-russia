@@ -4,15 +4,19 @@ set -euo pipefail
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin${PATH:+:$PATH}"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "$script_dir/.." && pwd)"
+# Release file names: antigravity-bypass-<system>-<cpu> since 3.0.0, the
+# "-russia" names before it.
 case "$(uname -s):$(uname -m)" in
-  Darwin:arm64) release_name=antigravity-bypass-russia-macos-arm64 ;;
-  Darwin:x86_64) release_name=antigravity-bypass-russia-macos-x64 ;;
-  Linux:x86_64) release_name=antigravity-bypass-russia-linux-x64 ;;
-  Linux:aarch64) release_name=antigravity-bypass-russia-linux-arm64 ;;
-  *) release_name=antigravity-bypass-russia ;;
+  Darwin:arm64) release_names=(antigravity-bypass-russia-macos-arm64) ;;
+  Darwin:x86_64) release_names=(antigravity-bypass-russia-macos-x64) ;;
+  Linux:x86_64) release_names=(antigravity-bypass-linux-x64 antigravity-bypass-russia-linux-x64) ;;
+  Linux:aarch64) release_names=(antigravity-bypass-linux-arm64 antigravity-bypass-russia-linux-arm64) ;;
+  *) release_names=(antigravity-bypass-russia) ;;
 esac
 # A downloaded engine beside this launcher takes precedence over old builds.
-if [[ -x "$script_dir/$release_name" ]]; then exec "$script_dir/$release_name" "$@"; fi
+for release_name in "${release_names[@]}"; do
+  if [[ -x "$script_dir/$release_name" ]]; then exec "$script_dir/$release_name" "$@"; fi
+done
 if [[ -f "$repo_root/Cargo.toml" ]]; then
   # Older instructions used sudo. Build as the invoking user so rustup can find
   # their toolchain and Cargo does not leave root-owned files in the checkout.
@@ -34,11 +38,11 @@ if [[ -f "$repo_root/Cargo.toml" ]]; then
     fi
   fi
 fi
-for engine in "$repo_root/target/release/antigravity-bypass-russia" "$script_dir/$release_name" "$repo_root/$release_name"; do
+for engine in "$repo_root/target/release/antigravity-bypass-russia" "${release_names[@]/#/$repo_root/}"; do
   if [[ -x "$engine" ]]; then exec "$engine" "$@"; fi
 done
 printf '%s\n' 'Rust engine not found. Download the standalone release for your platform:' >&2
-printf '%s\n' '  Linux:  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia' >&2
-printf '%s\n' '  macOS:  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh' >&2
+printf '%s\n' '  Linux:  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia' >&2
+printf '%s\n' '  macOS:  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-macos.sh -o antigravity-bypass-macos.sh && chmod +x antigravity-bypass-macos.sh && ./antigravity-bypass-macos.sh' >&2
 printf '%s\n' 'Or install Rust (https://rustup.rs) and run this repository script without sudo. The engine requests administrator privileges when needed.' >&2
 exit 1
