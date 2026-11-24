@@ -5,6 +5,12 @@ on:
   workflow_dispatch:
   push:
     branches: [main, 'fix/**']
+  workflow_call:
+    inputs:
+      full-suite:
+        description: Run every job regardless of which files changed
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -38,6 +44,7 @@ jobs:
         run: python3 .github/scripts/ci.py changes
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          CI_FULL_SUITE: ${{ inputs.full-suite == true }}
 
   rust:
     name: Rust - ${{ matrix.target }}
@@ -297,7 +304,8 @@ jobs:
   timing:
     name: Timing report
     needs: [changes, rust, checks, linux-runtime, aarch64, upstream-fixtures]
-    if: ${{ !cancelled() }}
+    # A release that calls this workflow reports its own jobs once, from release.yml.
+    if: ${{ !cancelled() && github.workflow == 'Regression checks' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     steps:

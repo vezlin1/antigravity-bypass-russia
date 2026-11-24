@@ -1,8 +1,9 @@
-"""CI decisions, helpers and reports for checks.yml (stdlib only).
+"""CI decisions and reports for checks.yml and release.yml (stdlib only).
 
   ci.py changes        decide whether the Rust jobs must run (GITHUB_OUTPUT rust=true|false)
+  ci.py verified-run   find a green checks.yml run that ran the full suite for GITHUB_SHA
   ci.py timing         write each job's time against its budget to the run summary
-  ci.py build-tests CARGO_ARGS...         cargo test --no-run; export TEST_BIN and CLI_BIN
+  ci.py build-tests CARGO_ARGS...   cargo test --no-run; export TEST_BIN and CLI_BIN
   ci.py wait-artifact NAME PRODUCER_JOB   wait for another job's upload in this run
   ci.py docs-only PATH...  print which paths the Rust filter treats as docs-only (for tests)
 
@@ -21,16 +22,11 @@ from datetime import datetime, timezone
 
 # Jobs whose success proves the full Rust suite ran for a commit.
 RUST_JOB_PREFIXES = ("Rust - ", "Checks - ", "Linux namespaces", "Build - aarch64")
-
-
 FULL_SUITE_MARKER = "Rust - "
-
 
 # Paths that no Rust job reads. tests/verify_ci_filter.py fails the build if a
 # Rust-job input starts referencing one of them.
 DOCS_ONLY_DIRS = ("docs/",)
-
-
 DOCS_ONLY_EXCEPT = ("docs/releases/",)  # verify_release.py requires the release notes
 
 
@@ -160,6 +156,25 @@ def decide(rust, reason):
     output(rust=str(rust).lower())
 
 
+def verified_run():
+    """Wait for checks.yml on this commit; report a run that passed the full suite."""
+    repo, sha = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
+    deadline = time.monotonic() + int(os.environ.get("CI_WAIT_SECONDS", "1500"))
+    while True:
+        runs = checks_runs(repo, head_sha=sha)
+        for run in runs:
+            if run["status"] == "completed" and ran_full_suite(repo, run):
+                summary(f"Reusing checks.yml run [{run['id']}]({run['html_url']}) for {sha[:12]}: "
+                        "tests, fixture profiles and packaging checks already passed on this commit.")
+                return output(verified="true", run_id=run["id"])
+        pending = [run for run in runs if run["status"] != "completed" and run["event"] == "push"]
+        if not pending or time.monotonic() > deadline:
+            summary(f"No checks.yml run passed the full suite on {sha[:12]}; the release runs it.")
+            return output(verified="false", run_id="")
+        print(f"Waiting for checks.yml run {pending[0]['id']} on {sha[:12]}", flush=True)
+        time.sleep(30)
+
+
 # Budgets in seconds: (queue, setup, running). Prefix match on the job name.
 BUDGETS = [
     ("Changes", (30, 15, 15)),
@@ -171,8 +186,6 @@ BUDGETS = [
     ("Release build - ", (30, 60, 240)),
     ("Package", (30, 30, 60)),
 ]
-
-
 SETUP_STEPS = ("Set up job", "Checkout", "Rust cache", "Python", "Linux packages", "Download build",
                "Cross toolchain", "Fixture cache", "Upstream cache")
 
@@ -280,9 +293,10 @@ if __name__ == "__main__":
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "docs-only":
         for path in sys.argv[2:]:
-            print(f"{'docs-only' if docs_only(path) else 'code'}	{path}")
+            print(f"{'docs-only' if docs_only(path) else 'code'}\t{path}")
         sys.exit()
-    commands = {"changes": changes, "timing": timing, "build-tests": build_tests, "wait-artifact": wait_artifact}
+    commands = {"changes": changes, "verified-run": verified_run, "timing": timing,
+                "build-tests": build_tests, "wait-artifact": wait_artifact}
     if command not in commands:
         sys.exit(__doc__)
     try:

@@ -9,9 +9,51 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  PYTHONUNBUFFERED: 1
+
 jobs:
+  gate:
+    name: Checks on this commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      verified: ${{ steps.verified.outputs.verified }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+      # A green full checks.yml run on this exact commit already ran the unit, socket and
+      # fixture tests and the packaging checks; the release does not repeat them.
+      - name: Find a green checks run for this commit
+        id: verified
+        run: python3 .github/scripts/ci.py verified-run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  checks:
+    name: Full checks
+    needs: gate
+    if: needs.gate.outputs.verified != 'true'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/checks.yml
+    with:
+      full-suite: true
+
   build:
-    name: Build - ${{ matrix.target }}
+    name: Release build - ${{ matrix.target }}
+    needs: [gate, checks]
+    if: >-
+      !cancelled() && needs.gate.result == 'success' &&
+      (needs.checks.result == 'success' || (needs.checks.result == 'skipped' && needs.gate.outputs.verified == 'true'))
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -21,80 +63,42 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: antigravity-bypass-russia.exe
-            release_name: antigravity-bypass-russia.exe
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: antigravity-bypass-russia
-            release_name: antigravity-bypass-russia-macos-arm64
           - os: macos-15-intel
             target: x86_64-apple-darwin
             binary_name: antigravity-bypass-russia
-            release_name: antigravity-bypass-russia-macos-x64
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             binary_name: antigravity-bypass-russia
-            release_name: antigravity-bypass-russia-linux-x64
           - os: ubuntu-22.04
             target: aarch64-unknown-linux-gnu
             binary_name: antigravity-bypass-russia
-            release_name: antigravity-bypass-russia-linux-arm64
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Linux dependencies (x86_64)
-        if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config lsof iproute2 openssl
-
-      - name: Install Linux ARM64 cross-compilation dependencies
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-
-      - name: Install Python
-        uses: actions/setup-python@v5
+      - name: Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
-      - name: Regression tests (isolated fixtures; destructive harnesses remain ignored)
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: ${{ runner.os == 'Linux' && 'bash tests/run_linux_ci_check.sh' || '' }} cargo test --locked --bin antigravity-bypass-russia --target ${{ matrix.target }}
-
-      - name: Socket regression tests
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: cargo test --locked --test socket_tests --target ${{ matrix.target }}
-
-      - name: Official CLI profiles and rollback
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
-        run: ${{ runner.os == 'Linux' && 'bash tests/run_linux_ci_check.sh' || '' }} python tests/verify_cli_profiles.py --target ${{ matrix.target }}
-
-      - name: Pinned App, IDE and CLI artifacts
+      - name: Linux packages
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: python tests/verify_upstream_artifacts.py
+        run: bash .github/scripts/apt-ensure.sh libssl-dev pkg-config lsof iproute2 openssl
 
-      - name: Installer platform selection
-        run: python tests/verify_installer.py
+      - name: Cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          bash .github/scripts/apt-ensure.sh gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
-      - name: Launcher compatibility
-        run: python tests/verify_wrappers.py
-
-      - name: Standalone macOS launcher packaging
-        run: python tests/verify_macos_bundle.py
-
-      - name: macOS source launcher
-        run: python tests/verify_macos_source_bundle.py
-      - name: macOS owner build kit
-        run: python tests/verify_macos_build_kit.py
-
+      # The release profile (opt-level z, fat LTO) differs from the tested build, so the
+      # release binary itself is built and smoke-checked here.
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }} ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--features vendored-openssl' || '' }}
 
@@ -109,22 +113,8 @@ jobs:
       - name: Prepare binary artifact
         run: python scripts/package_release.py --binary target/${{ matrix.target }}/release/${{ matrix.binary_name }} --target ${{ matrix.target }}
 
-      - name: Install Python 3.9 for packaging compatibility
-        if: runner.os == 'Windows'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9'
-
-      - name: Python 3.9 launcher and packaging checks
-        if: runner.os == 'Windows'
-        run: |
-          foreach ($check in @('verify_macos_bundle.py', 'verify_macos_source_bundle.py', 'verify_wrappers.py')) {
-            python "tests/$check"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-
       - name: Upload Build Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: binary-${{ matrix.target }}
           path: dist/*
@@ -138,15 +128,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
 
       - name: Download verified binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: binary-*
           path: dist/raw
@@ -183,7 +173,7 @@ jobs:
         run: python tests/verify_distribution.py dist/release --engines dist/raw
 
       - name: Upload release candidate
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-candidate
           path: dist/release/*
@@ -200,10 +190,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-candidate
           path: dist
@@ -224,3 +214,22 @@ jobs:
           draft: true
           generate_release_notes: false
           append_body: false
+
+  timing:
+    name: Timing report
+    needs: [gate, checks, build, package, release]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+      - name: Job times against budgets
+        run: python3 .github/scripts/ci.py timing
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
