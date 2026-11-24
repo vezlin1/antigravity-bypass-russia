@@ -4,7 +4,7 @@
 
 # Antigravity Bypass Russia
 
-### ⚡ Google Antigravity и Gemini в России — без VPN
+### ⚡ Google Antigravity и Gemini в России без VPN
 **Убирает региональную блокировку одной кнопкой на Windows, macOS и Linux**
 
 [![Платформы](https://img.shields.io/badge/Платформа-Windows_•_macOS_•_Linux-0078D4.svg?style=flat-square&logo=linux&logoColor=white)](README.md)
@@ -49,7 +49,7 @@
 1. Скачайте [**`antigravity-bypass-windows.exe`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest).
 2. Запустите его двойным кликом и разрешите запуск от имени администратора.
 3. Нажмите **`1`** (**Включить обход**) и **Enter**.
-4. Когда появится «Готово», откроется Antigravity — войдите в свой Google-аккаунт.
+4. Когда появится «Готово», откроется Antigravity. Войдите в свой Google-аккаунт.
 
 Утилита сама находит Antigravity. Если он установлен в необычную папку, укажите её
 в пункте **[4] Пути к Antigravity**.
@@ -127,8 +127,8 @@ curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/
 | Пункт | Что делает |
 |:---:|---|
 | **1** | **Включить обход.** Настраивает всё сразу. Начните с него. |
-| **2** | Настроить только файлы Antigravity — например, после его обновления. |
-| **3** | Настроить только подключение — например, после смены сети или провайдера. |
+| **2** | Настроить только файлы Antigravity, например после его обновления. |
+| **3** | Настроить только подключение, например после смены сети или провайдера. |
 | **4** | Указать, где установлен Antigravity, если утилита не нашла его сама. |
 | **5** | Проверить, есть ли связь с серверами Google. |
 | **6** | **Отключить обход** и вернуть всё как было. |
@@ -147,7 +147,7 @@ curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/
    приложив этот файл. В нём нет паролей, токенов и текстов переписок.
 
 Если утилита показала ошибку, в ней уже написано, что случилось и что сделать.
-Расшифровка технических причин — в [Подробностях](docs/details.md).
+Расшифровка технических причин есть в [Подробностях](docs/details.md).
 
 ---
 
@@ -194,10 +194,10 @@ curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/
 </details>
 
 <details>
-<summary><b>У меня включён VPN — работают ли веб-версии Gemini и AI Studio?</b></summary>
+<summary><b>Работают ли веб-версии Gemini и AI Studio при включённом VPN?</b></summary>
 <p>
 Пока VPN включён, они открываются через него. Когда вы отключите VPN, утилита на
-Windows сама включит для них обход — перезапускать её не нужно. На сам Antigravity
+Windows сама включит для них обход, перезапускать её не нужно. На сам Antigravity
 VPN не влияет.
 </p>
 </details>
@@ -207,7 +207,7 @@ VPN не влияет.
 <p>
 Выберите пункт <b>[6] Отключить обход</b>. Утилита вернёт исходные файлы Antigravity
 и прежние сетевые настройки. Настройки, которые вы меняли сами, она не трогает.
-Что именно восстанавливается — в <a href="docs/details.md#что-делает-откат">Подробностях</a>.
+Что именно восстанавливается, написано в <a href="docs/details.md#что-делает-откат">Подробностях</a>.
 </p>
 </details>
 
@@ -221,9 +221,9 @@ VPN не влияет.
 Через локальный DNS-релей идут только запросы к серверам Google AI, а проверка
 страны в Antigravity снимается локальным патчем. Всё работает на вашем компьютере.
 
-Подробно — в [docs/details.md](docs/details.md): поддерживаемые клиенты, работа с VPN,
+Подробности есть в [docs/details.md](docs/details.md): поддерживаемые клиенты, работа с VPN,
 резервный сервер daily, расшифровка ошибок маршрута, состав отката, Linux.
-DNS-провайдеры и `network.json` — в [docs/network-providers.md](docs/network-providers.md).
+DNS-провайдеры и `network.json` описаны в [docs/network-providers.md](docs/network-providers.md).
 </details>
 
 <details>
