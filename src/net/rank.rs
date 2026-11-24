@@ -150,9 +150,10 @@ pub(super) fn discover_agent(
     for (index, name) in NRPT_AGENT.iter().enumerate() {
         let host = name.trim_start_matches('.').to_string();
         progress(Working(&format!(
-            "DNS {}/{} · {host}",
+            "ищем адреса {}/{}: {}",
             index + 1,
-            NRPT_AGENT.len()
+            NRPT_AGENT.len(),
+            super::server_label(&host)
         )));
         let mut candidates = resolvers::candidate_addrs(&host, if_index)?;
         if let Some(old) = previous.iter().find(|h| h.host == host) {
@@ -187,16 +188,17 @@ pub(super) fn discover_agent(
 
     // The same relay often serves several names. Inspect its OS route once
     // before probing TLS separately with each host's SNI.
-    progress(Working("Проверяем системные маршруты до найденных адресов"));
+    progress(Working("проверяем путь до найденных адресов"));
     prepare_routes(&addresses.into_iter().collect::<Vec<_>>())?;
     let mut ranked = Vec::new();
     let mut failures = Vec::new();
     let mut tried = std::collections::HashMap::new();
     for (index, (host, candidates)) in host_candidates.into_iter().enumerate() {
         progress(Working(&format!(
-            "TLS/HTTP {}/{} · {host}",
+            "проверяем связь {}/{}: {}",
             index + 1,
-            NRPT_AGENT.len()
+            NRPT_AGENT.len(),
+            super::server_label(&host)
         )));
         match verify_host(&host, &candidates, policy, progress) {
             Ok(row) => ranked.push(row),
@@ -209,7 +211,7 @@ pub(super) fn discover_agent(
     // host one more attempt with a fresh DNS answer before rejecting setup.
     if !failures.is_empty() {
         progress(Working(&format!(
-            "Повторная проверка через {} с",
+            "повторим проверку через {} с",
             RETRY_DELAY.as_secs()
         )));
     }
@@ -218,7 +220,10 @@ pub(super) fn discover_agent(
         || std::thread::sleep(RETRY_DELAY),
         |failure| {
             let host = &failure.host;
-            progress(Working(&format!("Повтор · DNS · {host}")));
+            progress(Working(&format!(
+                "повторно ищем адреса: {}",
+                super::server_label(host)
+            )));
             let known = tried.remove(host).unwrap_or_default();
             let fresh: Vec<_> = resolvers::candidate_addrs(host, if_index)
                 .unwrap_or_default()
@@ -239,7 +244,10 @@ pub(super) fn discover_agent(
                 }
             }
             let candidates: Vec<_> = known.into_iter().chain(fresh).take(32).collect();
-            progress(Working(&format!("Повтор · TLS/HTTP · {host}")));
+            progress(Working(&format!(
+                "повторно проверяем связь: {}",
+                super::server_label(host)
+            )));
             verify_host(host, &candidates, policy, progress)
         },
     );
@@ -285,9 +293,15 @@ fn verify_host(
     #[cfg(windows)]
     let attempted = if ips.is_empty() && policy == routes::RoutePolicy::System {
         use super::SetupProgress::Working;
-        progress(Working(&format!("Системный DNS · {host}")));
+        progress(Working(&format!(
+            "спрашиваем адреса у Windows: {}",
+            super::server_label(host)
+        )));
         let native = system_addresses(host);
-        progress(Working(&format!("Проверяем системные адреса · {host}")));
+        progress(Working(&format!(
+            "проверяем адреса Windows: {}",
+            super::server_label(host)
+        )));
         let (native_ips, native_errors) = resolvers::rank_tls_v4_report(&native, host);
         ips = native_ips;
         errors.extend(native_errors);

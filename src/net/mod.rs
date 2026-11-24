@@ -455,8 +455,31 @@ pub struct NetworkSetup {
 }
 
 pub enum SetupProgress<'a> {
+    /// A new user-visible step begins; the previous one succeeded.
+    Stage(SetupStage),
     Working(&'a str),
     Detail(&'a str),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupStage {
+    /// Finding and checking the Google servers.
+    Connection,
+    /// Starting and checking the background DNS service.
+    Service,
+    /// Writing the system settings.
+    Saving,
+}
+
+/// A plain-language name for a Google server, for on-screen text.
+pub fn server_label(host: &str) -> &'static str {
+    match host.trim_start_matches('.') {
+        provider::PRIMARY_CLOUD_CODE => "основной сервер Antigravity",
+        provider::DAILY_CLOUD_CODE => "резервный сервер Antigravity",
+        "aicode.googleapis.com" => "сервер проверки доступа",
+        "generativelanguage.googleapis.com" => "сервер Gemini",
+        _ => "сервер Google",
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -638,8 +661,9 @@ fn apply_dns_rules_with(
     policy: RoutePolicy,
     progress: &mut dyn FnMut(SetupProgress<'_>),
 ) -> Result<NetworkSetup, String> {
-    use SetupProgress::{Detail, Working};
-    progress(Working("Проверяем настройки сети"));
+    use SetupProgress::{Detail, Stage, Working};
+    progress(Stage(SetupStage::Connection));
+    progress(Working("проверяем настройки сети"));
     preflight()?;
     let _configuration = configuration_lock()?;
     // Reconfigure owned rules in place. Removing the working service/hosts/DNS
@@ -658,7 +682,7 @@ fn apply_dns_rules_with(
     #[cfg(not(windows))]
     let hosts_fallback = false;
 
-    progress(Working("Определяем подключение к интернету"));
+    progress(Working("определяем подключение к интернету"));
     let egress = match policy {
         RoutePolicy::Physical => crate::net::egress::detect(),
         #[cfg(windows)]
@@ -673,7 +697,7 @@ fn apply_dns_rules_with(
     }
 
     progress(Detail("Подбор маршрута · проверяем DNS и TLS/HTTP"));
-    progress(Working("Подготавливаем маршруты для проверки"));
+    progress(Working("готовим проверку"));
     let mut update = None;
     let staged = routes::with_probe_routes(policy, |prepare_routes| {
         // DNS probes and the running relay use the same route policy.
@@ -705,7 +729,8 @@ fn apply_dns_rules_with(
         relay::save_route_policy(policy)?;
         relay::save_upstream_config(&udp_ips)?;
 
-        progress(Working("Запускаем и проверяем DNS-релей"));
+        progress(Stage(SetupStage::Service));
+        progress(Working("запускаем фоновую службу"));
         let mut browser_missing = Vec::new();
         let startup = update.start().and_then(|()| {
             if !wait_for_ready(Duration::from_secs(4), relay_ready) {
@@ -753,7 +778,7 @@ fn apply_dns_rules_with(
         .collect();
     let mut studio_subs: Vec<String> = Vec::new();
     if !udp_ips.is_empty() {
-        progress(Working("Проверяем резервные DNS-серверы"));
+        progress(Working("проверяем запасные серверы адресов"));
         let substitutions = substitutions_by_host(
             agent_rules
                 .iter()
@@ -838,6 +863,7 @@ fn apply_dns_rules_with(
         compatibility::require_agent_pins(&coverage.agent_hosts, &ranked)?;
         (inventory, plan)
     };
+    progress(Stage(SetupStage::Saving));
     crate::net::rank::apply_ranked(&ranked, skip_primary, policy)?;
 
     // Keep verified agent addresses installed by apply_ranked. A VPN enabled
@@ -845,7 +871,7 @@ fn apply_dns_rules_with(
 
     #[cfg(target_os = "windows")]
     let browser_dns_confirmed = {
-        progress(Working("Сохраняем настройки подключения"));
+        progress(Working("записываем настройки Windows"));
         let plan = nrpt::apply_compatible_rules(&plan, NRPT_TAG, "Antigravity DNS")?;
         let latest_inventory = nrpt::inventory()?;
         // Foreign split-DNS often relies on system DoH policy. Hosts provides
@@ -878,7 +904,7 @@ fn apply_dns_rules_with(
         hosts_fallback = !coverage.agent_hosts.is_empty();
         flush_dns_cache()?;
         if hosts_fallback {
-            progress(Working("Проверяем запасное подключение через hosts"));
+            progress(Working("проверяем запасной список адресов"));
             compatibility::verify_agent_pins(&coverage.agent_hosts, &ranked)?;
             compatibility_notes.push(format!(
                 "Antigravity: проверен резервный путь через hosts для {}",

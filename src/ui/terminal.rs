@@ -6,8 +6,42 @@ use std::time::{Duration, Instant};
 enum ProgressLine {
     Working(String),
     Detail(String),
+    Stage { running: String, done: String },
+    Finish(bool),
 }
 
+/// Numbers the steps of one operation: "2/5 ". Without a total, steps are
+/// shown without numbers.
+pub struct Steps {
+    total: usize,
+    next: std::cell::Cell<usize>,
+}
+
+impl Steps {
+    pub fn new(total: usize) -> Self {
+        Self {
+            total,
+            next: std::cell::Cell::new(0),
+        }
+    }
+
+    pub fn unnumbered() -> Self {
+        Self::new(0)
+    }
+
+    fn prefix(&self) -> String {
+        if self.total == 0 {
+            return String::new();
+        }
+        let number = (self.next.get() + 1).min(self.total);
+        self.next.set(number);
+        format!("{number}/{} ", self.total)
+    }
+}
+
+/// A spinner line. In step mode (`stage`) every finished step stays on screen
+/// as one line with ✓ or ✗, the current activity is shown in grey next to the
+/// running step, and technical details are left to the log.
 pub struct Progress(Option<(mpsc::Sender<ProgressLine>, thread::JoinHandle<()>)>);
 
 impl Progress {
@@ -23,7 +57,7 @@ impl Progress {
         if let Some((worker, _)) = &self.0 {
             let _ = worker.send(ProgressLine::Working(text.to_owned()));
         } else {
-            println!("  … {text}");
+            println!("    … {text}");
         }
     }
 
@@ -32,6 +66,33 @@ impl Progress {
             let _ = worker.send(ProgressLine::Detail(text.to_owned()));
         } else {
             println!("    {text}");
+        }
+    }
+
+    /// Completes the previous step successfully and starts the next one.
+    pub fn stage(&self, steps: &Steps, running: &str, done: &str) {
+        let prefix = steps.prefix();
+        let (running, done) = (format!("{prefix}{running}"), format!("{prefix}{done}"));
+        if let Some((worker, _)) = &self.0 {
+            let _ = worker.send(ProgressLine::Stage { running, done });
+        } else {
+            println!("  {running}…");
+        }
+    }
+
+    /// Marks the current step ✓ or ✗.
+    pub fn finish(&self, ok: bool) {
+        if let Some((worker, _)) = &self.0 {
+            let _ = worker.send(ProgressLine::Finish(ok));
+        } else {
+            println!(
+                "  {}",
+                if ok {
+                    "✓ готово"
+                } else {
+                    "✗ не удалось"
+                }
+            );
         }
     }
 }
@@ -45,33 +106,127 @@ impl Drop for Progress {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{fit, Steps};
+
+    #[test]
+    fn steps_are_numbered_and_lines_fit_without_wrapping() {
+        let steps = Steps::new(3);
+        assert_eq!(
+            [
+                steps.prefix(),
+                steps.prefix(),
+                steps.prefix(),
+                steps.prefix()
+            ],
+            ["1/3 ", "2/3 ", "3/3 ", "3/3 "]
+        );
+        assert_eq!(Steps::unnumbered().prefix(), "");
+        assert_eq!(fit("Связь", 10), "Связь");
+        let short = fit("проверяем связь 3/4: сервер Gemini", 12);
+        assert_eq!(short.chars().count(), 12);
+        assert!(short.ends_with('…'));
+    }
+}
+
+struct RunningStage {
+    running: String,
+    done: String,
+    started: Instant,
+}
+
+/// Visible characters on the spinner line; a wrapped line could not be
+/// redrawn in place.
+const LINE_LIMIT: usize = 76;
+
+fn fit(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let mut short: String = text.chars().take(limit.saturating_sub(1)).collect();
+    short.push('…');
+    short
+}
+
+fn print_stage_result(stage: &RunningStage, ok: bool) {
+    let seconds = stage.started.elapsed().as_secs();
+    let (mark, colour) = if ok {
+        ("✓", "\x1b[92m")
+    } else {
+        ("✗", "\x1b[91m")
+    };
+    let time = if seconds > 0 {
+        format!("  \x1b[90m{seconds} с\x1b[0m")
+    } else {
+        String::new()
+    };
+    println!("\r\x1b[2K  {colour}{mark}\x1b[0m {}{time}", stage.done);
+}
+
 fn animate_progress(lines: mpsc::Receiver<ProgressLine>) {
     const FRAMES: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
-    let mut current: Option<(String, Instant)> = None;
+    let mut stage: Option<RunningStage> = None;
+    let mut activity: Option<(String, Instant)> = None;
     let tick = Duration::from_millis(100);
+    let started = Instant::now();
     loop {
         match lines.recv_timeout(tick) {
-            Ok(ProgressLine::Working(text)) => current = Some((text, Instant::now())),
+            Ok(ProgressLine::Working(text)) => activity = Some((text, Instant::now())),
             Ok(ProgressLine::Detail(text)) => {
-                current = None;
-                println!("\r\x1b[2K    {text}");
+                if stage.is_none() {
+                    activity = None;
+                    println!("\r\x1b[2K    {text}");
+                }
+            }
+            Ok(ProgressLine::Stage { running, done }) => {
+                if let Some(previous) = stage.take() {
+                    print_stage_result(&previous, true);
+                }
+                activity = None;
+                stage = Some(RunningStage {
+                    running,
+                    done,
+                    started: Instant::now(),
+                });
+            }
+            Ok(ProgressLine::Finish(ok)) => {
+                if let Some(current) = stage.take() {
+                    print_stage_result(&current, ok);
+                }
+                activity = None;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                if current.is_some() {
-                    print!("\r\x1b[2K");
-                    let _ = io::stdout().flush();
-                }
+                print!("\r\x1b[2K");
+                let _ = io::stdout().flush();
                 break;
             }
         }
-        if let Some((text, started)) = &current {
-            let elapsed = started.elapsed();
-            let frame = FRAMES[(elapsed.as_millis() / tick.as_millis()) as usize % FRAMES.len()];
-            print!(
-                "\r\x1b[2K  \x1b[96m{frame}\x1b[0m {text}  \x1b[90m{} с\x1b[0m",
-                elapsed.as_secs()
-            );
+        let frame =
+            FRAMES[(started.elapsed().as_millis() / tick.as_millis()) as usize % FRAMES.len()];
+        let line = match (&stage, &activity) {
+            (Some(stage), activity) => {
+                let seconds = stage.started.elapsed().as_secs();
+                let time = format!("  {seconds} с");
+                let time_width = time.chars().count();
+                let title = fit(&stage.running, LINE_LIMIT - time_width);
+                let room = LINE_LIMIT.saturating_sub(title.chars().count() + time_width + 3);
+                let note = match activity {
+                    Some((text, _)) if room > 8 => format!(" \x1b[90m· {}\x1b[0m", fit(text, room)),
+                    _ => String::new(),
+                };
+                Some(format!("{title}{note}\x1b[90m{time}\x1b[0m"))
+            }
+            (None, Some((text, since))) => Some(format!(
+                "{}  \x1b[90m{} с\x1b[0m",
+                fit(text, LINE_LIMIT - 8),
+                since.elapsed().as_secs()
+            )),
+            (None, None) => None,
+        };
+        if let Some(line) = line {
+            print!("\r\x1b[2K  \x1b[96m{frame}\x1b[0m {line}");
             let _ = io::stdout().flush();
         }
     }

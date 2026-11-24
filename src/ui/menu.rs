@@ -4,10 +4,10 @@ use crate::core::detector::{
 };
 use crate::core::patcher::{patch_target, restore_target};
 use crate::core::v8_cache::clear_ide_v8_caches;
-use crate::net::{apply_dns_rules, remove_dns_rules, NetworkSetup, SetupProgress};
-use crate::system::env::{display_path, expand_env_vars, mask_path};
+use crate::net::{apply_dns_rules, remove_dns_rules, NetworkSetup, SetupProgress, SetupStage};
+use crate::system::env::{display_path, expand_env_vars};
 use crate::ui::dashboard::{banner, print_dashboard};
-use crate::ui::terminal::{clear_screen, pause, prompt, Progress};
+use crate::ui::terminal::{clear_screen, pause, prompt, Progress, Steps};
 use std::path::Path;
 use std::time::Instant;
 
@@ -133,7 +133,7 @@ mod setup_tests {
 
 fn print_error_details() {
     println!(
-        "  Подробности для поддержки: {}",
+        "  \x1b[90mЖурнал для поддержки: {}\x1b[0m",
         crate::net::config::directory()
             .join("network-events.log")
             .display()
@@ -141,47 +141,205 @@ fn print_error_details() {
 }
 
 fn operation_error(message: &str, detail: &str) {
-    crate::net::relay::log_event(&format!("{message}: {detail}"));
-    eprintln!("  \x1b[91m✗\x1b[0m {message}");
-    eprintln!("  {detail}");
+    print_problem(2, message, detail, None);
 }
 
+/// "✗ what failed", then the cause and what the user can do about it.
+/// `advice: None` derives the advice from the cause.
+fn print_problem(indent: usize, message: &str, cause: &str, advice: Option<&str>) {
+    crate::net::relay::log_event(&format!("{message}: {cause}"));
+    let pad = " ".repeat(indent);
+    eprintln!("{pad}\x1b[91m✗\x1b[0m {message}");
+    let readable = readable_cause(cause);
+    if !readable.is_empty() {
+        eprintln!("{pad}  \x1b[90mПричина:\x1b[0m {readable}");
+    }
+    if let Some(advice) = advice.or_else(|| advice_for(cause)) {
+        eprintln!("{pad}  \x1b[96mЧто сделать:\x1b[0m {advice}");
+    }
+}
+
+/// The OS error text without its numeric code, which means nothing to users.
+fn readable_cause(cause: &str) -> String {
+    let mut text = cause.trim().to_owned();
+    while let Some(start) = text.find(" (os error ") {
+        let Some(length) = text[start..].find(')') else {
+            break;
+        };
+        text.replace_range(start..start + length + 1, "");
+    }
+    text
+}
+
+const ADVICE_DIAGNOSTICS: &str =
+    "сохраните диагностику (пункт 7) и приложите файл к обращению на GitHub.";
+
+/// What to do about a failure, from its cause. `None` when the cause already
+/// tells the user what to do.
+fn advice_for(cause: &str) -> Option<&'static str> {
+    let text = cause.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|word| text.contains(word));
+    if has(&[
+        "закройте ",
+        "укажите ",
+        "проверьте ",
+        "устраните ",
+        "отключите ",
+    ]) {
+        return None;
+    }
+    Some(
+        if has(&[
+            "os error 32",
+            "используется другим процессом",
+            "being used by another process",
+        ]) {
+            "закройте Antigravity (приложение, IDE и CLI) и повторите."
+        } else if has(&[
+            "os error 5)",
+            "os error 13)",
+            "отказано в доступе",
+            "access is denied",
+            "permission denied",
+        ]) {
+            "запустите утилиту от имени администратора. Если не помогло — изменения может блокировать антивирус: добавьте папку Antigravity в его исключения."
+        } else if has(&["os error 123", "синтаксическая ошибка в имени"])
+        {
+            "путь указан с ошибкой. Скопируйте его из адресной строки Проводника и вставьте целиком."
+        } else if has(&[
+            "os error 2)",
+            "os error 3)",
+            "не удается найти",
+            "no such file",
+        ]) {
+            "проверьте, что папка существует. Если Antigravity установлен в другом месте, укажите путь в пункте 4."
+        } else if has(&["не поддерживается", "integrity"]) {
+            "эта версия Antigravity пока не поддерживается. Скачайте свежую версию утилиты на странице релизов."
+        } else if has(&[
+            "выход в интернет",
+            "network is unreachable",
+            "сеть недоступна",
+        ]) {
+            "проверьте подключение к интернету. Если включён VPN, временно отключите его и повторите."
+        } else if has(&["порт 53"]) {
+            "системный порт для адресов занят другой программой (VPN, AdGuard или DNS-фильтр). Закройте её и повторите."
+        } else if has(&[
+            "маршрут",
+            "подходящих адресов",
+            "timed out",
+            "тайм-аут",
+            "время ожидания",
+        ]) {
+            "серверы Google не ответили. Проверьте интернет, отключите VPN или прокси и повторите через минуту."
+        } else {
+            ADVICE_DIAGNOSTICS
+        },
+    )
+}
+
+#[cfg(test)]
+mod problem_tests {
+    use super::{advice_for, readable_cause, ADVICE_DIAGNOSTICS};
+
+    #[test]
+    fn os_codes_are_hidden_and_common_failures_get_advice() {
+        assert_eq!(
+            readable_cause("C:\\x: Отказано в доступе. (os error 5)"),
+            "C:\\x: Отказано в доступе."
+        );
+        for (cause, expected) in [
+            ("Отказано в доступе. (os error 5)", "администратора"),
+            (
+                "файл используется другим процессом (os error 32)",
+                "закройте Antigravity",
+            ),
+            (
+                "Синтаксическая ошибка в имени файла (os error 123)",
+                "адресной строки",
+            ),
+            ("Не удается найти указанный файл. (os error 2)", "пункте 4"),
+            (
+                "Версия/сигнатура не поддерживается; файл не изменён",
+                "свежую версию",
+            ),
+            ("Локальный UDP-порт 53 недоступен", "AdGuard"),
+            ("Нет проверенного маршрута для daily", "серверы Google"),
+        ] {
+            assert!(advice_for(cause).unwrap().contains(expected), "{cause}");
+        }
+        // The cause already says what to do: no second instruction.
+        assert_eq!(
+            advice_for("Закройте Antigravity перед изменением файлов"),
+            None
+        );
+        assert_eq!(advice_for("что-то неожиданное"), Some(ADVICE_DIAGNOSTICS));
+    }
+}
+
+/// One line per file under its step. Files with nothing to change are not
+/// listed: the user cannot act on them.
 fn print_patch_result(
     t: &FoundTarget,
     result: Result<crate::core::patcher::PatchOutcome, String>,
 ) -> bool {
-    use crate::core::{detector::TargetKind, patcher::PatchOutcome};
-    let label = match t.kind {
-        TargetKind::LanguageServer => "Файлы Antigravity",
-        TargetKind::AgyCli => "Командная строка Antigravity",
-        _ => "Интерфейс приложения",
-    };
+    use crate::core::patcher::PatchOutcome;
+    let label = component_name(t.kind);
     match result {
-        Ok(PatchOutcome::NotApplicable) => {
-            println!("  \x1b[90m– {label}: без изменений\x1b[0m");
-            true
-        }
+        Ok(PatchOutcome::NotApplicable) => true,
         Ok(outcome) => {
             let status = match outcome {
-                PatchOutcome::Restored | PatchOutcome::AlreadyStock => "восстановлены",
-                _ => "настроены",
+                PatchOutcome::Restored | PatchOutcome::AlreadyStock => "возвращён к исходному",
+                _ => "настроен",
             };
-            println!("  \x1b[92m✓\x1b[0m {label}: {status}");
+            println!("      \x1b[92m✓\x1b[0m {label} \x1b[90m— {status}\x1b[0m");
             true
         }
         Err(error) => {
-            operation_error(
-                &format!("{label}: не удалось завершить операцию"),
-                &format!("{} ({}): {error}", t.name, t.path.display()),
+            print_problem(
+                6,
+                &format!("{label}: файл не изменён"),
+                &format!("{error} — {}", t.path.display()),
+                None,
             );
             if cfg!(target_os = "macos") && app_management_blocked(&t.path, &error) {
                 for line in APP_MANAGEMENT_HINT {
-                    eprintln!("  \x1b[93m{line}\x1b[0m");
+                    eprintln!("        \x1b[93m{line}\x1b[0m");
                 }
             }
             false
         }
     }
+}
+
+/// Runs `action` on every file under one step and lists the results below it.
+fn run_file_step(
+    steps: &Steps,
+    (running, done): (&str, &str),
+    targets: Vec<FoundTarget>,
+    action: fn(&FoundTarget) -> Result<crate::core::patcher::PatchOutcome, String>,
+) -> bool {
+    let progress = Progress::new();
+    progress.stage(steps, running, done);
+    let results: Vec<_> = targets
+        .into_iter()
+        .map(|target| {
+            let result = action(&target);
+            (target, result)
+        })
+        .collect();
+    // Changed JS needs cache invalidation even when another file failed.
+    let cache = clear_ide_v8_caches();
+    progress.finish(results.iter().all(|(_, result)| result.is_ok()) && cache.is_ok());
+    drop(progress);
+    let mut ok = true;
+    for (target, result) in results {
+        ok &= print_patch_result(&target, result);
+    }
+    if let Err(error) = cache {
+        print_problem(6, "Не удалось очистить кэш Antigravity", &error, None);
+        ok = false;
+    }
+    ok
 }
 
 const APP_MANAGEMENT_HINT: &[&str] = &[
@@ -233,26 +391,25 @@ fn patch_root(root: &Path) -> bool {
     }
     let targets = find_targets_in_path(root);
     if targets.is_empty() {
-        eprintln!("[✗] Нет поддерживаемых целей: {}", mask_path(root));
+        print_problem(
+            2,
+            "Файлы Antigravity не найдены",
+            &format!("в папке {} нет файлов Antigravity", display_path(root)),
+            Some("проверьте путь к установке."),
+        );
         return false;
     }
-    patch_targets(targets).succeeded()
+    patch_targets(targets, &Steps::unnumbered()).succeeded()
 }
-fn patch_targets(targets: Vec<FoundTarget>) -> FileSetupOutcome {
+
+const FILES_STEP: (&str, &str) = ("Настраиваем файлы Antigravity", "Файлы Antigravity");
+
+fn patch_targets(targets: Vec<FoundTarget>, steps: &Steps) -> FileSetupOutcome {
     let paths: Vec<_> = targets.iter().map(|target| target.path.clone()).collect();
     if !ensure_application_closed(&paths, "включение обхода") {
         return FileSetupOutcome::Stopped;
     }
-    let mut ok = true;
-    for t in targets {
-        ok &= print_patch_result(&t, patch_target(&t));
-    }
-    // Successful JS patches need cache invalidation even when another file failed.
-    if let Err(error) = clear_ide_v8_caches() {
-        operation_error("Не удалось очистить кэш приложения", &error);
-        ok = false;
-    }
-    FileSetupOutcome::Completed(ok)
+    FileSetupOutcome::Completed(run_file_step(steps, FILES_STEP, targets, patch_target))
 }
 fn apply_endpoints() -> Result<(), String> {
     let mut errors = Vec::new();
@@ -284,11 +441,33 @@ impl SetupStatus {
     }
 }
 
-fn configure_network() -> Result<NetworkSetup, String> {
-    println!("\n  \x1b[96m── Настройка подключения ──\x1b[0m");
+/// What the final screen tells the user besides the verdict.
+#[derive(Default)]
+struct Summary {
+    next: Option<&'static str>,
+    notes: Vec<String>,
+}
+
+fn stage_titles(stage: SetupStage) -> (&'static str, &'static str) {
+    match stage {
+        SetupStage::Connection => (
+            "Проверяем связь с серверами Google",
+            "Связь с серверами Google",
+        ),
+        SetupStage::Service => ("Запускаем фоновую службу", "Фоновая служба"),
+        SetupStage::Saving => ("Сохраняем настройки системы", "Настройки системы"),
+    }
+}
+
+fn configure_network(steps: &Steps) -> Result<NetworkSetup, String> {
     let progress = Progress::new();
-    apply_dns_rules(&mut |event| {
+    let result = apply_dns_rules(&mut |event| {
         let message = match event {
+            SetupProgress::Stage(stage) => {
+                let (running, done) = stage_titles(stage);
+                progress.stage(steps, running, done);
+                running
+            }
             SetupProgress::Working(message) => {
                 progress.working(message);
                 message
@@ -299,89 +478,99 @@ fn configure_network() -> Result<NetworkSetup, String> {
             }
         };
         crate::net::relay::log_event(message);
-    })
+    });
+    progress.finish(result.is_ok());
+    result
 }
 
-fn apply_connection() -> SetupStatus {
-    match configure_connection_with(configure_network, apply_endpoints) {
-        Ok(setup) => show_network_result(&setup),
+fn apply_connection(steps: &Steps, summary: &mut Summary) -> SetupStatus {
+    match configure_connection_with(|| configure_network(steps), apply_endpoints) {
+        Ok(setup) => network_result(&setup, summary),
         Err(error) => {
-            operation_error("Не удалось завершить настройку подключения", &error);
+            operation_error("Подключение не настроено", &error);
             SetupStatus::Failed
         }
     }
 }
-fn patch_installations() -> FileSetupOutcome {
+fn patch_installations(steps: &Steps) -> FileSetupOutcome {
     if let Err(error) = recover_installations() {
         operation_error("Не удалось восстановить прерванную запись", &error);
         return FileSetupOutcome::Stopped;
     }
     let installs = find_installations();
     if installs.is_empty() {
-        eprintln!("[✗] Установки не найдены; укажите путь в пункте 4.");
+        print_problem(
+            2,
+            "Antigravity не найден",
+            "утилита не нашла установку в стандартных папках",
+            Some("если Antigravity установлен, укажите путь к нему в пункте 4."),
+        );
         return FileSetupOutcome::Stopped;
     }
     let targets = find_installation_targets(&installs);
     if targets.is_empty() {
-        eprintln!("[✗] Файлы приложения не найдены; укажите путь в пункте 4.");
+        print_problem(
+            2,
+            "Файлы Antigravity не найдены",
+            "в найденных папках нет файлов, которые нужно настроить",
+            Some("укажите путь к установке Antigravity в пункте 4."),
+        );
         return FileSetupOutcome::Stopped;
     }
-    patch_targets(targets)
+    patch_targets(targets, steps)
 }
 fn show_result(ok: bool) {
     if ok {
-        println!(
-            "\n  \x1b[92mГотово. Изменения применены.\x1b[0m\n  Проверьте работу Antigravity."
-        );
+        println!("\n  \x1b[92m✓ Готово.\x1b[0m Перезапустите Antigravity, чтобы изменения вступили в силу.");
     } else {
-        eprintln!("\n  Операция не завершена. Причина указана выше.");
+        eprintln!(
+            "\n  \x1b[91m✗ Не всё получилось.\x1b[0m Причина и что сделать — в строках с ✗ выше."
+        );
         print_error_details();
     }
 }
 
-fn show_network_result(setup: &NetworkSetup) -> SetupStatus {
+/// Network facts become notes in plain words; technical details go to the log.
+fn network_result(setup: &NetworkSetup, summary: &mut Summary) -> SetupStatus {
     crate::net::relay::log_event(&setup.message);
-    println!("\n  \x1b[96m── Состояние подключения ──\x1b[0m");
-    if setup.hosts_fallback {
-        println!("  \x1b[92m✓\x1b[0m Antigravity · проверен запасной путь через hosts");
-    } else if setup.local_relay_running {
-        println!("  \x1b[92m✓\x1b[0m Antigravity · локальный DNS-релей работает");
-    } else {
-        println!("  \x1b[93m!\x1b[0m Antigravity · применены запасные настройки DNS");
-    }
     if setup.system_routes {
-        println!("    Используются системные маршруты Windows.");
+        crate::net::relay::log_event("Используются системные маршруты Windows");
+    }
+    if !setup.local_relay_running && !setup.hosts_fallback {
+        summary.notes.push(
+            "Фоновая служба не запустилась, поэтому используются запасные серверы адресов. \
+             Если Antigravity будет работать с перебоями, включите обход ещё раз."
+                .into(),
+        );
     }
     if setup.primary_skipped {
-        println!(
-            "  \x1b[93m!\x1b[0m Основной Cloud Code недоступен из этой сети · Antigravity переключён на daily"
+        summary.notes.push(
+            "Основной сервер Antigravity недоступен из вашей сети, поэтому Antigravity \
+             переключён на резервный сервер Google. Так и должно быть."
+                .into(),
         );
         for hint in crate::core::endpoint::primary_skip_hints() {
             crate::net::relay::log_event(&hint);
-            println!("    {hint}");
+            summary.notes.push(hint);
         }
-    }
-    if setup.browser_dns_confirmed {
-        println!("  \x1b[92m✓\x1b[0m Gemini и AI Studio · DNS проверен");
-    } else {
-        println!("  \x1b[93m!\x1b[0m Gemini и AI Studio · DNS не подтверждён");
-    }
-    if !setup.local_relay_running {
-        println!("  \x1b[93m!\x1b[0m Локальный DNS-релей не прошёл проверку");
     }
     if setup.browser_dns_confirmed {
         SetupStatus::Complete
     } else {
+        summary.notes.push(BROWSER_UNCHECKED.into());
         SetupStatus::Limited
     }
 }
 
+const BROWSER_UNCHECKED: &str =
+    "Доступ к Gemini и AI Studio в браузере проверить не удалось. На Antigravity это не влияет.";
+
 #[cfg(windows)]
-fn apply_connection_and_launch() -> SetupStatus {
+fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupStatus {
     use crate::net::windows_connect;
     use crate::system::windows_connect_launch::{launch_desktop, DesktopLaunch};
 
-    let setup = configure_connection_with(configure_network, apply_endpoints);
+    let setup = configure_connection_with(|| configure_network(steps), apply_endpoints);
     let browser_dns = setup
         .as_ref()
         .is_ok_and(|setup| setup.browser_dns_confirmed);
@@ -389,47 +578,57 @@ fn apply_connection_and_launch() -> SetupStatus {
     let try_app = setup.is_ok() || windows_connect::fallback_available();
     match &setup {
         Ok(setup) => {
-            show_network_result(setup);
+            network_result(setup, summary);
+            if try_browser {
+                // The browser fallback below reports its own result.
+                summary.notes.retain(|note| note != BROWSER_UNCHECKED);
+            }
         }
         Err(error) if try_app || try_browser => {
             crate::net::relay::log_event(&format!("Настройка DNS: {error}"));
-            println!("  \x1b[93m!\x1b[0m DNS не настроен. Проверяем запасной CONNECT внутри VPN.");
+            summary.notes.push(
+                "Обычная настройка не удалась из-за VPN, поэтому используется резервный канал."
+                    .into(),
+            );
         }
         Err(error) => {
-            operation_error("Не удалось завершить настройку подключения", error);
+            operation_error("Подключение не настроено", error);
             return SetupStatus::Failed;
         }
     };
+    let progress = Progress::new();
+    progress.stage(steps, "Запускаем Antigravity", "Antigravity запущен");
     let antigravity_ok = if try_app {
-        let launch = {
-            let progress = Progress::new();
-            progress.working("Запускаем Antigravity с запасным CONNECT");
-            launch_desktop()
-        };
-        match launch {
+        match launch_desktop() {
             Ok(DesktopLaunch::Started | DesktopLaunch::AlreadyRunning) => {
-                println!("  \x1b[92m✓\x1b[0m Antigravity запущен с резервным CONNECT");
+                summary.next = Some(
+                    "Antigravity открыт. Войдите в аккаунт Google и отправьте короткий запрос, чтобы проверить работу.",
+                );
                 true
             }
             Ok(DesktopLaunch::NotInstalled) => {
                 if let Err(error) = &setup {
-                    operation_error("Режим CONNECT требует Antigravity App или IDE", error);
+                    progress.finish(false);
+                    drop(progress);
+                    operation_error("Для резервного канала нужен Antigravity App или IDE", error);
+                    return SetupStatus::Failed;
                 }
-                setup.is_ok()
+                true
             }
             Ok(DesktopLaunch::ElevatedSession(reason)) | Err(reason) => {
                 crate::net::relay::log_event(&format!("Запуск CONNECT не выполнен: {reason}"));
-                println!("  \x1b[93m!\x1b[0m CONNECT не запущен. {reason}");
-                if setup.is_ok() {
-                    println!("    Сеть настроена. Antigravity можно открыть обычным способом.");
-                }
+                summary.notes.push(format!(
+                    "Не удалось запустить Antigravity через резервный канал: {reason}"
+                ));
                 false
             }
         }
     } else {
         false
     };
-    let browser_ok = browser_dns || (try_browser && launch_browser_fallback());
+    let browser_ok = browser_dns || (try_browser && launch_browser_fallback(&progress, summary));
+    progress.finish(antigravity_ok);
+    drop(progress);
     if setup.is_ok() && antigravity_ok && browser_ok {
         SetupStatus::Complete
     } else if setup.is_ok() || antigravity_ok || browser_ok {
@@ -440,50 +639,75 @@ fn apply_connection_and_launch() -> SetupStatus {
 }
 
 #[cfg(windows)]
-fn launch_browser_fallback() -> bool {
+fn launch_browser_fallback(progress: &Progress, summary: &mut Summary) -> bool {
     use crate::system::windows_connect_launch::{launch_browser, DesktopLaunch};
 
-    let launch = {
-        let progress = Progress::new();
-        progress.working("Проверяем Gemini и AI Studio через CONNECT");
-        launch_browser()
-    };
-    match launch {
-        Ok(DesktopLaunch::Started) => {
-            println!(
-                "  \x1b[92m✓\x1b[0m Gemini и AI Studio открыты через CONNECT в отдельном Chrome"
-            );
-            true
-        }
-        Ok(DesktopLaunch::AlreadyRunning) => {
-            println!("  \x1b[92m✓\x1b[0m Отдельный Chrome с CONNECT уже открыт");
-            true
-        }
-        Ok(DesktopLaunch::NotInstalled) => {
-            println!("  \x1b[93m!\x1b[0m Для запуска Gemini и AI Studio через CONNECT нужен Google Chrome");
-            false
-        }
+    progress.working("открываем Gemini и AI Studio в отдельном Chrome");
+    let (ok, note) = match launch_browser() {
+        Ok(DesktopLaunch::Started | DesktopLaunch::AlreadyRunning) => (
+            true,
+            "Gemini и AI Studio открыты в отдельном окне Chrome — для них пользуйтесь этим окном."
+                .to_owned(),
+        ),
+        Ok(DesktopLaunch::NotInstalled) => (
+            false,
+            "Для Gemini и AI Studio в браузере нужен Google Chrome. Установите его и включите обход ещё раз."
+                .to_owned(),
+        ),
         Ok(DesktopLaunch::ElevatedSession(reason)) | Err(reason) => {
             crate::net::relay::log_event(&format!("Браузерный CONNECT не запущен: {reason}"));
-            println!("  \x1b[93m!\x1b[0m Gemini и AI Studio не открылись через CONNECT. {reason}");
-            false
+            (
+                false,
+                format!("Gemini и AI Studio не открылись через резервный канал: {reason}"),
+            )
         }
-    }
+    };
+    summary.notes.push(note);
+    ok
 }
 
-fn finish_setup(status: SetupStatus, started: Instant) {
-    let (color, title) = match status {
-        SetupStatus::Complete => ("\x1b[92m", "Настройка завершена"),
-        SetupStatus::Limited => ("\x1b[93m", "Завершено с ограничениями"),
-        SetupStatus::Failed => ("\x1b[91m", "Настройка остановлена"),
+/// The verdict titles of one operation: complete, limited, failed.
+type Verdicts = (&'static str, &'static str, &'static str);
+
+const UNLOCK_VERDICTS: Verdicts = (
+    "Готово — обход включён",
+    "Обход включён, но есть замечания",
+    "Обход не включён",
+);
+
+fn finish_setup(status: SetupStatus, started: Instant, verdicts: Verdicts, summary: &Summary) {
+    let (colour, mark, title) = match status {
+        SetupStatus::Complete => ("\x1b[92m", "✓", verdicts.0),
+        SetupStatus::Limited => ("\x1b[93m", "!", verdicts.1),
+        SetupStatus::Failed => ("\x1b[91m", "✗", verdicts.2),
     };
     let seconds = started.elapsed().as_secs();
+    let time = format!("{}:{:02}", seconds / 60, seconds % 60);
+    let width = 64usize;
+    let padding = width.saturating_sub(title.chars().count() + time.chars().count() + 2);
+    println!("\n  \x1b[90m{}\x1b[0m", "─".repeat(width));
     println!(
-        "\n  {color}━━ {title} · {:02}:{:02} ━━\x1b[0m",
-        seconds / 60,
-        seconds % 60,
+        "  {colour}{mark} {title}\x1b[0m{}\x1b[90m{time}\x1b[0m",
+        " ".repeat(padding)
     );
+    println!("  \x1b[90m{}\x1b[0m", "─".repeat(width));
+    match (status, summary.next) {
+        (SetupStatus::Failed, _) => {
+            println!("  Причина и что сделать — в строке с ✗ выше.");
+        }
+        (_, Some(next)) => println!("  \x1b[96mЧто дальше:\x1b[0m {next}"),
+        (_, None) => println!(
+            "  \x1b[96mЧто дальше:\x1b[0m перезапустите Antigravity и войдите в аккаунт Google."
+        ),
+    }
+    if !summary.notes.is_empty() {
+        println!("\n  Обратите внимание:");
+        for note in &summary.notes {
+            println!("    • {note}");
+        }
+    }
     if status != SetupStatus::Complete {
+        println!();
         print_error_details();
     }
 }
@@ -493,27 +717,36 @@ pub fn handle_unlock_all() -> bool {
     clear_screen();
     banner();
     println!("  ВКЛЮЧЕНИЕ ОБХОДА\n");
+    let mut summary = Summary::default();
     if !check_vpn_before_setup() {
-        finish_setup(SetupStatus::Failed, started);
+        finish_setup(SetupStatus::Failed, started, UNLOCK_VERDICTS, &summary);
         pause();
         return false;
     }
-    println!("  \x1b[96m── Файлы приложения ──\x1b[0m");
+    #[cfg(windows)]
+    let launch = crate::system::env::args().nth(1).is_none();
+    #[cfg(not(windows))]
+    let launch = false;
+    let steps = Steps::new(if launch { 5 } else { 4 });
     let mut status = SetupStatus::Failed;
-    let outcome = continue_setup(patch_installations(), || {
+    let outcome = continue_setup(patch_installations(&steps), || {
         #[cfg(windows)]
-        if crate::system::env::args().nth(1).is_none() {
-            status = apply_connection_and_launch();
+        if launch {
+            status = apply_connection_and_launch(&steps, &mut summary);
             return status.succeeded();
         }
-        status = apply_connection();
+        status = apply_connection(&steps, &mut summary);
         status.succeeded()
     });
     let ok = outcome.succeeded();
     if !ok && status.succeeded() {
         status = SetupStatus::Limited;
+        summary.notes.insert(
+            0,
+            "Не все файлы Antigravity удалось настроить — подробности выше.".into(),
+        );
     }
-    finish_setup(status, started);
+    finish_setup(status, started, UNLOCK_VERDICTS, &summary);
     pause();
     ok
 }
@@ -521,21 +754,28 @@ pub fn handle_patch_files_only() -> bool {
     let ok = if let Some(path) = crate::system::env::args().nth(2) {
         patch_root(&expand_env_vars(&path))
     } else {
-        patch_installations().succeeded()
+        patch_installations(&Steps::unnumbered()).succeeded()
     };
     show_result(ok);
     pause();
     ok
 }
 pub fn handle_dns_only() -> bool {
+    const VERDICTS: Verdicts = (
+        "Готово — подключение настроено",
+        "Подключение настроено, но есть замечания",
+        "Подключение не настроено",
+    );
     let started = Instant::now();
+    let mut summary = Summary::default();
     if !check_vpn_before_setup() {
-        finish_setup(SetupStatus::Failed, started);
+        finish_setup(SetupStatus::Failed, started, VERDICTS, &summary);
         pause();
         return false;
     }
-    let status = apply_connection();
-    finish_setup(status, started);
+    summary.next = Some("перезапустите Antigravity, чтобы он подхватил новые настройки.");
+    let status = apply_connection(&Steps::new(3), &mut summary);
+    finish_setup(status, started, VERDICTS, &summary);
     pause();
     status.succeeded()
 }
@@ -543,16 +783,14 @@ pub fn handle_dns_only() -> bool {
 fn check_vpn_before_setup() -> bool {
     #[cfg(windows)]
     if crate::net::windows_connect::vpn_present() {
-        println!("  \x1b[93m!\x1b[0m Обнаружен VPN. Он может мешать DNS и подключению.");
-        println!("    Если VPN не нужен, лучше временно отключить его.");
+        println!("  \x1b[93m!\x1b[0m Включён VPN. Он может помешать настройке.");
+        println!("    Если VPN сейчас не нужен, лучше временно его отключить.\n");
     }
     match crate::net::preflight() {
         Ok(()) => true,
         Err(message) => {
             crate::net::relay::log_event(&message);
-            println!("  \x1b[93mВключение обхода приостановлено\x1b[0m\n");
-            println!("  {message}\n");
-            println!("  Устраните причину и выберите этот пункт ещё раз.");
+            print_problem(2, "Включение обхода приостановлено", &message, None);
             false
         }
     }
@@ -631,7 +869,7 @@ fn add_manual_path() {
         "  Путь сохранён, пункты [1] и [6] будут его учитывать: {}",
         display_path(&root)
     );
-    show_result(patch_targets(targets).succeeded());
+    show_result(patch_targets(targets, &Steps::unnumbered()).succeeded());
     pause();
 }
 
@@ -672,11 +910,11 @@ fn remove_manual_path(saved: &[std::path::PathBuf]) {
             })
             .collect();
         if !patched.is_empty() {
-            println!("\n  В {} есть пропатченные файлы:", display_path(root));
+            println!("\n  В {} есть настроенные файлы:", display_path(root));
             print_found_targets(root, &patched);
             println!("  Без сохранённого пути пункт [6] их не найдёт.\n");
             println!("  [1]  Вернуть исходные файлы и убрать путь");
-            println!("  [2]  Только убрать путь — файлы останутся пропатченными");
+            println!("  [2]  Только убрать путь — файлы останутся настроенными");
             println!("  [0]  Отмена\n");
             match choose(&["1", "2", "0"]) {
                 "1" => {
@@ -707,15 +945,7 @@ fn restore_targets(targets: Vec<FoundTarget>) -> bool {
     if !ensure_application_closed(&paths, "возврат исходных файлов") {
         return false;
     }
-    let mut ok = true;
-    for target in targets {
-        ok &= print_patch_result(&target, restore_target(&target));
-    }
-    if let Err(error) = clear_ide_v8_caches() {
-        operation_error("Не удалось очистить кэш приложения", &error);
-        ok = false;
-    }
-    ok
+    run_file_step(&Steps::unnumbered(), RESTORE_STEP, targets, restore_target)
 }
 
 fn print_found_targets(root: &Path, targets: &[FoundTarget]) {
@@ -728,9 +958,9 @@ fn print_found_targets(root: &Path, targets: &[FoundTarget]) {
             .filter(|relative| !relative.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new(&target.name));
         let state = match check_target_state(target) {
-            BinaryState::Patched => "пропатчено",
-            BinaryState::Stock => "не пропатчено",
-            BinaryState::PartiallyPatched => "пропатчено частично",
+            BinaryState::Patched => "настроено",
+            BinaryState::Stock => "не настроено",
+            BinaryState::PartiallyPatched => "настроено частично",
             BinaryState::Unknown => "версия не распознана",
         };
         println!(
@@ -739,6 +969,14 @@ fn print_found_targets(root: &Path, targets: &[FoundTarget]) {
             file.display()
         );
     }
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 fn component_name(kind: crate::core::detector::TargetKind) -> &'static str {
@@ -771,10 +1009,10 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
     });
     match running {
         Ok(holders) if !holders.is_empty() => {
-            println!("  \x1b[93mНужно закрыть Antigravity\x1b[0m");
-            println!("  Файлы используют: {}", holders.join(", "));
-            println!("  Перед изменением файлов завершите IDE, CLI и языковой сервер.");
-            println!("  Сохраните работу: несохранённые изменения будут потеряны.\n");
+            println!("  \x1b[93m! Нужно закрыть Antigravity\x1b[0m");
+            println!("    Пока он открыт, его файлы нельзя изменить.");
+            println!("    \x1b[90mОткрыто сейчас: {}\x1b[0m", holders.join(", "));
+            println!("    Сохраните работу: несохранённые изменения будут потеряны.\n");
             if crate::system::env::args().len() > 1 {
                 operation_error(
                     "Закройте Antigravity и повторите команду",
@@ -826,6 +1064,7 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
 }
 
 pub fn handle_rollback() -> bool {
+    let started = Instant::now();
     let explicit_root = crate::system::env::args()
         .nth(2)
         .map(|path| expand_env_vars(&path));
@@ -850,56 +1089,87 @@ pub fn handle_rollback() -> bool {
     if !ensure_application_closed(&paths, "отключение обхода") {
         return false;
     }
-    println!("  Восстанавливаем настройки…\n");
+    let steps = Steps::new(2);
     let mut ok = true;
     if let Some(root) = explicit_root.filter(|_| targets.is_empty()) {
-        eprintln!("[✗] Цели для отката не найдены: {}", root.display());
+        print_problem(
+            2,
+            "Файлы Antigravity не найдены",
+            &format!("в папке {} нечего возвращать", display_path(&root)),
+            Some("проверьте путь к установке."),
+        );
         ok = false;
     }
-    for target in targets {
-        ok &= print_patch_result(&target, restore_target(&target));
+    if !targets.is_empty() {
+        ok &= run_file_step(&steps, RESTORE_STEP, targets, restore_target);
     }
-    if !paths.is_empty() {
-        if let Err(error) = clear_ide_v8_caches() {
-            operation_error("Не удалось очистить кэш приложения", &error);
-            ok = false;
-        }
-    }
+    let progress = Progress::new();
+    progress.stage(&steps, "Отключаем обход в системе", "Настройки системы");
     let endpoint_errors = crate::core::endpoint::remove_all();
-    let endpoints_restored = endpoint_errors.is_empty();
-    for e in endpoint_errors {
-        operation_error("Не удалось восстановить настройки приложения", &e);
-        ok = false;
-    }
-    if !endpoints_restored {
-        operation_error("Шлюз сохранён работающим", "Сначала необходимо восстановить endpoint приложения; остановка сейчас оборвала бы подключение.");
+    if !endpoint_errors.is_empty() {
+        progress.finish(false);
+        drop(progress);
+        for error in endpoint_errors {
+            print_problem(6, "Не удалось вернуть настройки Antigravity", &error, None);
+        }
+        print_problem(
+            6,
+            "Подключение оставлено включённым",
+            "без прежних настроек Antigravity потерял бы связь",
+            Some("закройте Antigravity и выберите пункт 6 ещё раз."),
+        );
+        finish_setup(
+            SetupStatus::Failed,
+            started,
+            ROLLBACK_VERDICTS,
+            &Summary::default(),
+        );
         pause();
         return false;
     }
+    let mut problems = Vec::new();
     match remove_dns_rules() {
-        Err(error) => {
-            operation_error("Не удалось восстановить подключение", &error);
-            ok = false;
-        }
+        Err(error) => problems.push(("Не удалось вернуть настройки подключения", error)),
         Ok(()) =>
         {
             #[cfg(windows)]
             if let Err(error) = crate::net::windows_connect::disable() {
-                operation_error("Не удалось отключить запасной CONNECT", &error);
-                ok = false;
+                problems.push(("Не удалось отключить резервный канал", error));
             }
         }
     }
-    if ok {
-        println!("  \x1b[92m✓\x1b[0m Настройки подключения восстановлены");
-        println!("\n  \x1b[92mОбход отключён. Можно открыть Antigravity.\x1b[0m");
-    } else {
-        eprintln!("\n  Не всё удалось восстановить. Резервные копии сохранены.");
-        print_error_details();
+    progress.finish(problems.is_empty());
+    drop(progress);
+    for (message, error) in &problems {
+        print_problem(6, message, error, None);
     }
+    ok &= problems.is_empty();
+    let mut summary = Summary {
+        next: Some("можно открыть Antigravity — он работает так же, как до включения обхода."),
+        notes: Vec::new(),
+    };
+    if !ok {
+        summary
+            .notes
+            .push("Резервные копии исходных файлов сохранены — ничего не потеряно.".into());
+    }
+    let status = if ok {
+        SetupStatus::Complete
+    } else {
+        SetupStatus::Failed
+    };
+    finish_setup(status, started, ROLLBACK_VERDICTS, &summary);
     pause();
     ok
 }
+
+const RESTORE_STEP: (&str, &str) = ("Возвращаем исходные файлы", "Исходные файлы Antigravity");
+
+const ROLLBACK_VERDICTS: Verdicts = (
+    "Готово — обход отключён",
+    "Обход отключён, но есть замечания",
+    "Обход отключён не полностью",
+);
 
 pub fn handle_diagnostics() -> bool {
     clear_screen();
@@ -907,24 +1177,23 @@ pub fn handle_diagnostics() -> bool {
     println!("  ПРОВЕРКА ПОДКЛЮЧЕНИЯ\n");
     // Reading the IDE logs does not depend on the network checks.
     let observation = std::thread::spawn(crate::model_status::snapshot);
-    let reports = crate::net::health::probe_all();
+    let reports = {
+        let progress = Progress::new();
+        progress.working("Проверяем связь с серверами Google");
+        crate::net::health::probe_all()
+    };
     let mut ok = true;
     for report in &reports {
-        let label = match report.host.as_str() {
-            "cloudcode-pa.googleapis.com" => "Основной сервер",
-            "daily-cloudcode-pa.googleapis.com" => "Резервный сервер",
-            "aicode.googleapis.com" => "Eligibility сервер (CLI)",
-            _ => "Gemini",
-        };
+        let label = capitalized(crate::net::server_label(&report.host));
         if let Some(error) = &report.error {
-            operation_error(&format!("{label}: нет подключения"), error);
+            operation_error(&format!("{label}: нет связи"), error);
             ok = false;
         } else {
-            println!("  \x1b[92m✓\x1b[0m {label}: TLS/HTTP-соединение доступно");
+            println!("  \x1b[92m✓\x1b[0m {label}: связь есть");
         }
     }
-    println!("\n  Проверена сеть. Доступ к моделям и аккаунту этой проверкой не подтверждается.");
-    println!("  Откройте Antigravity и отправьте короткий запрос нужной модели.");
+    println!("\n  Проверена только связь с серверами. Работает ли модель в вашем аккаунте,");
+    println!("  эта проверка не показывает: откройте Antigravity и отправьте короткий запрос.");
     let observation = observation
         .join()
         .unwrap_or_else(|_| crate::model_status::snapshot());

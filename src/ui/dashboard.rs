@@ -67,14 +67,14 @@ fn network_status(
             // Pins describe complete installed Agent coverage; no connection
             // probe ran here. A running process or a single DNS rule alone
             // cannot establish that the remaining domains were configured.
-            return "\x1b[92mНастроен (hosts)\x1b[0m";
+            return "\x1b[92mВключён\x1b[0m";
         }
-        Some(count) if count > 0 => return "\x1b[93mНужна проверка (hosts)\x1b[0m",
-        None => return "\x1b[93mНе удалось проверить hosts\x1b[0m",
+        Some(count) if count > 0 => return "\x1b[93mВключён не полностью\x1b[0m",
+        None => return "\x1b[93mНе удалось проверить системный список адресов\x1b[0m",
         _ => {}
     }
     match (rules, service_running) {
-        (_, None) => "\x1b[93mНе удалось проверить службу\x1b[0m",
+        (_, None) => "\x1b[93mНе удалось проверить фоновую службу\x1b[0m",
         (count, _) if count > 0 => "\x1b[93mНужна проверка\x1b[0m",
         (_, Some(true)) => "\x1b[93mНужна проверка\x1b[0m",
         _ => "\x1b[90mВыключен\x1b[0m",
@@ -97,10 +97,10 @@ mod tests {
         assert_eq!(ide_display_status(&status), "\x1b[92mУстановлена\x1b[0m");
 
         status.ide_status = Some(BinaryState::Stock);
-        assert_eq!(ide_display_status(&status), "\x1b[93mНе пропатчено\x1b[0m");
+        assert_eq!(ide_display_status(&status), "\x1b[93mНе настроено\x1b[0m");
 
         status.ide_status = Some(BinaryState::Patched);
-        assert_eq!(ide_display_status(&status), "\x1b[92mПропатчено\x1b[0m");
+        assert_eq!(ide_display_status(&status), "\x1b[92mНастроено\x1b[0m");
 
         status
             .incomplete_ide_installations
@@ -116,16 +116,17 @@ mod tests {
         let complete = crate::net::provider::NRPT_AGENT.len();
         for service in [Some(true), Some(false), None] {
             for rules in [0, 1, 30] {
-                assert!(network_status(rules, service, Some(complete)).contains("Настроен (hosts)"));
-                assert!(network_status(rules, service, Some(1)).contains("Нужна проверка (hosts)"));
-                assert!(network_status(rules, service, None).contains("Не удалось проверить hosts"));
+                assert!(network_status(rules, service, Some(complete)).contains("Включён"));
+                assert!(network_status(rules, service, Some(1)).contains("Включён не полностью"));
+                assert!(network_status(rules, service, None)
+                    .contains("Не удалось проверить системный список адресов"));
             }
         }
         assert!(network_status(0, Some(false), Some(0)).contains("Выключен"));
         assert!(network_status(1, Some(true), Some(0)).contains("Нужна проверка"));
         assert!(network_status(0, Some(true), Some(0)).contains("Нужна проверка"));
         assert!(network_status(1, Some(false), Some(0)).contains("Нужна проверка"));
-        assert!(network_status(1, None, Some(0)).contains("Не удалось проверить службу"));
+        assert!(network_status(1, None, Some(0)).contains("Не удалось проверить фоновую службу"));
     }
 }
 
@@ -143,8 +144,8 @@ fn ide_display_status(status: &crate::core::detector::SystemComponentsStatus) ->
 
 fn component_status(status: Option<BinaryState>) -> &'static str {
     match status {
-        Some(BinaryState::Patched) => "\x1b[92mПропатчено\x1b[0m",
-        Some(BinaryState::Stock) => "\x1b[93mНе пропатчено\x1b[0m",
+        Some(BinaryState::Patched) => "\x1b[92mНастроено\x1b[0m",
+        Some(BinaryState::Stock) => "\x1b[93mНе настроено\x1b[0m",
         Some(BinaryState::PartiallyPatched | BinaryState::Unknown) => {
             "\x1b[93mНужна проверка\x1b[0m"
         }
