@@ -119,7 +119,7 @@ def check_decisions():
         ("source moved under docs/", "true", [run(1, "a")],
          {"a": ("ahead", [{"filename": "docs/rank.rs", "previous_filename": "src/net/rank.rs"}])}),
         ("release notes are read by verify_release.py", "true", [run(1, "a")],
-         {"a": ("ahead", ["docs/releases/v2.6.0.md"])}),
+         {"a": ("ahead", ["docs/releases/v3.0.0.md"])}),
         ("verified commit is not an ancestor", "true", [run(1, "a")], {"a": ("diverged", docs)}),
         ("no verified commit at all", "true", [], {}),
         ("too many files to list", "true", [run(1, "a")], {"a": ("ahead", [f"docs/{n}.md" for n in range(300)])}),

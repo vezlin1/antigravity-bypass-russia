@@ -32,9 +32,12 @@ for args in [("invalid-command",), ("status", "extra"), ("report", ".", "extra")
 result = run("status")
 assert result.returncode == 0, result
 plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
-rows = [line for line in plain.splitlines() if line]
-assert len(rows) == 9 and all(len(line) == 69 for line in rows), plain
-assert all(label in plain for label in ["Обход:", "Antigravity:", "Antigravity IDE:", "Antigravity CLI:", "Модель (журнал):"]), plain
+rows = [line for line in plain.splitlines() if line.strip()]
+# The frame follows the console width; every line must still end at the same
+# column so the right border stays straight.
+assert len(rows) == 10 and len({len(line) for line in rows}) == 1, plain
+assert rows[0].lstrip().startswith("╭─ Текущий статус") and rows[-1].lstrip().startswith("╰"), plain
+assert all(label in plain for label in ["Обход", "Фоновая служба", "Antigravity IDE", "Antigravity CLI", "Модель (журнал)"]), plain
 print(f"PASS: release {version}, help, argument errors, status and frame alignment")
 
 # Saving evidence must work even on a runner with no installation, service or working Internet.

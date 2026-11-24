@@ -339,7 +339,7 @@ mod tests {
             assert_eq!(matches!(product, Product::Cli), cli, "{name}");
         }
         for name in [
-            "Antigravity Bypass 2.6.0",
+            "Antigravity Bypass 3.0.0",
             "Antigravity x64",
             "Antigravity (User",
             "Antigravity ()",
