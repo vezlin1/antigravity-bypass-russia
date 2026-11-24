@@ -124,6 +124,9 @@ jobs:
   package:
     name: Package release candidate
     needs: build
+    # Without an explicit condition GitHub requires every job up the chain to
+    # succeed, and `checks` is skipped whenever a green run is reused.
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -197,7 +200,7 @@ jobs:
     needs: package
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ !cancelled() && needs.package.result == 'success' && startsWith(github.ref, 'refs/tags/') }}
     permissions:
       contents: write
     steps:
