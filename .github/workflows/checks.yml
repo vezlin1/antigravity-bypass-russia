@@ -13,6 +13,11 @@ concurrency:
   group: checks-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_INCREMENTAL: 0
+  # CI never attaches a debugger; without debug info the crate builds ~25% faster.
+  CARGO_PROFILE_TEST_DEBUG: 0
+
 jobs:
   upstream-fixtures:
     name: Pinned App, IDE and CLI artifacts
@@ -106,8 +111,10 @@ jobs:
         run: python tests/verify_macos_source_bundle.py
       - name: macOS owner build kit
         run: python tests/verify_macos_build_kit.py
-      - name: Build executable for read-only smoke checks
-        run: cargo build --locked --bin antigravity-bypass-russia --target ${{ matrix.target }} ${{ matrix.target == 'aarch64-unknown-linux-gnu' && '--features vendored-openssl' || '' }}
+      # Elsewhere the socket tests already built this binary (test profile) for the smoke checks.
+      - name: Build executable
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cargo build --locked --bin antigravity-bypass-russia --target ${{ matrix.target }} --features vendored-openssl
       - name: Linux setup and rollback in isolated namespaces
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: sudo python3 tests/verify_linux_runtime.py target/${{ matrix.target }}/debug/antigravity-bypass-russia
