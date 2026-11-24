@@ -1078,12 +1078,7 @@ fn program_name(executable: &str) -> String {
 }
 
 fn processes_word(count: usize) -> &'static str {
-    match (count % 10, count % 100) {
-        (_, 11..=14) => "процессов",
-        (1, _) => "процесс",
-        (2..=4, _) => "процесса",
-        _ => "процессов",
-    }
+    style::plural(count as u64, ["процесс", "процесса", "процессов"])
 }
 
 #[cfg(test)]

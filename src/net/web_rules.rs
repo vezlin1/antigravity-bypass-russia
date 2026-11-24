@@ -22,6 +22,9 @@ pub(super) struct SavedRules {
     pub skip_primary: bool,
     /// Whether the rules currently applied send queries to the relay.
     pub via_relay: bool,
+    /// When the service last moved the web rules after a VPN change.
+    #[serde(default)]
+    pub switched_at_ms: Option<u64>,
 }
 
 impl SavedRules {
@@ -58,6 +61,13 @@ fn load_at(path: &Path) -> Result<Option<SavedRules>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("Сохранённые правила DNS: {error}")),
     }
+}
+
+/// For the dashboard: whether the web rules use the bypass now, and when
+/// the service last switched them.
+pub(super) fn status() -> Option<(bool, Option<u64>)> {
+    let saved = load_at(&path()).ok()??;
+    Some((saved.via_relay, saved.switched_at_ms))
 }
 
 /// Rollback: without this file the service has nothing to re-apply.
@@ -128,6 +138,7 @@ pub(super) fn follow_network() -> Result<Follow, String> {
     nrpt::apply_compatible_rules(&plan, super::provider::NRPT_TAG, "Antigravity DNS")?;
     super::flush_dns_cache()?;
     saved.via_relay = via_relay;
+    saved.switched_at_ms = Some(super::route_health::now_ms());
     save(&saved)?;
     relay::log_event(if via_relay {
         "Локальный DNS снова доступен (VPN выключен): Gemini и AI Studio в браузере идут через обход"
@@ -151,6 +162,7 @@ mod tests {
             udp_fallback: Vec::new(),
             skip_primary: true,
             via_relay: false,
+            switched_at_ms: None,
         }
     }
 

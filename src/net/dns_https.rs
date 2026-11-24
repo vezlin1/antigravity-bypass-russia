@@ -70,7 +70,10 @@ fn build_http_client(provider: &DohProvider, source: Option<IpAddr>) -> Result<C
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(TIMEOUT)
         .timeout(TIMEOUT)
-        .pool_idle_timeout(Duration::from_secs(20));
+        // A new TLS session through a remote resolver costs hundreds of
+        // milliseconds; keep the connection between bursts of lookups.
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(30));
     if let Some(ip) = source {
         builder = builder.local_address(ip);
     }

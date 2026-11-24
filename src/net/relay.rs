@@ -313,6 +313,30 @@ fn start_network_refresh(policy: RoutePolicy) {
     });
 }
 
+/// Waits until no route change arrives for `QUIET`, at most `LIMIT` in all;
+/// false when the notification channel is gone.
+#[cfg(windows)]
+fn wait_for_quiet(notifications: &mpsc::Receiver<()>) -> bool {
+    const QUIET: Duration = Duration::from_millis(1500);
+    const LIMIT: Duration = Duration::from_secs(5);
+    quiet_after(LIMIT, || notifications.recv_timeout(QUIET))
+}
+
+#[cfg(any(windows, test))]
+fn quiet_after(
+    limit: Duration,
+    mut next: impl FnMut() -> Result<(), mpsc::RecvTimeoutError>,
+) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match next() {
+            Ok(()) if std::time::Instant::now() < deadline => continue,
+            Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => return true,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+}
+
 #[cfg(windows)]
 fn refresh_system_network(notifications: &mpsc::Receiver<()>, subscribed: bool) {
     const RETRY: Duration = Duration::from_secs(10);
@@ -329,11 +353,10 @@ fn refresh_system_network(notifications: &mpsc::Receiver<()>, subscribed: bool) 
         if !changed && !retry && subscribed {
             continue;
         }
-        // VPN clients commonly update several routes in succession. Do not
-        // publish pins found on the old network if another event arrives.
-        if changed {
-            thread::sleep(Duration::from_millis(350));
-            let _ = notifications.try_recv();
+        // VPN clients commonly update several routes in succession. Wait for
+        // the burst to end so the checks below run once, on the new network.
+        if changed && !wait_for_quiet(notifications) {
+            return;
         }
         resolvers::invalidate_network_caches();
         retry = match super::rank::refresh_system_pins(|| notifications.try_recv().is_err()) {
@@ -365,6 +388,51 @@ fn refresh_system_network(notifications: &mpsc::Receiver<()>, subscribed: bool) 
             follow_error = error;
         }
     }
+}
+
+static ANSWERED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// What the dashboard shows about the background service.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ServiceStats {
+    pub started_ms: u64,
+    pub answered: u64,
+}
+
+fn stats_path() -> PathBuf {
+    log_dir().join("stats.json")
+}
+
+/// Records the start, then the answer count every five minutes when it
+/// changed: a status for the dashboard without a write per query.
+fn start_stats_writer() {
+    const PERIOD: Duration = Duration::from_secs(300);
+    let started_ms = super::route_health::now_ms();
+    let write = move |answered| {
+        let stats = ServiceStats {
+            started_ms,
+            answered,
+        };
+        if let Ok(bytes) = serde_json::to_vec(&stats) {
+            let _ = crate::system::fs_utils::robust_write_file(&stats_path(), &bytes);
+        }
+    };
+    write(0);
+    thread::spawn(move || {
+        let mut written = 0;
+        loop {
+            thread::sleep(PERIOD);
+            let answered = ANSWERED.load(std::sync::atomic::Ordering::Relaxed);
+            if answered != written {
+                write(answered);
+                written = answered;
+            }
+        }
+    });
+}
+
+pub fn read_stats() -> Option<ServiceStats> {
+    serde_json::from_slice(&fs::read(stats_path()).ok()?).ok()
 }
 
 pub fn detach_console() {
@@ -550,6 +618,11 @@ pub fn log_fatal(msg: &str) {
 }
 
 pub fn run() -> Result<(), String> {
+    // The watchdog trigger fired while setup is replacing this service.
+    #[cfg(windows)]
+    if crate::system::service::maintenance_active() {
+        return Ok(());
+    }
     let policy = load_route_policy()?;
     #[cfg(windows)]
     start_network_refresh(policy);
@@ -577,10 +650,13 @@ pub fn run() -> Result<(), String> {
     let sock_arc = Arc::new(socket);
 
     let reply_socket = Arc::clone(&sock_arc);
+    start_stats_writer();
     let pool = WorkerPool::new(
         Box::new(move |(query, client_addr): Job| {
             if let Some(resp) = relay(&query, policy) {
-                let _ = reply_socket.send_to(&resp, client_addr);
+                if reply_socket.send_to(&resp, client_addr).is_ok() {
+                    ANSWERED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
             } else {
                 let name = question_name(&query).unwrap_or_else(|| "?".into());
                 log_fatal(&format!("no answer for {} from {:?}", name, client_addr));
@@ -736,6 +812,28 @@ fn probe_local_dns() -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_bursts_are_waited_out_but_not_forever() {
+        // Three events, then silence: one refresh after the burst.
+        let mut events = vec![Ok(()), Ok(()), Ok(()), Err(mpsc::RecvTimeoutError::Timeout)];
+        events.reverse();
+        assert!(quiet_after(Duration::from_secs(5), || events
+            .pop()
+            .unwrap()));
+        assert!(events.is_empty());
+        // A VPN that never stops changing routes: give up waiting at the limit.
+        let mut calls = 0;
+        assert!(quiet_after(Duration::ZERO, || {
+            calls += 1;
+            Ok(())
+        }));
+        assert_eq!(calls, 1);
+        // The service is shutting down.
+        assert!(!quiet_after(Duration::from_secs(5), || Err(
+            mpsc::RecvTimeoutError::Disconnected
+        )));
+    }
 
     #[cfg(windows)]
     #[test]

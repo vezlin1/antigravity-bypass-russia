@@ -119,6 +119,26 @@ mod windows_tests {
     }
 
     #[test]
+    fn maintenance_marker_holds_back_the_watchdog_only_while_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("maintenance");
+        assert!(!marker_fresh(&marker, std::time::Duration::from_secs(120)));
+        fs::write(&marker, b"setup").unwrap();
+        assert!(marker_fresh(&marker, std::time::Duration::from_secs(120)));
+        // A setup that crashed leaves an old marker: the watchdog resumes.
+        assert!(!marker_fresh(&marker, std::time::Duration::ZERO));
+    }
+
+    #[test]
+    fn task_xml_restarts_the_service_and_watches_it_every_five_minutes() {
+        let xml = windows_task_xml(Path::new(r"C:\ProgramData\x\ag_dns.exe"));
+        assert!(xml.contains("<Priority>5</Priority>"));
+        assert!(xml.contains("<Count>999</Count>"));
+        assert!(xml.contains("<Interval>PT5M</Interval>"));
+        assert!(xml.contains("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"));
+    }
+
+    #[test]
     fn task_query_distinguishes_absence_from_scheduler_failure() {
         use std::os::windows::process::ExitStatusExt;
         for (text, code, expected) in [
@@ -390,6 +410,14 @@ fn windows_task_xml(dst: &Path) -> String {
     <LogonTrigger>
       <Enabled>true</Enabled>
     </LogonTrigger>
+    <TimeTrigger>
+      <Repetition>
+        <Interval>PT5M</Interval>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+      <StartBoundary>2024-01-01T00:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+    </TimeTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -414,10 +442,10 @@ fn windows_task_xml(dst: &Path) -> String {
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <Priority>5</Priority>
     <RestartOnFailure>
       <Interval>PT1M</Interval>
-      <Count>3</Count>
+      <Count>999</Count>
     </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
@@ -644,6 +672,49 @@ fn relay_binary_backup_can_restore_or_remove_the_replacement() {
     assert!(!installed.exists());
 }
 
+/// While setup stops, replaces and restarts the service, the task's
+/// five-minute watchdog trigger must not start the old binary in between.
+/// The marker goes stale after two minutes, so a setup that crashed does not
+/// keep the service down.
+#[cfg(windows)]
+const MAINTENANCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+#[cfg(windows)]
+fn maintenance_marker() -> PathBuf {
+    install_dir().join("maintenance")
+}
+
+/// True while setup is updating the service; a watchdog start then exits.
+#[cfg(windows)]
+pub fn maintenance_active() -> bool {
+    marker_fresh(&maintenance_marker(), MAINTENANCE_LIMIT)
+}
+
+#[cfg(windows)]
+fn marker_fresh(path: &Path, limit: std::time::Duration) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age < limit))
+}
+
+#[cfg(windows)]
+struct Maintenance;
+
+#[cfg(windows)]
+impl Maintenance {
+    fn begin() -> Self {
+        let _ = fs::write(maintenance_marker(), b"setup\n");
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Maintenance {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(maintenance_marker());
+    }
+}
+
 pub fn enable(reuse_registration: bool, replacement_attempted: &mut bool) -> Result<(), String> {
     let dir = install_dir();
     fs::create_dir_all(&dir).map_err(|e| {
@@ -654,6 +725,8 @@ pub fn enable(reuse_registration: bool, replacement_attempted: &mut bool) -> Res
         )
     })?;
 
+    #[cfg(windows)]
+    let maintenance = Maintenance::begin();
     let src = std::env::current_exe()
         .map_err(|e| format!("Не удалось определить путь к текущему exe: {}", e))?;
     let dst = installed_exe();
@@ -713,6 +786,8 @@ pub fn enable(reuse_registration: bool, replacement_attempted: &mut bool) -> Res
         // setup, including when the executable bytes have not changed.
         stop_windows_worker()?;
         if reuse_registration {
+            // The service started now must not see the marker and exit.
+            drop(maintenance);
             return start();
         }
         let task_xml = windows_task_xml(&dst);
@@ -748,6 +823,7 @@ pub fn enable(reuse_registration: bool, replacement_attempted: &mut bool) -> Res
             return Err(format!("schtasks /Create завершился ошибкой: {}", err));
         }
 
+        drop(maintenance);
         let started = crate::system::command::output("schtasks", ["/Run", "/TN", TASK_NAME])
             .map_err(|e| format!("Запуск DNS-службы: {e}"))?;
         if !started.status.success() {

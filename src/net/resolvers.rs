@@ -82,6 +82,8 @@ struct Cached {
     provider: String,
     verdict: Verdict,
     at: Instant,
+    /// A refresh before expiry was already started for this answer.
+    prefetching: bool,
 }
 static PACKETS: Mutex<Option<HashMap<CacheKey, Cached>>> = Mutex::new(None);
 // Identical concurrent questions share one upstream race.
@@ -167,6 +169,91 @@ pub fn rank_tls_v4(addrs: &[IpAddr], sni: &str) -> Vec<(Ipv4Addr, u128)> {
 
 /// Verified addresses sorted by latency, plus the probe error of every
 /// address that failed. The errors explain an empty result to the user.
+/// Lookup threads that wait a minute after their work for the next lookup,
+/// instead of a new thread for every upstream question. Without an idle
+/// thread this behaves like `thread::spawn`.
+mod reuse {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{mpsc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    type Task = Box<dyn FnOnce() + Send>;
+
+    struct Idle {
+        id: u64,
+        sender: mpsc::Sender<Task>,
+    }
+
+    static IDLE: Mutex<Vec<Idle>> = Mutex::new(Vec::new());
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    pub(super) const KEEP: Duration = Duration::from_secs(60);
+    const MAX_IDLE: usize = 16;
+
+    fn idle() -> std::sync::MutexGuard<'static, Vec<Idle>> {
+        IDLE.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(super) fn run(task: impl FnOnce() + Send + 'static) {
+        let mut task: Task = Box::new(task);
+        loop {
+            let Some(worker) = idle().pop() else {
+                break;
+            };
+            match worker.sender.send(task) {
+                Ok(()) => return,
+                // The worker exited between being listed and taking the task.
+                Err(mpsc::SendError(back)) => task = back,
+            }
+        }
+        thread::spawn(move || work(task, KEEP));
+    }
+
+    pub(super) fn work(first: Task, keep: Duration) {
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, tasks) = mpsc::channel();
+        let mut task = first;
+        loop {
+            task();
+            {
+                let mut idle = idle();
+                if idle.len() >= MAX_IDLE {
+                    return;
+                }
+                idle.push(Idle {
+                    id,
+                    sender: sender.clone(),
+                });
+            }
+            task = match tasks.recv_timeout(keep) {
+                Ok(next) => next,
+                Err(_) => {
+                    let mut idle = idle();
+                    match idle.iter().position(|worker| worker.id == id) {
+                        Some(position) => {
+                            idle.remove(position);
+                            return;
+                        }
+                        // Taken just as the wait ended: its task is on the way.
+                        None => {
+                            drop(idle);
+                            match tasks.recv() {
+                                Ok(next) => next,
+                                Err(_) => return,
+                            }
+                        }
+                    }
+                }
+            };
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn idle_count() -> usize {
+        idle().len()
+    }
+}
+
 pub fn rank_tls_v4_report(addrs: &[IpAddr], sni: &str) -> (Vec<(Ipv4Addr, u128)>, Vec<String>) {
     let candidates: Vec<IpAddr> = addrs.iter().copied().filter(|a| a.is_ipv4()).collect();
     if candidates.is_empty() {
@@ -463,7 +550,7 @@ fn race_providers(
     for (idx, provider) in pool.iter().cloned().enumerate() {
         let query = query.to_vec();
         let tx = tx.clone();
-        thread::spawn(move || {
+        reuse::run(move || {
             if let Some((reply, server)) = provider.query(&query, interface) {
                 if is_successful_response(&reply) {
                     let addrs = answer_addrs(&reply);
@@ -488,7 +575,7 @@ fn race_providers(
             let tx = tx.clone();
             let question = question.clone();
             let ip = ns.parse().unwrap();
-            thread::spawn(move || {
+            reuse::run(move || {
                 let reply = query_raw_via(&query, ip, 0, resolver_pool::UDP_TIMEOUT)
                     .ok()
                     .filter(|reply| is_successful_response(reply));
@@ -533,18 +620,35 @@ fn pick_winner(hits: &[RaceResult], reference: &[IpAddr]) -> Option<usize> {
 
 enum Lookup {
     Fresh(ResolveHit),
+    /// Still valid, but less than a fifth of its lifetime is left: answer from
+    /// the cache and refresh it now, so popular names rarely reach expiry.
+    Expiring(ResolveHit),
     Stale(ResolveHit),
     Miss,
 }
 
 fn cached(key: &CacheKey) -> Lookup {
-    let Ok(guard) = PACKETS.lock() else {
+    let Ok(mut guard) = PACKETS.lock() else {
         return Lookup::Miss;
     };
-    let Some(entry) = guard.as_ref().and_then(|c| c.get(key)) else {
+    let Some(entry) = guard.as_mut().and_then(|c| c.get_mut(key)) else {
         return Lookup::Miss;
     };
-    cached_answer(entry, entry.at.elapsed())
+    let age = entry.at.elapsed();
+    match cached_answer(entry, age) {
+        // One early refresh per answer: a failed one leaves the stale path.
+        Lookup::Fresh(hit) if !entry.prefetching && expiring_soon(&entry.reply, age) => {
+            entry.prefetching = true;
+            Lookup::Expiring(hit)
+        }
+        lookup => lookup,
+    }
+}
+
+/// Less than a fifth of the answer's lifetime is left.
+fn expiring_soon(reply: &[u8], age: Duration) -> bool {
+    let age = age.as_secs() as u32;
+    super::client::aged_reply(reply, age + age / 4 + 1).is_none()
 }
 
 fn cached_answer(entry: &Cached, age: Duration) -> Lookup {
@@ -588,6 +692,7 @@ fn remember(key: CacheKey, hit: &ResolveHit) {
             provider: hit.provider.clone(),
             verdict: hit.verdict,
             at: Instant::now(),
+            prefetching: false,
         },
     );
 }
@@ -605,7 +710,7 @@ pub fn resolve_best(query: &[u8], interface: u32) -> Option<ResolveHit> {
     let key = snapshot_key(&pool, query, interface);
     match cached(&key) {
         Lookup::Fresh(hit) => return Some(with_id(hit, query)),
-        Lookup::Stale(hit) => {
+        Lookup::Expiring(hit) | Lookup::Stale(hit) => {
             refresh_in_background(pool, query.to_vec(), interface, key);
             return Some(with_id(hit, query));
         }
@@ -625,7 +730,9 @@ fn refresh_in_background(
         .lock()
         .is_ok_and(|guard| guard.as_ref().is_some_and(|f| f.contains_key(&key)));
     if !running {
-        thread::spawn(move || shared(key, || resolve_uncached(&pool.providers, &query, interface)));
+        reuse::run(move || {
+            shared(key, || resolve_uncached(&pool.providers, &query, interface));
+        });
     }
 }
 
@@ -837,6 +944,8 @@ mod tests {
 
     #[test]
     fn reference_answers_are_reused_only_while_both_resolvers_are_fresh() {
+        // Another test changes the network generation; run apart from it.
+        let _serial = CACHE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let question = ("reference-cache.example".to_string(), 1);
         let google: Ipv4Addr = "8.8.8.8".parse().unwrap();
         let cloudflare: Ipv4Addr = "1.1.1.1".parse().unwrap();
@@ -1187,6 +1296,59 @@ mod tests {
                 _ => panic!("{name}: unexpected cache state"),
             }
         }
+    }
+
+    #[test]
+    fn lookup_threads_are_reused_and_leave_when_idle() {
+        let (done, finished) = mpsc::channel();
+        let first_thread = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&first_thread);
+        let tx = done.clone();
+        reuse::run(move || {
+            *seen.lock().unwrap() = Some(thread::current().id());
+            tx.send(()).unwrap();
+        });
+        finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Let the worker list itself as idle, then hand it the next task.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while reuse::idle_count() == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let second_thread = Arc::new(Mutex::new(None));
+        let seen = Arc::clone(&second_thread);
+        reuse::run(move || {
+            *seen.lock().unwrap() = Some(thread::current().id());
+            done.send(()).unwrap();
+        });
+        finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            *first_thread.lock().unwrap(),
+            *second_thread.lock().unwrap()
+        );
+
+        // A worker with nothing to do removes itself and ends.
+        let worker = thread::spawn(|| reuse::work(Box::new(|| {}), Duration::from_millis(20)));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn popular_answers_are_refreshed_once_before_they_expire() {
+        let _serial = CACHE_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        // The fixture answers with TTL 20 s: refresh once under 4 s is left.
+        let hit = address_hit("prefetch.test");
+        assert!(!expiring_soon(&hit.reply, Duration::from_secs(14)));
+        assert!(expiring_soon(&hit.reply, Duration::from_secs(16)));
+        let key = test_key("prefetch.test");
+        remember(key.clone(), &hit);
+        assert!(matches!(cached(&key), Lookup::Fresh(_)));
+        {
+            let mut guard = PACKETS.lock().unwrap();
+            let entry = guard.as_mut().unwrap().get_mut(&key).unwrap();
+            entry.at = Instant::now() - Duration::from_secs(17);
+        }
+        assert!(matches!(cached(&key), Lookup::Expiring(_)));
+        // The refresh is already running: later hits are plain fresh answers.
+        assert!(matches!(cached(&key), Lookup::Fresh(_)));
     }
 
     #[test]

@@ -41,8 +41,21 @@ pub fn print_dashboard() {
     } else {
         Tone::Muted
     };
+    let network = network_status(rules, running.as_ref().ok().copied(), hosts_count);
+    let service = service_status(
+        running.ok(),
+        network.0 != Tone::Muted,
+        crate::net::relay::read_stats(),
+        crate::net::web_rules_status(),
+        crate::net::route_health::now_ms(),
+    );
     let rows = [
-        row("Обход", network_status(rules, running.ok(), hosts_count)),
+        row("Обход", network),
+        format!(
+            "{:<17} {}",
+            "Фоновая служба",
+            style::status(service.0, &service.1)
+        ),
         row("Antigravity", component_status(status.core_status)),
         row("Antigravity IDE", ide_display_status(&status)),
         row("Antigravity CLI", cli),
@@ -50,6 +63,38 @@ pub fn print_dashboard() {
     ];
     style::panel("Текущий статус", &rows);
     println!();
+}
+
+/// Whether the service runs, how many queries it answered and when it last
+/// followed a VPN change.
+fn service_status(
+    running: Option<bool>,
+    bypass_on: bool,
+    stats: Option<crate::net::relay::ServiceStats>,
+    web: Option<(bool, Option<u64>)>,
+    now_ms: u64,
+) -> (Tone, String) {
+    match running {
+        None => (Tone::Warn, "Не удалось проверить".into()),
+        Some(false) if bypass_on => (Tone::Warn, "Не запущена — выберите пункт 1".into()),
+        Some(false) => (Tone::Muted, "Выключена".into()),
+        Some(true) => {
+            let mut parts = vec!["Работает".to_owned()];
+            if let Some(stats) = stats {
+                let forms = ["ответ", "ответа", "ответов"];
+                parts.push(format!(
+                    "{} {}",
+                    stats.answered,
+                    style::plural(stats.answered, forms)
+                ));
+            }
+            if let Some((_, Some(switched))) = web {
+                let seconds = now_ms.saturating_sub(switched) / 1000;
+                parts.push(format!("VPN переключён {}", style::ago(seconds)));
+            }
+            (Tone::Ok, parts.join(" · "))
+        }
+    }
 }
 
 fn row(label: &str, (tone, text): Status) -> String {
@@ -108,6 +153,42 @@ mod tests {
             ide_display_status(&status),
             (Tone::Warn, "Переустановите Antigravity IDE")
         );
+    }
+
+    #[test]
+    fn service_row_says_whether_it_runs_and_what_it_did() {
+        use crate::net::relay::ServiceStats;
+        let stats = Some(ServiceStats {
+            started_ms: 0,
+            answered: 128,
+        });
+        let now = 1_000_000;
+        assert_eq!(
+            service_status(
+                Some(true),
+                true,
+                stats.clone(),
+                Some((true, Some(now - 300_000))),
+                now
+            ),
+            (
+                Tone::Ok,
+                "Работает · 128 ответов · VPN переключён 5 мин назад".into()
+            )
+        );
+        assert_eq!(
+            service_status(Some(true), true, None, Some((false, None)), now),
+            (Tone::Ok, "Работает".into())
+        );
+        assert_eq!(
+            service_status(Some(false), true, stats.clone(), None, now).0,
+            Tone::Warn
+        );
+        assert_eq!(
+            service_status(Some(false), false, stats, None, now),
+            (Tone::Muted, "Выключена".into())
+        );
+        assert_eq!(service_status(None, true, None, None, now).0, Tone::Warn);
     }
 
     #[test]

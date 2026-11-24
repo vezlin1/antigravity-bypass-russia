@@ -83,6 +83,27 @@ pub fn status(tone: Tone, text: &str) -> String {
     paint(tone, &format!("{} {text}", tone.icon()))
 }
 
+/// Russian plural form for `count`: forms are for 1, 2–4 and 5+ ("ответ",
+/// "ответа", "ответов"); 11–14 take the last one.
+pub fn plural(count: u64, forms: [&'static str; 3]) -> &'static str {
+    match (count % 10, count % 100) {
+        (_, 11..=14) => forms[2],
+        (1, _) => forms[0],
+        (2..=4, _) => forms[1],
+        _ => forms[2],
+    }
+}
+
+/// "только что", "5 мин назад", "3 ч назад", "2 дн назад".
+pub fn ago(seconds: u64) -> String {
+    match seconds {
+        0..=59 => "только что".into(),
+        60..=3599 => format!("{} мин назад", seconds / 60),
+        3600..=86_399 => format!("{} ч назад", seconds / 3600),
+        _ => format!("{} дн назад", seconds / 86_400),
+    }
+}
+
 /// Characters a string takes on screen, without colour codes.
 pub fn visible_width(text: &str) -> usize {
     let mut width = 0;
@@ -280,6 +301,29 @@ mod tests {
         assert_eq!(visible_width(text), 9);
         assert_eq!(strip(text), "✓ Включён");
         assert_eq!(visible_width("Обход"), 5);
+    }
+
+    #[test]
+    fn plurals_and_elapsed_time_read_naturally() {
+        let forms = ["ответ", "ответа", "ответов"];
+        assert_eq!(
+            [1, 2, 5, 11, 12, 21, 22, 111, 1001].map(|n| plural(n, forms)),
+            [
+                "ответ",
+                "ответа",
+                "ответов",
+                "ответов",
+                "ответов",
+                "ответ",
+                "ответа",
+                "ответов",
+                "ответ"
+            ]
+        );
+        assert_eq!(ago(30), "только что");
+        assert_eq!(ago(300), "5 мин назад");
+        assert_eq!(ago(7200), "2 ч назад");
+        assert_eq!(ago(200_000), "2 дн назад");
     }
 
     #[test]

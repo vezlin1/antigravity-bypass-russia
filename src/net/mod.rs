@@ -473,6 +473,15 @@ pub enum SetupStage {
     Saving,
 }
 
+/// Whether the web versions of Gemini and AI Studio go through the bypass
+/// now, and when the service last switched them after a VPN change.
+pub fn web_rules_status() -> Option<(bool, Option<u64>)> {
+    #[cfg(windows)]
+    return web_rules::status();
+    #[cfg(not(windows))]
+    None
+}
+
 /// A plain-language name for a Google server, for on-screen text.
 pub fn server_label(host: &str) -> &'static str {
     match host.trim_start_matches('.') {
@@ -821,6 +830,7 @@ fn apply_dns_rules_with(
         udp_fallback: udp_ips.clone(),
         skip_primary,
         via_relay: false,
+        switched_at_ms: None,
     };
     #[cfg(not(target_os = "linux"))]
     let agent_rules: Vec<_> = agent_rules
