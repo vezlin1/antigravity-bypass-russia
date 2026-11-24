@@ -558,19 +558,209 @@ fn check_vpn_before_setup() -> bool {
     }
 }
 pub fn handle_manual_path() {
-    let input = prompt("Путь к папке или файлу Antigravity: ");
+    use crate::core::install_paths;
+    if install_paths::saved().is_empty() {
+        add_manual_path();
+        return;
+    }
+    loop {
+        let saved = install_paths::saved();
+        if saved.is_empty() {
+            return;
+        }
+        clear_screen();
+        banner();
+        println!("  ПУТИ К ANTIGRAVITY\n");
+        println!("  Сохранённые пути:");
+        for (index, path) in saved.iter().enumerate() {
+            let note = if path.exists() {
+                ""
+            } else {
+                "  \x1b[90m(нет на диске)\x1b[0m"
+            };
+            println!("    {}. {}{note}", index + 1, display_path(path));
+        }
+        println!("\n  [1]  Добавить путь");
+        println!("  [2]  Убрать сохранённый путь");
+        println!("\n  [0]  Назад\n");
+        match prompt("Выберите действие [0-2]: ").as_str() {
+            "1" => {
+                add_manual_path();
+                return;
+            }
+            "2" => remove_manual_path(&saved),
+            "0" | "" => return,
+            _ => {
+                println!("\x1b[31mНеверный выбор.\x1b[0m");
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
+    }
+}
+
+fn add_manual_path() {
+    use crate::core::install_paths;
+    let input = prompt("Путь к папке или файлу Antigravity (Enter — отмена): ");
     if input.is_empty() {
         return;
     }
-    let root = expand_env_vars(input.trim().trim_matches('"'));
-    match crate::core::install_paths::remember(&root) {
-        Ok((root, targets)) => {
-            println!("  Путь сохранён для пункта [1]: {}", display_path(&root));
-            show_result(patch_targets(targets).succeeded());
+    let path = expand_env_vars(input.trim_matches('"'));
+    let (root, targets) = match install_paths::inspect(&path) {
+        Ok(found) => found,
+        Err(error) => {
+            operation_error("Не удалось добавить путь к Antigravity", &error);
+            pause();
+            return;
         }
-        Err(error) => operation_error("Не удалось добавить путь к Antigravity", &error),
+    };
+    println!("\n  Найдено в {}:", display_path(&root));
+    print_found_targets(&root, &targets);
+    println!("\n  [1]  Сохранить путь и настроить эти файлы");
+    println!("  [0]  Отмена — ничего не сохранять\n");
+    if choose(&["1", "0"]) != "1" {
+        println!("  Путь не сохранён.");
+        pause();
+        return;
+    }
+    if let Err(error) = install_paths::save(&root) {
+        operation_error("Не удалось сохранить путь", &error);
+        pause();
+        return;
+    }
+    println!(
+        "  Путь сохранён, пункты [1] и [6] будут его учитывать: {}",
+        display_path(&root)
+    );
+    show_result(patch_targets(targets).succeeded());
+    pause();
+}
+
+fn remove_manual_path(saved: &[std::path::PathBuf]) {
+    use crate::core::detector::found_automatically;
+    use crate::core::patcher::{check_target_state, BinaryState};
+    let choice = prompt(&format!(
+        "Номер пути, который убрать [1-{}], Enter — отмена: ",
+        saved.len()
+    ));
+    let Some(root) = choice
+        .parse::<usize>()
+        .ok()
+        .and_then(|number| saved.get(number.checked_sub(1)?))
+    else {
+        if !choice.is_empty() {
+            println!("  Нет пути с таким номером.");
+            pause();
+        }
+        return;
+    };
+    // Without the saved path, rollback no longer finds files that only it
+    // pointed to; offer to restore them first.
+    let automatic = root.exists() && found_automatically(root);
+    if root.exists() && !automatic {
+        if let Err(error) = recover_targets_in_path(root) {
+            operation_error("Не удалось восстановить прерванную запись", &error);
+            pause();
+            return;
+        }
+        let patched: Vec<_> = find_targets_in_path(root)
+            .into_iter()
+            .filter(|target| {
+                matches!(
+                    check_target_state(target),
+                    BinaryState::Patched | BinaryState::PartiallyPatched
+                )
+            })
+            .collect();
+        if !patched.is_empty() {
+            println!("\n  В {} есть пропатченные файлы:", display_path(root));
+            print_found_targets(root, &patched);
+            println!("  Без сохранённого пути пункт [6] их не найдёт.\n");
+            println!("  [1]  Вернуть исходные файлы и убрать путь");
+            println!("  [2]  Только убрать путь — файлы останутся пропатченными");
+            println!("  [0]  Отмена\n");
+            match choose(&["1", "2", "0"]) {
+                "1" => {
+                    if !restore_targets(patched) {
+                        eprintln!("\n  Путь не убран: сначала нужно вернуть исходные файлы.");
+                        pause();
+                        return;
+                    }
+                }
+                "2" => {}
+                _ => return,
+            }
+        }
+    }
+    match crate::core::install_paths::forget(root) {
+        Ok(_) => println!("  \x1b[92m✓\x1b[0m Путь убран: {}", display_path(root)),
+        Err(error) => operation_error("Не удалось убрать путь", &error),
+    }
+    if automatic {
+        println!("  Эта установка находится и без сохранённого пути: статус и пункты [1] и [6] по-прежнему её учитывают.");
     }
     pause();
+}
+
+/// Restores the given files after the application is closed.
+fn restore_targets(targets: Vec<FoundTarget>) -> bool {
+    let paths: Vec<_> = targets.iter().map(|target| target.path.clone()).collect();
+    if !ensure_application_closed(&paths, "возврат исходных файлов") {
+        return false;
+    }
+    let mut ok = true;
+    for target in targets {
+        ok &= print_patch_result(&target, restore_target(&target));
+    }
+    if let Err(error) = clear_ide_v8_caches() {
+        operation_error("Не удалось очистить кэш приложения", &error);
+        ok = false;
+    }
+    ok
+}
+
+fn print_found_targets(root: &Path, targets: &[FoundTarget]) {
+    use crate::core::patcher::{check_target_state, BinaryState};
+    for target in targets {
+        let file = target
+            .path
+            .strip_prefix(root)
+            .ok()
+            .filter(|relative| !relative.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new(&target.name));
+        let state = match check_target_state(target) {
+            BinaryState::Patched => "пропатчено",
+            BinaryState::Stock => "не пропатчено",
+            BinaryState::PartiallyPatched => "пропатчено частично",
+            BinaryState::Unknown => "версия не распознана",
+        };
+        println!(
+            "    • {} — {} \x1b[90m({state})\x1b[0m",
+            component_name(target.kind),
+            file.display()
+        );
+    }
+}
+
+fn component_name(kind: crate::core::detector::TargetKind) -> &'static str {
+    use crate::core::detector::TargetKind;
+    match kind {
+        TargetKind::LanguageServer => "Antigravity",
+        TargetKind::IdeMainJs | TargetKind::IdeAsar => "Antigravity IDE",
+        TargetKind::AgyCli => "Antigravity CLI",
+    }
+}
+
+/// Asks until one of `options` is entered.
+fn choose(options: &[&'static str]) -> &'static str {
+    loop {
+        let answer = prompt(&format!(
+            "  Введите {} и нажмите Enter: ",
+            options.join(", ")
+        ));
+        if let Some(option) = options.iter().find(|option| **option == answer) {
+            return option;
+        }
+    }
 }
 fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool {
     let running = crate::system::file_lock::running_applications(paths).and_then(|mut running| {
@@ -793,7 +983,7 @@ pub fn run_app() {
         println!("  \x1b[92m[1]\x1b[0m  Включить обход");
         println!("  [2]  Настроить только файлы приложения");
         println!("  [3]  Настроить только подключение");
-        println!("  [4]  Указать путь к Antigravity");
+        println!("  [4]  Пути к Antigravity");
         println!("  \x1b[96m[5]\x1b[0m  Проверить подключение");
         println!("  \x1b[91m[6]\x1b[0m  Отключить обход");
         println!("  [7]  Сохранить диагностику");

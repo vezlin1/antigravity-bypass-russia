@@ -1,4 +1,5 @@
-use super::detector::{find_targets_in_path, recover_targets_in_path, FoundTarget};
+use super::detector::{find_targets_in_path, recover_targets_in_path, FoundTarget, TargetKind};
+use super::patcher::{check_target_state, BinaryState};
 use crate::net::config;
 use crate::system::{env::mask_path, fs_utils::robust_write_file};
 use std::fs;
@@ -17,7 +18,8 @@ fn read_paths(settings: &Path) -> Result<Vec<PathBuf>, String> {
     }
 }
 
-pub(super) fn saved() -> Vec<PathBuf> {
+/// Saved paths, including ones no longer on disk.
+pub fn saved() -> Vec<PathBuf> {
     read_paths(&settings_path())
         .unwrap_or_default()
         .into_iter()
@@ -57,14 +59,56 @@ fn validate(path: &Path) -> Result<(PathBuf, Vec<FoundTarget>), String> {
     let root = fs::canonicalize(path)
         .map_err(|error| format!("Не удалось открыть {}: {error}", mask_path(path)))?;
     reject_gemini(&root)?;
-    let targets = find_targets_in_path(&root);
-    if targets.is_empty() {
+    let found = find_targets_in_path(&root);
+    if found.is_empty() {
         return Err(format!(
             "Файлы Antigravity не найдены в {}. Проверьте путь к установке.",
             mask_path(path)
         ));
     }
+    // app.asar and main.js exist in every Electron/VS Code application; only
+    // ones holding the Antigravity code (patched or not) identify Antigravity.
+    let targets: Vec<_> = found
+        .into_iter()
+        .filter(|target| {
+            !matches!(target.kind, TargetKind::IdeAsar | TargetKind::IdeMainJs)
+                || check_target_state(target) != BinaryState::Unknown
+        })
+        .collect();
+    if targets.is_empty() {
+        return Err(format!(
+            "В {} нет кода Antigravity: похоже, это другое приложение или неподдерживаемая версия. Укажите папку Antigravity App или IDE либо файл Antigravity CLI (agy.exe).",
+            mask_path(path)
+        ));
+    }
     Ok((root, targets))
+}
+
+/// Checks a path without saving it, so the user can confirm what was found.
+pub fn inspect(path: &Path) -> Result<(PathBuf, Vec<FoundTarget>), String> {
+    validate(path)
+}
+
+pub fn save(root: &Path) -> Result<(), String> {
+    config::ensure_directory()?;
+    write_path(&settings_path(), root)
+}
+
+/// Removes a saved path; `false` when it was not saved.
+pub fn forget(root: &Path) -> Result<bool, String> {
+    remove_path(&settings_path(), root)
+}
+
+fn remove_path(settings: &Path, root: &Path) -> Result<bool, String> {
+    let mut paths = read_paths(settings)?;
+    let before = paths.len();
+    paths.retain(|path| path != root);
+    if paths.len() == before {
+        return Ok(false);
+    }
+    let bytes = serde_json::to_vec_pretty(&paths).map_err(|error| error.to_string())?;
+    robust_write_file(settings, &bytes)?;
+    Ok(true)
 }
 
 fn write_path(settings: &Path, root: &Path) -> Result<(), String> {
@@ -74,13 +118,6 @@ fn write_path(settings: &Path, root: &Path) -> Result<(), String> {
     paths.insert(0, root.to_path_buf());
     let bytes = serde_json::to_vec_pretty(&paths).map_err(|error| error.to_string())?;
     robust_write_file(settings, &bytes)
-}
-
-pub fn remember(path: &Path) -> Result<(PathBuf, Vec<FoundTarget>), String> {
-    let (root, targets) = validate(path)?;
-    config::ensure_directory()?;
-    write_path(&settings_path(), &root)?;
-    Ok((root, targets))
 }
 
 #[cfg(test)]
@@ -95,9 +132,9 @@ mod tests {
         let mut installations = Vec::new();
         for folder in ["Антигравити App", "Antigravity IDE"] {
             let install = temp.path().join(folder);
-            let resources = install.join("resources");
-            fs::create_dir_all(&resources).unwrap();
-            fs::write(resources.join("app.asar"), b"fixture").unwrap();
+            let out = install.join("resources/app/out");
+            fs::create_dir_all(&out).unwrap();
+            fs::write(out.join("main.js"), STOCK_JS).unwrap();
             let (root, targets) = validate(&install).unwrap();
             assert_eq!(targets.len(), 1);
             write_path(&settings, &root).unwrap();
@@ -110,6 +147,52 @@ mod tests {
             super::super::detector::find_installation_targets(&reloaded).len(),
             2
         );
+    }
+
+    const STOCK_JS: &[u8] = b"x.resetIsTierGCPTos(),x.isGoogleInternal";
+
+    #[test]
+    fn other_electron_applications_are_rejected_and_only_antigravity_files_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        // Slack/Discord-like archive and a VS Code-like main.js without the
+        // Antigravity code.
+        let install = temp.path().join("Other app");
+        let out = install.join("resources/app/out");
+        fs::create_dir_all(&out).unwrap();
+        fs::write(install.join("resources/app.asar"), b"fixture").unwrap();
+        fs::write(out.join("main.js"), b"require('./bootstrap')").unwrap();
+        assert!(!find_targets_in_path(&install).is_empty());
+        assert!(validate(&install)
+            .unwrap_err()
+            .contains("нет кода Antigravity"));
+
+        // The Antigravity app: its own archive has no IDE code, its language
+        // server identifies it.
+        let bin = install.join("resources/bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("language_server.exe"), b"MZ").unwrap();
+        let (_, targets) = validate(&install).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].kind, TargetKind::LanguageServer);
+
+        // A patched IDE file is still recognised, so it can be rolled back.
+        fs::write(out.join("main.js"), b"x.resetIsTierGCPTos(),true").unwrap();
+        assert_eq!(validate(&install).unwrap().1.len(), 2);
+    }
+
+    #[test]
+    fn saved_path_can_be_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = temp.path().join("manual-installations.json");
+        let (first, second) = (temp.path().join("first"), temp.path().join("second"));
+        assert!(!remove_path(&settings, &first).unwrap());
+        write_path(&settings, &first).unwrap();
+        write_path(&settings, &second).unwrap();
+        assert!(remove_path(&settings, &first).unwrap());
+        assert_eq!(read_paths(&settings).unwrap(), vec![second.clone()]);
+        assert!(!remove_path(&settings, &first).unwrap());
+        assert!(remove_path(&settings, &second).unwrap());
+        assert!(read_paths(&settings).unwrap().is_empty());
     }
 
     #[test]

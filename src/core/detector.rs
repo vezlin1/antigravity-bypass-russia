@@ -113,10 +113,21 @@ fn is_already_contained(installs: &[PathBuf], candidate: &Path) -> bool {
 }
 
 pub fn find_installations() -> Vec<PathBuf> {
-    let mut installs: Vec<_> = super::install_paths::saved()
-        .into_iter()
-        .filter(|path| path.exists())
-        .collect();
+    find_installations_with(super::install_paths::saved())
+}
+
+/// Whether discovery finds `path` without the user's saved paths, so that
+/// forgetting a saved path does not hide it from status and rollback.
+pub fn found_automatically(path: &Path) -> bool {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    find_installations_with(Vec::new()).iter().any(|root| {
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+        path.starts_with(&root)
+    })
+}
+
+fn find_installations_with(saved: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut installs: Vec<_> = saved.into_iter().filter(|path| path.exists()).collect();
 
     #[cfg(target_os = "windows")]
     {
