@@ -50,5 +50,25 @@ overflow-checks = false
 rpath = false
 
 # Official CLI fixtures are ~100 MB; unoptimized scans take minutes per test.
+# The scans run inside these dependencies, so only they are optimized: the crate
+# itself compiles at opt-level 0, which is what every edit-and-test cycle rebuilds.
 [profile.test]
-opt-level = 2
+opt-level = 0
+
+[profile.test.package.regex]
+opt-level = 3
+
+[profile.test.package.regex-automata]
+opt-level = 3
+
+[profile.test.package.regex-syntax]
+opt-level = 3
+
+[profile.test.package.memchr]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3
+
+[profile.test.package.object]
+opt-level = 3
