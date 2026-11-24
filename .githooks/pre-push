@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-push: `cargo check` and the unit + socket tests on the exact commit being pushed.
+# Pre-push: `cargo check`, the unit tests and the CLI smoke tests on the exact commit being pushed.
 #
 # Enabled per clone with:  git config core.hooksPath .githooks
 # Runs in a reusable detached worktree under target/pre-push, so uncommitted edits in
@@ -34,7 +34,7 @@ for sha in $(printf '%s\n' "${shas[@]}" | sort -u); do
     (
         cd "$tree"
         cargo check --locked --quiet --bin antigravity-bypass-russia
-        cargo test --locked --quiet --bin antigravity-bypass-russia --test socket_tests
+        cargo test --locked --quiet --bin antigravity-bypass-russia --test cli
     )
 done
 

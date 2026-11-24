@@ -36,7 +36,7 @@
 ## Воспроизведение
 
 ```sh
-cargo test --locked --bin antigravity-bypass-russia --test socket_tests
+cargo test --locked --bin antigravity-bypass-russia --test cli
 cargo build --locked
 sudo python3 tests/verify_linux_runtime.py target/debug/antigravity-bypass-russia
 python3.12 tests/verify_cli_profiles.py --target x86_64-unknown-linux-gnu

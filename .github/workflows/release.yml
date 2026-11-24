@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: .github/scripts
-      # A green full checks.yml run on this exact commit already ran the unit, socket and
+      # A green full checks.yml run on this exact commit already ran the unit, CLI and
       # fixture tests and the packaging checks; the release does not repeat them.
       - name: Find a green checks run for this commit
         id: verified

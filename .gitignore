@@ -1,151 +1,53 @@
-# ==============================================================================
-# Git Ignore Rules for ANTIGRAVITY-BYPASS-RUSSIA
-# ==============================================================================
-
-# --- Rust / Cargo ---
+# Build output: cargo, CI fixtures and release packaging
 /target/
 /target-*/
-/dist/
 /.ci/
-/.agents/
+/dist/
 **/*.rs.bk
-*.pdb
-*.d
-*.rlib
-*.rmeta
-*.o
-*.obj
-*.a
-*.lib
-*.exp
-*.ilk
-*.stackdump
 
-# --- Compiled binaries ---
-*.exe
-*.dll
-*.so
-*.dylib
-*.node
-*.bin
+# The program built or copied into the project folder
+/*.exe
 /antigravity-bypass-russia
 /ag_dns
 
-# --- Archives ---
-*.zip
-*.tar
-*.tar.gz
-*.tar.xz
-*.7z
-*.rar
-
-# --- Backups & temp ---
-*.bak
-*.original
-*.orig
-*.rej
-*.tmp
-*.tmp*
-.tmp_*
-tmp_*
-configs/*.local.json
-upstream.conf
-proxy_rank.conf
-proxy_host_routes.conf
-mode.conf
-iface.conf
-
-# --- Electron / Node leftovers ---
-*.asar
-*.asar.unpacked/
-node_modules/
-
-# --- Logs ---
-*.log
-
-# --- Python (used by the macOS script) ---
+# Python caches of the build and check scripts
 __pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
 
-# --- Secrets ---
+# Files the program writes when run from the project folder
+antigravity-diagnostics-*.json
+*.log
+configs/*.local.json
+
+# Signing keys and secrets
 .env
 .env.*
 *.pem
 *.key
 *.pfx
 *.p12
-*.cer
-*.crt
 
-# --- OS ---
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-.AppleDouble
-.LSOverride
-ehthumbs.db
-Thumbs.db
-desktop.ini
-$RECYCLE.BIN/
-
-# --- Editors / AI ---
+# Editors and AI tools
 .idea/
 .vscode/
 .vs/
-*.code-workspace
-.fleet/
-.zed/
-*.swp
-*.swo
-*.swn
-*~
-*.sublime-project
-*.sublime-workspace
-/.codegraph/
-/.codex/
-.gemini/
 .claude/
 .cursor/
-.copilot/
-
-# graft's local graph cache — regenerable, not committed (run `graft build`).
+.gemini/
+.codex/
+.agents/
+/.codegraph/
 /graft/
 .ignore
 
-# Verified local patch state
-*.ag-backups/
-owned_routes.json
-tcp_snapshot.json
-cli_endpoint.json
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
 
-# Local DNS settings, connection state and legacy network backups
-/network.json
-/network-user.json
-network-update.lock
-hosts-mode
-route-health.json
-route-health.lock
-tcp_backup.conf
-doh_backup.conf
-custom_upstream_proxy.conf
-
-# Diagnostic exports and interrupted file transactions
-antigravity-diagnostics-*.json
-.*.ag-transaction-*/
-hosts.antigravity-recovery-*
-ag_dns-update-*
-
-# Local project and testing notes
+# Local notes and the macOS builder kept on the developer's machine
 /PROJECT.md
 /TEST_INFRA.md
 /TEST_READY.md
-
-# Local macOS builder (kept on the developer's machine)
 /build_macos.command
 /scripts/build_macos_release.sh
 /tests/verify_macos_builder.py

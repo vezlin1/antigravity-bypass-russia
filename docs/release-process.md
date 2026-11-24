@@ -22,7 +22,7 @@ GitHub уже связывает это соавторство с аккаунт
 ```text
 rustfmt --edition 2021 --check src/main.rs build.rs
 cargo test --locked --bin antigravity-bypass-russia
-cargo test --locked --test socket_tests
+cargo test --locked --test cli
 python tests/verify_cli_profiles.py
 python tests/verify_wrappers.py
 python tests/verify_macos_bundle.py
@@ -35,7 +35,7 @@ python tests/verify_macos_source_bundle.py
 версия, справка, status и сохранение локальной диагностики без включения обхода.
 
 Workflow `Regression checks` запускает тесты на Windows, Apple Silicon и Intel,
-включая `socket_tests`. Его можно запустить вручную для выбранной ветки без сборки
+включая проверку самой программы (`tests/cli.rs`). Его можно запустить вручную для выбранной ветки без сборки
 релиза. DNS-тесты используют управляемое время, чтобы проверять порядок ответов
 и сроки ожидания независимо от загрузки runner. Проверка файлов на Mac повторяет
 кратковременный конфликт; постоянная занятость и ошибки проверки блокируют запись.
