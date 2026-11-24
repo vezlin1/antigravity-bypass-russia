@@ -278,7 +278,7 @@ pub fn registered_state() -> Result<bool, String> {
 pub fn running_state() -> Result<bool, String> {
     #[cfg(windows)]
     {
-        crate::system::process::image_running(EXE_NAME)
+        crate::system::process::image_running_at(EXE_NAME, &installed_exe())
             .map_err(|e| format!("Проверка процесса DNS-службы: {e}"))
     }
     #[cfg(target_os = "linux")]

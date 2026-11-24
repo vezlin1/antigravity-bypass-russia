@@ -299,14 +299,26 @@ fn process_tree(entries: &[ProcessEntry], image: &str, own_pid: u32) -> Vec<u32>
     selected
 }
 
-/// Whether a process with this image file name is running (`tasklist /FI`
-/// without starting a process).
+/// Whether a process with this image file name runs from `expected`. The
+/// rule matches `terminate_image_tree`, so a same-named copy elsewhere (a dev
+/// build, an unpacked archive) neither counts as the service nor blocks it.
+/// A process whose path cannot be read (a SYSTEM service seen without admin
+/// rights) counts as running, as a name match always did.
 #[cfg(windows)]
-pub fn image_running(image: &str) -> Result<bool, String> {
+pub fn image_running_at(image: &str, expected: &std::path::Path) -> Result<bool, String> {
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     let own_pid = std::process::id();
     Ok(process_entries()?
         .iter()
-        .any(|entry| matches_image(entry, image, own_pid)))
+        .filter(|entry| matches_image(entry, image, own_pid))
+        .any(|entry| {
+            let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, entry.pid) };
+            if raw.is_null() {
+                return true;
+            }
+            let handle = Handle(raw);
+            image_path(handle.0).is_none_or(|path| same_image_path(&path, expected))
+        }))
 }
 
 /// Descendants of `roots` that are provably theirs. Windows reuses PIDs, so a
@@ -530,13 +542,21 @@ mod tree_windows_tests {
         let mut wanted = spawn(&expected);
         let mut stranger = spawn(&other);
         std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(super::image_running_at(&image, &expected).unwrap());
         super::terminate_image_tree(&image, Some(&expected), std::time::Duration::from_secs(2))
             .unwrap();
         assert!(wanted.try_wait().unwrap().is_some());
         let survived = stranger.try_wait().unwrap().is_none();
+        // The copy left running is not mistaken for the stopped service, so
+        // rollback and restart do not wait for it.
+        let blocked = super::image_running_at(&image, &expected).unwrap();
         let _ = stranger.kill();
         let _ = stranger.wait();
         assert!(survived, "a process from another folder was terminated");
+        assert!(
+            !blocked,
+            "a process from another folder counted as the service"
+        );
     }
 
     #[test]
@@ -569,13 +589,13 @@ mod tree_windows_tests {
             children.len() > 1,
             "child process did not start: {children:?}"
         );
-        assert!(super::image_running(&image).unwrap());
+        assert!(super::image_running_at(&image, &shell).unwrap());
 
         super::terminate_image_tree(&image, Some(&shell), std::time::Duration::from_secs(2))
             .unwrap();
 
         assert!(parent.try_wait().unwrap().is_some());
-        assert!(!super::image_running(&image).unwrap());
+        assert!(!super::image_running_at(&image, &shell).unwrap());
         let alive = super::process_entries().unwrap();
         for pid in &children {
             assert!(
