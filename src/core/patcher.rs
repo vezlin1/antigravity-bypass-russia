@@ -814,16 +814,33 @@ pub fn patch_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     result
 }
 
+/// The outcome when a plan has nothing to change.
+fn unchanged_outcome(existing: usize, kind: TargetKind) -> Result<PatchOutcome, String> {
+    if existing > 0 {
+        Ok(PatchOutcome::AlreadyPatched)
+    } else if matches!(kind, TargetKind::IdeAsar) {
+        Ok(PatchOutcome::NotApplicable)
+    } else {
+        Err("Версия/сигнатура не поддерживается; файл не изменён".into())
+    }
+}
+
 fn patch_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
     crate::system::fs_utils::recover_pending(&target.path)?;
     ensure_not_symlink(&target.path)?;
     let mut before = fs::read(&target.path).map_err(|e| e.to_string())?;
     let (legacy_x64, mut p) = match scan(&before, target.kind, Mode::Apply) {
         Scan::LegacyX64 => (true, None),
-        Scan::Plan(planned) => (
-            false,
-            Some(planned.map_err(|e| with_digest(e, &before))?.into_owned()),
-        ),
+        Scan::Plan(planned) => {
+            let planned = planned.map_err(|e| with_digest(e, &before))?;
+            let partial =
+                target.kind == TargetKind::AgyCli && planned.changes > 0 && planned.existing > 0;
+            // Nothing to write: answer without copying the (borrowed) file.
+            if planned.changes == 0 && !partial {
+                return unchanged_outcome(planned.existing, target.kind);
+            }
+            (false, Some(planned.into_owned()))
+        }
     };
     let partial_cli = target.kind == TargetKind::AgyCli
         && p.as_ref().is_some_and(|p| p.changes > 0 && p.existing > 0);
@@ -871,13 +888,7 @@ fn patch_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
     }
     let p = p.ok_or("Нет проверенного плана патча")?;
     if p.changes == 0 {
-        return if p.existing > 0 {
-            Ok(PatchOutcome::AlreadyPatched)
-        } else if matches!(target.kind, TargetKind::IdeAsar) {
-            Ok(PatchOutcome::NotApplicable)
-        } else {
-            Err("Версия/сигнатура не поддерживается; файл не изменён".into())
-        };
+        return unchanged_outcome(p.existing, target.kind);
     }
     ensure_file_closed(&target.path)?;
     let after = prepare_for_write(&target.path, p.data.into_owned(), target.kind)?;
