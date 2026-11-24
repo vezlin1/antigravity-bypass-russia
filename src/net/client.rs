@@ -431,6 +431,15 @@ fn query_targets(
         bind_socket_to_interface(&sock, if_index).ok()?;
     }
     let _ = sock.set_write_timeout(Some(timeout));
+    // A server listed twice answers once; counting it twice would wait out
+    // the whole timeout for a reply that never comes.
+    let mut unique: Vec<SocketAddrV4> = Vec::with_capacity(targets.len());
+    for target in targets {
+        if !unique.contains(target) {
+            unique.push(*target);
+        }
+    }
+    let targets = unique.as_slice();
     let mut pending = 0;
     for target in targets {
         // An unreachable server must not prevent asking the others.
@@ -545,6 +554,23 @@ mod fan_out_tests {
         worker.join().unwrap();
         assert_eq!(from, empty);
         assert!(answer_addrs(&reply).is_empty());
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        // The same server configured twice is asked once and does not cost
+        // the full timeout.
+        let (empty, worker) = server(vec![], 0);
+        let started = Instant::now();
+        let (_, from) = query_targets(
+            &query,
+            &[empty, empty],
+            0,
+            Duration::from_secs(1),
+            is_successful_response,
+            has_address,
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert_eq!(from, empty);
         assert!(started.elapsed() < Duration::from_millis(500));
     }
 }
