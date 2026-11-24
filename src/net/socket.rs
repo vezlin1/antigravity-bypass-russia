@@ -628,9 +628,7 @@ fn restore_if_current(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream, UdpSocket};
-    use std::time::Duration;
+    use std::net::UdpSocket;
     #[test]
     fn dns_rollback_ignores_unrelated_legacy_backup_but_preserves_current_errors() {
         let dir = tempfile::tempdir().unwrap();

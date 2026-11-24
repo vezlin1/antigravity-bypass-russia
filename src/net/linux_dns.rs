@@ -1,4 +1,6 @@
 //! Linux resolver ownership and passthrough. Only AI domains use SmartDNS.
+// Elsewhere the module is compiled only for its own tests.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 use serde::{Deserialize, Serialize};
 use std::{
     fs,

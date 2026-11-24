@@ -415,6 +415,8 @@ pub(super) fn flush_dns_cache() -> Result<(), String> {
     ];
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     let commands: &[(&str, &[&str])] = &[];
+    // Linux returns after the first working command and collects nothing.
+    #[cfg_attr(target_os = "linux", allow(unused_mut))]
     let mut errors: Vec<String> = Vec::new();
     for (program, args) in commands {
         match crate::system::command::output(program, *args) {
