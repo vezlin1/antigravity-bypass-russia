@@ -537,22 +537,30 @@ mod tests {
         p.bootstrap.push("192.0.2.2".parse().unwrap());
         let first: IpAddr = "192.0.2.1".parse().unwrap();
         let started = Instant::now();
-        let answer = race_exchanges(&p, TIMEOUT, Duration::from_secs(2), move |candidate, _| {
-            if candidate.bootstrap == [first] {
-                std::thread::sleep(Duration::from_millis(600));
-                Ok(a_reply(host, [142, 250, 1, 1]))
-            } else {
-                std::thread::sleep(Duration::from_secs(3));
-                Err("silent".into())
-            }
-        })
+        // A wide budget and a late system fallback keep both out of the
+        // measurement; only the grace after the first answer decides.
+        let answer = race_exchanges(
+            &p,
+            Duration::from_secs(6),
+            Duration::from_secs(10),
+            move |candidate, _| {
+                if candidate.bootstrap == [first] {
+                    std::thread::sleep(Duration::from_millis(1500));
+                    Ok(a_reply(host, [142, 250, 1, 1]))
+                } else {
+                    std::thread::sleep(Duration::from_secs(5));
+                    Err("silent".into())
+                }
+            },
+        )
         .unwrap();
         let elapsed = started.elapsed();
         assert_eq!(answer, a_reply(host, [142, 250, 1, 1]));
-        // 600 ms answer + 300 ms grace + 200 ms start delay of the second
-        // address; adding the whole first wait would end near 1.5 s.
-        assert!(elapsed >= Duration::from_millis(1000), "{elapsed:?}");
-        assert!(elapsed < Duration::from_millis(1300), "{elapsed:?}");
+        // 1500 ms answer + 300 ms grace + 200 ms start delay of the second
+        // address = 2.0 s. Adding the whole first wait instead would end near
+        // 3.3 s. The gap leaves 0.7 s for a slow, shared CI runner.
+        assert!(elapsed >= Duration::from_millis(1800), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(2700), "{elapsed:?}");
     }
 
     #[test]
