@@ -3,6 +3,14 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::ui::style::{self, fit, mark, paint, Tone};
+
+/// Visible characters on the spinner line: the frame width, so the line
+/// never wraps and can be redrawn in place.
+fn line_limit() -> usize {
+    style::width()
+}
+
 enum ProgressLine {
     Working(String),
     Detail(String),
@@ -136,32 +144,15 @@ struct RunningStage {
     started: Instant,
 }
 
-/// Visible characters on the spinner line; a wrapped line could not be
-/// redrawn in place.
-const LINE_LIMIT: usize = 76;
-
-fn fit(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_owned();
-    }
-    let mut short: String = text.chars().take(limit.saturating_sub(1)).collect();
-    short.push('…');
-    short
-}
-
 fn print_stage_result(stage: &RunningStage, ok: bool) {
     let seconds = stage.started.elapsed().as_secs();
-    let (mark, colour) = if ok {
-        ("✓", "\x1b[92m")
-    } else {
-        ("✗", "\x1b[91m")
-    };
+    let tone = if ok { Tone::Ok } else { Tone::Error };
     let time = if seconds > 0 {
-        format!("  \x1b[90m{seconds} с\x1b[0m")
+        format!("  {}", paint(Tone::Muted, &format!("{seconds} с")))
     } else {
         String::new()
     };
-    println!("\r\x1b[2K  {colour}{mark}\x1b[0m {}{time}", stage.done);
+    println!("\r\x1b[2K  {} {}{time}", mark(tone), stage.done);
 }
 
 fn animate_progress(lines: mpsc::Receiver<ProgressLine>) {
@@ -210,23 +201,29 @@ fn animate_progress(lines: mpsc::Receiver<ProgressLine>) {
                 let seconds = stage.started.elapsed().as_secs();
                 let time = format!("  {seconds} с");
                 let time_width = time.chars().count();
-                let title = fit(&stage.running, LINE_LIMIT - time_width);
-                let room = LINE_LIMIT.saturating_sub(title.chars().count() + time_width + 3);
+                let limit = line_limit();
+                let title = fit(&stage.running, limit - time_width);
+                let room = limit.saturating_sub(title.chars().count() + time_width + 3);
                 let note = match activity {
-                    Some((text, _)) if room > 8 => format!(" \x1b[90m· {}\x1b[0m", fit(text, room)),
+                    Some((text, _)) if room > 8 => {
+                        format!(" {}", paint(Tone::Muted, &format!("· {}", fit(text, room))))
+                    }
                     _ => String::new(),
                 };
-                Some(format!("{title}{note}\x1b[90m{time}\x1b[0m"))
+                Some(format!("{title}{note}{}", paint(Tone::Muted, &time)))
             }
             (None, Some((text, since))) => Some(format!(
-                "{}  \x1b[90m{} с\x1b[0m",
-                fit(text, LINE_LIMIT - 8),
-                since.elapsed().as_secs()
+                "{}  {}",
+                fit(text, line_limit() - 8),
+                paint(Tone::Muted, &format!("{} с", since.elapsed().as_secs()))
             )),
             (None, None) => None,
         };
         if let Some(line) = line {
-            print!("\r\x1b[2K  \x1b[96m{frame}\x1b[0m {line}");
+            print!(
+                "\r\x1b[2K  {} {line}",
+                paint(Tone::Accent, &frame.to_string())
+            );
             let _ = io::stdout().flush();
         }
     }
@@ -271,7 +268,7 @@ pub fn prompt(text: &str) -> String {
     match io::stdin().read_line(&mut buf) {
         Ok(0) => {
             // EOF (Ctrl+D) detected, exit cleanly
-            println!("\n\x1b[92m[✓] Завершение работы.\x1b[0m");
+            println!("\n  {}", style::status(Tone::Muted, "Завершение работы."));
             std::process::exit(0);
         }
         Ok(_) => buf.trim().to_string(),

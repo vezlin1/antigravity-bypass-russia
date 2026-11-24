@@ -7,6 +7,7 @@ use crate::core::v8_cache::clear_ide_v8_caches;
 use crate::net::{apply_dns_rules, remove_dns_rules, NetworkSetup, SetupProgress, SetupStage};
 use crate::system::env::{display_path, expand_env_vars};
 use crate::ui::dashboard::{banner, print_dashboard};
+use crate::ui::style::{self, mark, paint, Tone};
 use crate::ui::terminal::{clear_screen, pause, prompt, Progress, Steps};
 use std::path::Path;
 use std::time::Instant;
@@ -132,11 +133,13 @@ mod setup_tests {
 }
 
 fn print_error_details() {
+    let log = crate::net::config::directory().join("network-events.log");
     println!(
-        "  \x1b[90mЖурнал для поддержки: {}\x1b[0m",
-        crate::net::config::directory()
-            .join("network-events.log")
-            .display()
+        "  {}",
+        paint(
+            Tone::Muted,
+            &format!("Журнал для поддержки: {}", log.display())
+        )
     );
 }
 
@@ -149,13 +152,13 @@ fn operation_error(message: &str, detail: &str) {
 fn print_problem(indent: usize, message: &str, cause: &str, advice: Option<&str>) {
     crate::net::relay::log_event(&format!("{message}: {cause}"));
     let pad = " ".repeat(indent);
-    eprintln!("{pad}\x1b[91m✗\x1b[0m {message}");
+    eprintln!("{pad}{} {message}", mark(Tone::Error));
     let readable = readable_cause(cause);
     if !readable.is_empty() {
-        eprintln!("{pad}  \x1b[90mПричина:\x1b[0m {readable}");
+        eprintln!("{pad}  {} {readable}", paint(Tone::Muted, "Причина:"));
     }
     if let Some(advice) = advice.or_else(|| advice_for(cause)) {
-        eprintln!("{pad}  \x1b[96mЧто сделать:\x1b[0m {advice}");
+        eprintln!("{pad}  {} {advice}", paint(Tone::Accent, "Что сделать:"));
     }
 }
 
@@ -291,7 +294,11 @@ fn print_patch_result(
                 PatchOutcome::Restored | PatchOutcome::AlreadyStock => "возвращён к исходному",
                 _ => "настроен",
             };
-            println!("      \x1b[92m✓\x1b[0m {label} \x1b[90m— {status}\x1b[0m");
+            println!(
+                "      {} {label} {}",
+                mark(Tone::Ok),
+                paint(Tone::Muted, &format!("— {status}"))
+            );
             true
         }
         Err(error) => {
@@ -303,7 +310,7 @@ fn print_patch_result(
             );
             if cfg!(target_os = "macos") && app_management_blocked(&t.path, &error) {
                 for line in APP_MANAGEMENT_HINT {
-                    eprintln!("        \x1b[93m{line}\x1b[0m");
+                    eprintln!("        {}", paint(Tone::Warn, line));
                 }
             }
             false
@@ -521,10 +528,14 @@ fn patch_installations(steps: &Steps) -> FileSetupOutcome {
 }
 fn show_result(ok: bool) {
     if ok {
-        println!("\n  \x1b[92m✓ Готово.\x1b[0m Перезапустите Antigravity, чтобы изменения вступили в силу.");
+        println!(
+            "\n  {} Перезапустите Antigravity, чтобы изменения вступили в силу.",
+            style::status(Tone::Ok, "Готово.")
+        );
     } else {
         eprintln!(
-            "\n  \x1b[91m✗ Не всё получилось.\x1b[0m Причина и что сделать — в строках с ✗ выше."
+            "\n  {} Причина и что сделать — в строках с ✗ выше.",
+            style::status(Tone::Error, "Не всё получилось.")
         );
         print_error_details();
     }
@@ -676,34 +687,37 @@ const UNLOCK_VERDICTS: Verdicts = (
 );
 
 fn finish_setup(status: SetupStatus, started: Instant, verdicts: Verdicts, summary: &Summary) {
-    let (colour, mark, title) = match status {
-        SetupStatus::Complete => ("\x1b[92m", "✓", verdicts.0),
-        SetupStatus::Limited => ("\x1b[93m", "!", verdicts.1),
-        SetupStatus::Failed => ("\x1b[91m", "✗", verdicts.2),
+    let (tone, title) = match status {
+        SetupStatus::Complete => (Tone::Ok, verdicts.0),
+        SetupStatus::Limited => (Tone::Warn, verdicts.1),
+        SetupStatus::Failed => (Tone::Error, verdicts.2),
     };
     let seconds = started.elapsed().as_secs();
     let time = format!("{}:{:02}", seconds / 60, seconds % 60);
-    let width = 64usize;
-    let padding = width.saturating_sub(title.chars().count() + time.chars().count() + 2);
-    println!("\n  \x1b[90m{}\x1b[0m", "─".repeat(width));
+    let headline = style::bold(&style::status(tone, title));
+    let padding =
+        style::width().saturating_sub(style::visible_width(&headline) + time.chars().count());
+    println!("\n{}", style::rule());
     println!(
-        "  {colour}{mark} {title}\x1b[0m{}\x1b[90m{time}\x1b[0m",
-        " ".repeat(padding)
+        "  {headline}{}{}",
+        " ".repeat(padding),
+        paint(Tone::Muted, &time)
     );
-    println!("  \x1b[90m{}\x1b[0m", "─".repeat(width));
+    println!("{}", style::rule());
     match (status, summary.next) {
         (SetupStatus::Failed, _) => {
             println!("  Причина и что сделать — в строке с ✗ выше.");
         }
-        (_, Some(next)) => println!("  \x1b[96mЧто дальше:\x1b[0m {next}"),
-        (_, None) => println!(
-            "  \x1b[96mЧто дальше:\x1b[0m перезапустите Antigravity и войдите в аккаунт Google."
+        (_, next) => println!(
+            "  {} {}",
+            paint(Tone::Accent, "Что дальше:"),
+            next.unwrap_or("перезапустите Antigravity и войдите в аккаунт Google.")
         ),
     }
     if !summary.notes.is_empty() {
         println!("\n  Обратите внимание:");
         for note in &summary.notes {
-            println!("    • {note}");
+            println!("    {} {note}", style::BULLET);
         }
     }
     if status != SetupStatus::Complete {
@@ -716,7 +730,7 @@ pub fn handle_unlock_all() -> bool {
     let started = Instant::now();
     clear_screen();
     banner();
-    println!("  ВКЛЮЧЕНИЕ ОБХОДА\n");
+    style::screen_title("ВКЛЮЧЕНИЕ ОБХОДА");
     let mut summary = Summary::default();
     if !check_vpn_before_setup() {
         finish_setup(SetupStatus::Failed, started, UNLOCK_VERDICTS, &summary);
@@ -783,7 +797,10 @@ pub fn handle_dns_only() -> bool {
 fn check_vpn_before_setup() -> bool {
     #[cfg(windows)]
     if crate::net::windows_connect::vpn_present() {
-        println!("  \x1b[93m!\x1b[0m Включён VPN. Он может помешать настройке.");
+        println!(
+            "  {} Включён VPN. Он может помешать настройке.",
+            mark(Tone::Warn)
+        );
         println!("    Если VPN сейчас не нужен, лучше временно его отключить.\n");
     }
     match crate::net::preflight() {
@@ -808,20 +825,28 @@ pub fn handle_manual_path() {
         }
         clear_screen();
         banner();
-        println!("  ПУТИ К ANTIGRAVITY\n");
+        style::screen_title("ПУТИ К ANTIGRAVITY");
         println!("  Сохранённые пути:");
         for (index, path) in saved.iter().enumerate() {
             let note = if path.exists() {
                 ""
             } else {
-                "  \x1b[90m(нет на диске)\x1b[0m"
+                "  (нет на диске)"
             };
-            println!("    {}. {}{note}", index + 1, display_path(path));
+            println!(
+                "    {}. {}{}",
+                index + 1,
+                display_path(path),
+                paint(Tone::Muted, note)
+            );
         }
-        println!("\n  [1]  Добавить путь");
-        println!("  [2]  Убрать сохранённый путь");
-        println!("\n  [0]  Назад\n");
-        match prompt("Выберите действие [0-2]: ").as_str() {
+        println!();
+        style::menu_item("1", "Добавить путь", Tone::Ok);
+        style::menu_item("2", "Убрать сохранённый путь", Tone::Error);
+        println!();
+        style::menu_item("0", "Назад", Tone::Plain);
+        println!();
+        match prompt("  Выберите действие [0-2]: ").as_str() {
             "1" => {
                 add_manual_path();
                 return;
@@ -829,7 +854,7 @@ pub fn handle_manual_path() {
             "2" => remove_manual_path(&saved),
             "0" | "" => return,
             _ => {
-                println!("\x1b[31mНеверный выбор.\x1b[0m");
+                println!("  {}", paint(Tone::Error, "Неверный выбор."));
                 std::thread::sleep(std::time::Duration::from_millis(400));
             }
         }
@@ -853,8 +878,10 @@ fn add_manual_path() {
     };
     println!("\n  Найдено в {}:", display_path(&root));
     print_found_targets(&root, &targets);
-    println!("\n  [1]  Сохранить путь и настроить эти файлы");
-    println!("  [0]  Отмена — ничего не сохранять\n");
+    println!();
+    style::menu_item("1", "Сохранить путь и настроить эти файлы", Tone::Ok);
+    style::menu_item("0", "Отмена — ничего не сохранять", Tone::Plain);
+    println!();
     if choose(&["1", "0"]) != "1" {
         println!("  Путь не сохранён.");
         pause();
@@ -913,9 +940,14 @@ fn remove_manual_path(saved: &[std::path::PathBuf]) {
             println!("\n  В {} есть настроенные файлы:", display_path(root));
             print_found_targets(root, &patched);
             println!("  Без сохранённого пути пункт [6] их не найдёт.\n");
-            println!("  [1]  Вернуть исходные файлы и убрать путь");
-            println!("  [2]  Только убрать путь — файлы останутся настроенными");
-            println!("  [0]  Отмена\n");
+            style::menu_item("1", "Вернуть исходные файлы и убрать путь", Tone::Ok);
+            style::menu_item(
+                "2",
+                "Только убрать путь — файлы останутся настроенными",
+                Tone::Plain,
+            );
+            style::menu_item("0", "Отмена", Tone::Plain);
+            println!();
             match choose(&["1", "2", "0"]) {
                 "1" => {
                     if !restore_targets(patched) {
@@ -930,7 +962,7 @@ fn remove_manual_path(saved: &[std::path::PathBuf]) {
         }
     }
     match crate::core::install_paths::forget(root) {
-        Ok(_) => println!("  \x1b[92m✓\x1b[0m Путь убран: {}", display_path(root)),
+        Ok(_) => println!("  {} Путь убран: {}", mark(Tone::Ok), display_path(root)),
         Err(error) => operation_error("Не удалось убрать путь", &error),
     }
     if automatic {
@@ -964,9 +996,11 @@ fn print_found_targets(root: &Path, targets: &[FoundTarget]) {
             BinaryState::Unknown => "версия не распознана",
         };
         println!(
-            "    • {} — {} \x1b[90m({state})\x1b[0m",
+            "    {} {} — {} {}",
+            style::BULLET,
             component_name(target.kind),
-            file.display()
+            file.display(),
+            paint(Tone::Muted, &format!("({state})"))
         );
     }
 }
@@ -1009,9 +1043,18 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
     });
     match running {
         Ok(holders) if !holders.is_empty() => {
-            println!("  \x1b[93m! Нужно закрыть Antigravity\x1b[0m");
+            println!(
+                "  {}",
+                style::status(Tone::Warn, "Нужно закрыть Antigravity")
+            );
             println!("    Пока он открыт, его файлы нельзя изменить.");
-            println!("    \x1b[90mОткрыто сейчас: {}\x1b[0m", holders.join(", "));
+            println!(
+                "    {}",
+                paint(
+                    Tone::Muted,
+                    &format!("Открыто сейчас: {}", holders.join(", "))
+                )
+            );
             println!("    Сохраните работу: несохранённые изменения будут потеряны.\n");
             if crate::system::env::args().len() > 1 {
                 operation_error(
@@ -1020,12 +1063,21 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
                 );
                 return false;
             }
-            println!("  \x1b[96mВыберите действие\x1b[0m");
+            println!("  {}", paint(Tone::Accent, "Выберите действие"));
             #[cfg(any(windows, unix))]
-            println!("  \x1b[1m[1]\x1b[0m  Закрыть Antigravity и продолжить: {action}");
+            style::menu_item(
+                "1",
+                &format!("Закрыть Antigravity и продолжить: {action}"),
+                Tone::Ok,
+            );
             #[cfg(not(any(windows, unix)))]
-            println!("  \x1b[1m[1]\x1b[0m  Я закрыл Antigravity — проверить и продолжить");
-            println!("  \x1b[1m[0]\x1b[0m  Отмена — вернуться в меню\n");
+            style::menu_item(
+                "1",
+                "Я закрыл Antigravity — проверить и продолжить",
+                Tone::Ok,
+            );
+            style::menu_item("0", "Отмена — вернуться в меню", Tone::Plain);
+            println!();
             loop {
                 match prompt("  Введите 1 или 0 и нажмите Enter: ").as_str() {
                     "1" => break,
@@ -1050,7 +1102,7 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
                 pause();
                 return false;
             }
-            println!("  \x1b[92m✓\x1b[0m Процессы Antigravity закрыты.\n");
+            println!("  {} Antigravity закрыт.\n", mark(Tone::Ok));
         }
         Err(error) => {
             operation_error("Не удалось проверить, закрыто ли приложение", &error);
@@ -1085,7 +1137,7 @@ pub fn handle_rollback() -> bool {
     let paths: Vec<_> = targets.iter().map(|target| target.path.clone()).collect();
     clear_screen();
     banner();
-    println!("  ОТКЛЮЧЕНИЕ ОБХОДА\n");
+    style::screen_title("ОТКЛЮЧЕНИЕ ОБХОДА");
     if !ensure_application_closed(&paths, "отключение обхода") {
         return false;
     }
@@ -1174,7 +1226,7 @@ const ROLLBACK_VERDICTS: Verdicts = (
 pub fn handle_diagnostics() -> bool {
     clear_screen();
     banner();
-    println!("  ПРОВЕРКА ПОДКЛЮЧЕНИЯ\n");
+    style::screen_title("ПРОВЕРКА ПОДКЛЮЧЕНИЯ");
     // Reading the IDE logs does not depend on the network checks.
     let observation = std::thread::spawn(crate::model_status::snapshot);
     let reports = {
@@ -1189,7 +1241,7 @@ pub fn handle_diagnostics() -> bool {
             operation_error(&format!("{label}: нет связи"), error);
             ok = false;
         } else {
-            println!("  \x1b[92m✓\x1b[0m {label}: связь есть");
+            println!("  {} {label}: связь есть", mark(Tone::Ok));
         }
     }
     println!("\n  Проверена только связь с серверами. Работает ли модель в вашем аккаунте,");
@@ -1249,16 +1301,18 @@ pub fn run_app() {
         banner();
         print_dashboard();
 
-        println!("  \x1b[92m[1]\x1b[0m  Включить обход");
-        println!("  [2]  Настроить только файлы приложения");
-        println!("  [3]  Настроить только подключение");
-        println!("  [4]  Пути к Antigravity");
-        println!("  \x1b[96m[5]\x1b[0m  Проверить подключение");
-        println!("  \x1b[91m[6]\x1b[0m  Отключить обход");
-        println!("  [7]  Сохранить диагностику");
-        println!("\n  [0]  Выход\n");
+        style::menu_item("1", "Включить обход", Tone::Ok);
+        style::menu_item("2", "Настроить только файлы приложения", Tone::Plain);
+        style::menu_item("3", "Настроить только подключение", Tone::Plain);
+        style::menu_item("4", "Пути к Antigravity", Tone::Plain);
+        style::menu_item("5", "Проверить подключение", Tone::Accent);
+        style::menu_item("6", "Отключить обход", Tone::Error);
+        style::menu_item("7", "Сохранить диагностику", Tone::Plain);
+        println!();
+        style::menu_item("0", "Выход", Tone::Plain);
+        println!();
 
-        match prompt("Выберите действие [0-7]: ").as_str() {
+        match prompt("  Выберите действие [0-7]: ").as_str() {
             "1" => {
                 handle_unlock_all();
             }
@@ -1283,7 +1337,7 @@ pub fn run_app() {
                 break;
             }
             _ => {
-                println!("\x1b[31mНеверный выбор.\x1b[0m");
+                println!("  {}", paint(Tone::Error, "Неверный выбор."));
                 std::thread::sleep(std::time::Duration::from_millis(400));
             }
         }

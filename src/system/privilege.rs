@@ -172,7 +172,13 @@ pub fn ensure_admin() {
                 std::process::exit(code as i32);
             }
         }
-        println!("\x1b[31m[!] Требуются права Администратора (UAC отклонен).\x1b[0m");
+        println!(
+            "  {}",
+            crate::ui::style::status(
+                crate::ui::style::Tone::Error,
+                "Нужны права администратора: запрос Windows отклонён. Запустите утилиту ещё раз и нажмите «Да».",
+            )
+        );
         std::process::exit(1);
     }
 

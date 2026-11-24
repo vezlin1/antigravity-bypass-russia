@@ -1,18 +1,26 @@
 use crate::core::detector::get_quick_status;
 use crate::core::patcher::BinaryState;
+use crate::ui::style::{self, paint, Tone};
+
+/// One status: what it means and what it says.
+type Status = (Tone, &'static str);
 
 pub fn banner() {
+    println!();
     println!(
-        "\x1b[96m=====================================================================\x1b[0m"
+        "{}{}  {}",
+        style::INDENT,
+        style::bold(&paint(Tone::Accent, "ANTIGRAVITY BYPASS RUSSIA")),
+        paint(Tone::Muted, concat!("v", env!("CARGO_PKG_VERSION")))
     );
     println!(
-        "\x1b[96m{:^69}\x1b[0m",
-        format!("ANTIGRAVITY-BYPASS-RUSSIA (v{})", env!("CARGO_PKG_VERSION"))
+        "{}{}\n",
+        style::INDENT,
+        paint(
+            Tone::Muted,
+            "Открытая утилита обхода блокировок с чистым откатом"
+        )
     );
-    println!(
-        "\x1b[96m=====================================================================\x1b[0m"
-    );
-    println!(" Открытая утилита обхода блокировок и чистого отката\n");
 }
 
 pub fn print_dashboard() {
@@ -22,62 +30,53 @@ pub fn print_dashboard() {
         .ok()
         .map(|entries| entries.len());
     let status = get_quick_status();
-    let title = " ТЕКУЩИЙ СТАТУС ";
-    let left = (67 - title.chars().count()) / 2;
-    let right = 67 - title.chars().count() - left;
-    println!(
-        "\x1b[90m╭{}\x1b[96m{}\x1b[90m{}╮\x1b[0m",
-        "─".repeat(left),
-        title,
-        "─".repeat(right)
-    );
-    println!("\x1b[90m│{}│\x1b[0m", " ".repeat(67));
-    let network = network_status(rules, running.ok(), hosts_count);
-    status_row("Обход:", network);
-    status_row("Antigravity:", component_status(status.core_status));
-    let ide = ide_display_status(&status);
-    status_row("Antigravity IDE:", ide);
     let cli = if status.cli_status.is_none() && !status.cli_launchers.is_empty() {
-        "\x1b[93mНужна проверка\x1b[0m"
+        (Tone::Warn, "Нужна проверка")
     } else {
         component_status(status.cli_status)
     };
-    status_row("Antigravity CLI:", cli);
     let model = crate::model_status::snapshot();
-    let colour = if model.warning() {
-        "\x1b[93m"
+    let model_tone = if model.warning() {
+        Tone::Warn
     } else {
-        "\x1b[90m"
+        Tone::Muted
     };
-    status_row(
-        "Модель (журнал):",
-        &format!("{colour}{}\x1b[0m", model.label()),
-    );
-    println!("\x1b[90m│{}│\x1b[0m", " ".repeat(67));
-    println!("\x1b[90m╰{}╯\x1b[0m\n", "─".repeat(67));
+    let rows = [
+        row("Обход", network_status(rules, running.ok(), hosts_count)),
+        row("Antigravity", component_status(status.core_status)),
+        row("Antigravity IDE", ide_display_status(&status)),
+        row("Antigravity CLI", cli),
+        row("Модель (журнал)", (model_tone, model.label())),
+    ];
+    style::panel("Текущий статус", &rows);
+    println!();
+}
+
+fn row(label: &str, (tone, text): Status) -> String {
+    format!("{label:<17} {}", style::status(tone, text))
 }
 
 fn network_status(
     rules: usize,
     service_running: Option<bool>,
     hosts_count: Option<usize>,
-) -> &'static str {
+) -> Status {
     match hosts_count {
         Some(count) if count == crate::net::provider::NRPT_AGENT.len() => {
             // Pins describe complete installed Agent coverage; no connection
             // probe ran here. A running process or a single DNS rule alone
             // cannot establish that the remaining domains were configured.
-            return "\x1b[92mВключён\x1b[0m";
+            return (Tone::Ok, "Включён");
         }
-        Some(count) if count > 0 => return "\x1b[93mВключён не полностью\x1b[0m",
-        None => return "\x1b[93mНе удалось проверить системный список адресов\x1b[0m",
+        Some(count) if count > 0 => return (Tone::Warn, "Включён не полностью"),
+        None => return (Tone::Warn, "Не удалось проверить системный список адресов"),
         _ => {}
     }
     match (rules, service_running) {
-        (_, None) => "\x1b[93mНе удалось проверить фоновую службу\x1b[0m",
-        (count, _) if count > 0 => "\x1b[93mНужна проверка\x1b[0m",
-        (_, Some(true)) => "\x1b[93mНужна проверка\x1b[0m",
-        _ => "\x1b[90mВыключен\x1b[0m",
+        (_, None) => (Tone::Warn, "Не удалось проверить фоновую службу"),
+        (count, _) if count > 0 => (Tone::Warn, "Нужна проверка"),
+        (_, Some(true)) => (Tone::Warn, "Нужна проверка"),
+        _ => (Tone::Muted, "Выключен"),
     }
 }
 
@@ -91,23 +90,23 @@ mod tests {
     #[test]
     fn ide_display_status_reflects_patch_state() {
         let mut status = SystemComponentsStatus::default();
-        assert_eq!(ide_display_status(&status), "\x1b[90mНе найдена\x1b[0m");
+        assert_eq!(ide_display_status(&status), (Tone::Muted, "Не найдена"));
 
         status.ide_installations.push(PathBuf::from("/ide"));
-        assert_eq!(ide_display_status(&status), "\x1b[92mУстановлена\x1b[0m");
+        assert_eq!(ide_display_status(&status), (Tone::Ok, "Установлена"));
 
         status.ide_status = Some(BinaryState::Stock);
-        assert_eq!(ide_display_status(&status), "\x1b[93mНе настроено\x1b[0m");
+        assert_eq!(ide_display_status(&status), (Tone::Warn, "Не настроено"));
 
         status.ide_status = Some(BinaryState::Patched);
-        assert_eq!(ide_display_status(&status), "\x1b[92mНастроено\x1b[0m");
+        assert_eq!(ide_display_status(&status), (Tone::Ok, "Настроено"));
 
         status
             .incomplete_ide_installations
             .push(PathBuf::from("/ide"));
         assert_eq!(
             ide_display_status(&status),
-            "\x1b[93mПереустановите Antigravity IDE\x1b[0m"
+            (Tone::Warn, "Переустановите Antigravity IDE")
         );
     }
 
@@ -116,61 +115,56 @@ mod tests {
         let complete = crate::net::provider::NRPT_AGENT.len();
         for service in [Some(true), Some(false), None] {
             for rules in [0, 1, 30] {
-                assert!(network_status(rules, service, Some(complete)).contains("Включён"));
-                assert!(network_status(rules, service, Some(1)).contains("Включён не полностью"));
-                assert!(network_status(rules, service, None)
-                    .contains("Не удалось проверить системный список адресов"));
+                assert_eq!(
+                    network_status(rules, service, Some(complete)),
+                    (Tone::Ok, "Включён")
+                );
+                assert_eq!(
+                    network_status(rules, service, Some(1)),
+                    (Tone::Warn, "Включён не полностью")
+                );
+                assert_eq!(
+                    network_status(rules, service, None).1,
+                    "Не удалось проверить системный список адресов"
+                );
             }
         }
-        assert!(network_status(0, Some(false), Some(0)).contains("Выключен"));
-        assert!(network_status(1, Some(true), Some(0)).contains("Нужна проверка"));
-        assert!(network_status(0, Some(true), Some(0)).contains("Нужна проверка"));
-        assert!(network_status(1, Some(false), Some(0)).contains("Нужна проверка"));
-        assert!(network_status(1, None, Some(0)).contains("Не удалось проверить фоновую службу"));
+        assert_eq!(
+            network_status(0, Some(false), Some(0)),
+            (Tone::Muted, "Выключен")
+        );
+        for (rules, service) in [(1, Some(true)), (0, Some(true)), (1, Some(false))] {
+            assert_eq!(
+                network_status(rules, service, Some(0)),
+                (Tone::Warn, "Нужна проверка")
+            );
+        }
+        assert_eq!(
+            network_status(1, None, Some(0)).1,
+            "Не удалось проверить фоновую службу"
+        );
     }
 }
 
-fn ide_display_status(status: &crate::core::detector::SystemComponentsStatus) -> &'static str {
+fn ide_display_status(status: &crate::core::detector::SystemComponentsStatus) -> Status {
     if !status.incomplete_ide_installations.is_empty() {
-        "\x1b[93mПереустановите Antigravity IDE\x1b[0m"
+        (Tone::Warn, "Переустановите Antigravity IDE")
     } else if let Some(state) = status.ide_status {
         component_status(Some(state))
     } else if !status.ide_installations.is_empty() {
-        "\x1b[92mУстановлена\x1b[0m"
+        (Tone::Ok, "Установлена")
     } else {
-        "\x1b[90mНе найдена\x1b[0m"
+        (Tone::Muted, "Не найдена")
     }
 }
 
-fn component_status(status: Option<BinaryState>) -> &'static str {
+fn component_status(status: Option<BinaryState>) -> Status {
     match status {
-        Some(BinaryState::Patched) => "\x1b[92mНастроено\x1b[0m",
-        Some(BinaryState::Stock) => "\x1b[93mНе настроено\x1b[0m",
+        Some(BinaryState::Patched) => (Tone::Ok, "Настроено"),
+        Some(BinaryState::Stock) => (Tone::Warn, "Не настроено"),
         Some(BinaryState::PartiallyPatched | BinaryState::Unknown) => {
-            "\x1b[93mНужна проверка\x1b[0m"
+            (Tone::Warn, "Нужна проверка")
         }
-        None => "\x1b[90mНе найдено\x1b[0m",
+        None => (Tone::Muted, "Не найдено"),
     }
-}
-
-// Pad the visible text, not ANSI colour sequences, to keep the right border straight.
-fn status_row(label: &str, status: &str) {
-    let (colour, icon) = if status.starts_with("\x1b[92m") {
-        ("\x1b[92m", "✓")
-    } else if status.starts_with("\x1b[93m") {
-        ("\x1b[93m", "!")
-    } else {
-        ("\x1b[90m", "–")
-    };
-    let text = status
-        .strip_prefix(colour)
-        .unwrap_or(status)
-        .strip_suffix("\x1b[0m")
-        .unwrap_or(status);
-    let prefix = format!("  {label:<18} ");
-    let padding = 67usize.saturating_sub(prefix.chars().count() + 4 + text.chars().count());
-    println!(
-        "\x1b[90m│\x1b[0m{prefix}{colour}[{icon}] {text}\x1b[0m{}\x1b[90m│\x1b[0m",
-        " ".repeat(padding)
-    );
 }
