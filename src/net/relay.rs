@@ -5,7 +5,8 @@ use std::fs;
 use std::io::Write;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
-#[cfg(any(windows, target_os = "linux"))]
+// quiet_after and its test use it on every platform.
+#[cfg(any(windows, target_os = "linux", test))]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
