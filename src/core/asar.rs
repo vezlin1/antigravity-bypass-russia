@@ -1,4 +1,4 @@
-use super::patcher::{plan_js, Plan};
+use super::patcher::{plan_js_mode, Mode, Plan};
 use serde_json::Value;
 use std::{
     borrow::Cow,
@@ -99,7 +99,12 @@ pub fn read_asar_package_version(path: &Path) -> Option<String> {
     let package: Value = serde_json::from_slice(&package).ok()?;
     package.get("version")?.as_str().map(str::to_string)
 }
+#[cfg(test)]
 pub(crate) fn plan_asar(data: &[u8]) -> Result<Plan<'_>, String> {
+    plan_asar_mode(data, Mode::Apply)
+}
+
+pub(crate) fn plan_asar_mode(data: &[u8], mode: Mode) -> Result<Plan<'_>, String> {
     let (header, payload) = archive(data)?;
     let mut result = Plan {
         data: Cow::Borrowed(data),
@@ -116,13 +121,13 @@ pub(crate) fn plan_asar(data: &[u8]) -> Result<Plan<'_>, String> {
             continue;
         };
         let range = content_range(file, payload, data.len())?;
-        let p = plan_js(&data[range.clone()])?;
+        let p = plan_js_mode(&data[range.clone()], mode)?;
         if p.changes > 0 && file.get("integrity").is_some() {
             return Err("ASAR содержит integrity-метаданные: эта упаковка пока не поддерживается; архив сохранён".into());
         }
         result.changes += p.changes;
         result.existing += p.existing;
-        if p.changes > 0 {
+        if p.changes > 0 && mode == Mode::Apply {
             result.data.to_mut()[range].copy_from_slice(&p.data);
         }
     }

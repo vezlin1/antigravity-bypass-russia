@@ -88,7 +88,21 @@ pub(crate) fn state_from_counts(stock: usize, patched: usize) -> BinaryState {
         _ => BinaryState::Unknown,
     }
 }
+/// `Apply` builds the patched bytes; `Count` only counts stock and patched
+/// sites, so a status check never copies a large executable. Both run the same
+/// format checks and return the same counts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Mode {
+    Apply,
+    Count,
+}
+
+#[cfg(test)]
 pub(crate) fn plan_js(data: &[u8]) -> Result<Plan<'_>, String> {
+    plan_js_mode(data, Mode::Apply)
+}
+
+pub(crate) fn plan_js_mode(data: &[u8], mode: Mode) -> Result<Plan<'_>, String> {
     let text = std::str::from_utf8(data).map_err(|_| "JavaScript не в UTF-8")?;
     let mut output = Cow::Borrowed(data);
     let re = regex_ide_main_js_stock();
@@ -97,7 +111,7 @@ pub(crate) fn plan_js(data: &[u8]) -> Result<Plan<'_>, String> {
         .map(|c| (c.get(1).unwrap().end(), c.get(0).unwrap().end()))
         .collect();
     let existing = regex_ide_js_patched().find_iter(text).count();
-    for (start, end) in &spans {
+    for (start, end) in spans.iter().filter(|_| mode == Mode::Apply) {
         let output = output.to_mut();
         output[*start..*end].fill(b' ');
         output[*start..*start + 4].copy_from_slice(b"true");
@@ -151,12 +165,13 @@ fn rewrite_sites(
     fix: &[u8],
     fix_at: usize,
     max_matches: usize,
+    mode: Mode,
 ) -> Result<(usize, usize), String> {
     if offsets.len() + existing > max_matches {
         return Err("Неоднозначная машинная сигнатура; файл не изменён".into());
     }
-    if offsets.is_empty() {
-        return Ok((0, existing));
+    if offsets.is_empty() || mode == Mode::Count {
+        return Ok((offsets.len(), existing));
     }
     section_bytes(output, &section_range)?;
     let bytes = &mut output.to_mut()[section_range];
@@ -185,7 +200,15 @@ fn apply_pattern(
     max_matches: usize,
 ) -> Result<(usize, usize), String> {
     let sites = pair_sites(section_bytes(output, &section_range)?, original, patched);
-    rewrite_sites(output, section_range, sites, fix, fix_at, max_matches)
+    rewrite_sites(
+        output,
+        section_range,
+        sites,
+        fix,
+        fix_at,
+        max_matches,
+        Mode::Apply,
+    )
 }
 
 fn cli_x64_branches_share_target(bytes: &[u8]) -> bool {
@@ -255,6 +278,7 @@ fn plan_x64_cli<'a>(
     data: &'a [u8],
     legacy_cli: bool,
     gates: X64Gates,
+    mode: Mode,
 ) -> Result<Plan<'a>, String> {
     if gates.iter().any(|(_, state)| {
         if legacy_cli {
@@ -274,7 +298,11 @@ fn plan_x64_cli<'a>(
             } else {
                 (CLI_GATE_X64_LONG_FIX, CLI_GATE_X64_LONG_FIX_AT)
             };
-            output.to_mut()[offset + at..offset + at + fix.len()].copy_from_slice(fix);
+            // The gate edit cannot create or remove a manager-gate match (their
+            // fixed bytes never overlap), so counting can skip it.
+            if mode == Mode::Apply {
+                output.to_mut()[offset + at..offset + at + fix.len()].copy_from_slice(fix);
+            }
             changes += 1;
         }
     }
@@ -291,7 +319,7 @@ fn plan_x64_cli<'a>(
             let range = section_range(start, size)?;
             let sites = x64_manager_sites(section_bytes(&output, &range)?);
             let (stock, patched) =
-                rewrite_sites(&mut output, range, sites, MGR_GATE_X64_FIX, 0, 1)?;
+                rewrite_sites(&mut output, range, sites, MGR_GATE_X64_FIX, 0, 1, mode)?;
             hub_sites += stock + patched;
             changes += stock;
             existing += patched;
@@ -340,7 +368,39 @@ fn cli_arm64_branches_are_valid(bytes: &[u8], offset: usize, section_size: usize
         && inside(details)
 }
 
-fn plan_arm64_cli<'a>(file: &object::File<'_>, data: &'a [u8]) -> Result<Plan<'a>, String> {
+/// Whether the sign-in gate matches could differ after the core edits at
+/// `core_offsets`. Both gate patterns are 20 bytes, so only matches that
+/// overlap an edit can change; those cases are counted from patched bytes.
+fn core_edit_touches_login(bytes: &[u8], core_offsets: &[usize], login_found: &[usize]) -> bool {
+    const LOGIN_LEN: usize = 20;
+    core_offsets.iter().any(|&edit| {
+        let edit_end = edit + MGR_GATE_ARM64_FIX.len();
+        if login_found
+            .iter()
+            .any(|&login| login < edit_end && edit < login + LOGIN_LEN)
+        {
+            return true;
+        }
+        let start = edit.saturating_sub(LOGIN_LEN - 1);
+        let end = (edit_end + LOGIN_LEN - 1).min(bytes.len());
+        let Some(window) = bytes.get(start..end) else {
+            return true;
+        };
+        let mut window = window.to_vec();
+        let at = edit - start;
+        if window.len() < at + MGR_GATE_ARM64_FIX.len() {
+            return true;
+        }
+        window[at..at + MGR_GATE_ARM64_FIX.len()].copy_from_slice(MGR_GATE_ARM64_FIX);
+        regex_cli_arm64_orig().is_match(&window) || regex_cli_arm64_patched().is_match(&window)
+    })
+}
+
+fn plan_arm64_cli<'a>(
+    file: &object::File<'_>,
+    data: &'a [u8],
+    mode: Mode,
+) -> Result<Plan<'a>, String> {
     let mut output = Cow::Borrowed(data);
     let (mut core_stock, mut core_patched, mut login_stock, mut login_patched) = (0, 0, 0, 0);
     for section in file.sections().filter(|s| s.kind() == SectionKind::Text) {
@@ -367,8 +427,21 @@ fn plan_arm64_cli<'a>(file: &object::File<'_>, data: &'a [u8]) -> Result<Plan<'a
         {
             return Err("Некорректные переходы или выравнивание agy ARM64; файл не изменён".into());
         }
-        let starts = |found: &[regex::bytes::Match<'_>]| found.iter().map(|m| m.start()).collect();
-        let core_sites = (starts(&core_stock_found), core_patched_found.len());
+        let starts = |found: &[regex::bytes::Match<'_>]| -> Vec<usize> {
+            found.iter().map(|m| m.start()).collect()
+        };
+        let core_offsets = starts(&core_stock_found);
+        if mode == Mode::Count {
+            let login_found: Vec<usize> = starts(&login_stock_found)
+                .into_iter()
+                .chain(starts(&login_patched_found))
+                .collect();
+            if core_edit_touches_login(bytes, &core_offsets, &login_found) {
+                // Rare overlap: count from the patched bytes, as patching does.
+                return plan_arm64_cli(file, data, Mode::Apply);
+            }
+        }
+        let core_sites = (core_offsets, core_patched_found.len());
         let login_sites: Sites = (starts(&login_stock_found), login_patched_found.len());
         let (stock, patched) = rewrite_sites(
             &mut output,
@@ -377,12 +450,14 @@ fn plan_arm64_cli<'a>(file: &object::File<'_>, data: &'a [u8]) -> Result<Plan<'a
             MGR_GATE_ARM64_FIX,
             0,
             1,
+            mode,
         )?;
         core_stock += stock;
         core_patched += patched;
         // The sign-in gate is searched in the bytes after the core edit, as
-        // before; without a core edit the section bytes are unchanged.
-        let login_sites = if stock > 0 {
+        // before; without a core edit (or when counting, where the edit was
+        // shown not to touch it) the section bytes are unchanged.
+        let login_sites = if stock > 0 && mode == Mode::Apply {
             pair_sites(
                 section_bytes(&output, &range)?,
                 regex_cli_arm64_orig(),
@@ -398,6 +473,7 @@ fn plan_arm64_cli<'a>(file: &object::File<'_>, data: &'a [u8]) -> Result<Plan<'a
             CLI_GATE_ARM64_FIX,
             CLI_GATE_ARM64_FIX_AT,
             1,
+            mode,
         )?;
         login_stock += stock;
         login_patched += patched;
@@ -432,14 +508,23 @@ fn plan_binary_with_cli_profile(
     kind: TargetKind,
     legacy_cli: bool,
 ) -> Result<Plan<'_>, String> {
+    plan_binary_mode(data, kind, legacy_cli, Mode::Apply)
+}
+
+fn plan_binary_mode(
+    data: &[u8],
+    kind: TargetKind,
+    legacy_cli: bool,
+    mode: Mode,
+) -> Result<Plan<'_>, String> {
     let file = object::File::parse(data)
         .map_err(|e| format!("Неподдерживаемый executable (PE/ELF/Mach-O): {e}"))?;
     if kind == TargetKind::AgyCli && file.architecture() == Architecture::Aarch64 && !legacy_cli {
-        return plan_arm64_cli(&file, data);
+        return plan_arm64_cli(&file, data, mode);
     }
     if kind == TargetKind::AgyCli && file.architecture() == Architecture::X86_64 {
         let gates = x64_cli_gates_in(&file, data)?.ok_or("Нет профиля agy x64")?;
-        return plan_x64_cli(&file, data, legacy_cli, gates);
+        return plan_x64_cli(&file, data, legacy_cli, gates, mode);
     }
     let (sites, fix, fix_at, max_matches, profile): (fn(&[u8]) -> Sites, _, _, _, _) =
         match (kind, file.architecture()) {
@@ -470,7 +555,7 @@ fn plan_binary_with_cli_profile(
         };
         let range = section_range(offset, size)?;
         let found = sites(section_bytes(&output, &range)?);
-        let (c, p) = rewrite_sites(&mut output, range, found, fix, fix_at, max_matches)?;
+        let (c, p) = rewrite_sites(&mut output, range, found, fix, fix_at, max_matches, mode)?;
         changes += c;
         existing += p;
     }
@@ -496,7 +581,7 @@ enum Scan<'a> {
     Plan(Result<Plan<'a>, String>),
 }
 
-fn scan(data: &[u8], kind: TargetKind) -> Scan<'_> {
+fn scan(data: &[u8], kind: TargetKind, mode: Mode) -> Scan<'_> {
     if kind == TargetKind::AgyCli {
         if let Ok(file) = object::File::parse(data) {
             if file.architecture() == Architecture::X86_64 {
@@ -508,21 +593,25 @@ fn scan(data: &[u8], kind: TargetKind) -> Scan<'_> {
                     {
                         Scan::LegacyX64
                     }
-                    Ok(Some(gates)) => Scan::Plan(plan_x64_cli(&file, data, false, gates)),
-                    Ok(None) => Scan::Plan(plan(data, kind)),
+                    Ok(Some(gates)) => Scan::Plan(plan_x64_cli(&file, data, false, gates, mode)),
+                    Ok(None) => Scan::Plan(plan_mode(data, kind, mode)),
                     Err(error) => Scan::Plan(Err(error)),
                 };
             }
         }
     }
-    Scan::Plan(plan(data, kind))
+    Scan::Plan(plan_mode(data, kind, mode))
 }
 
 fn plan(data: &[u8], kind: TargetKind) -> Result<Plan<'_>, String> {
+    plan_mode(data, kind, Mode::Apply)
+}
+
+fn plan_mode(data: &[u8], kind: TargetKind, mode: Mode) -> Result<Plan<'_>, String> {
     match kind {
-        TargetKind::IdeMainJs => plan_js(data),
-        TargetKind::IdeAsar => crate::core::asar::plan_asar(data),
-        _ => plan_binary(data, kind),
+        TargetKind::IdeMainJs => plan_js_mode(data, mode),
+        TargetKind::IdeAsar => crate::core::asar::plan_asar_mode(data, mode),
+        _ => plan_binary_mode(data, kind, false, mode),
     }
 }
 /// File identity used to reuse a state result across dashboard redraws. Any
@@ -581,7 +670,8 @@ pub fn check_target_state(target: &FoundTarget) -> BinaryState {
 }
 
 fn state_for_data(data: &[u8], kind: TargetKind) -> BinaryState {
-    match scan(data, kind) {
+    // Status needs only the counts: never build (and copy) patched bytes.
+    match scan(data, kind, Mode::Count) {
         Scan::LegacyX64 => BinaryState::PartiallyPatched,
         Scan::Plan(Ok(p)) => state_from_counts(p.changes, p.existing),
         Scan::Plan(Err(_)) => BinaryState::Unknown,
@@ -728,7 +818,7 @@ fn patch_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
     crate::system::fs_utils::recover_pending(&target.path)?;
     ensure_not_symlink(&target.path)?;
     let mut before = fs::read(&target.path).map_err(|e| e.to_string())?;
-    let (legacy_x64, mut p) = match scan(&before, target.kind) {
+    let (legacy_x64, mut p) = match scan(&before, target.kind, Mode::Apply) {
         Scan::LegacyX64 => (true, None),
         Scan::Plan(planned) => (
             false,
@@ -1062,6 +1152,12 @@ mod tests {
         });
         let patched = plan_binary(&stock, TargetKind::AgyCli).unwrap();
         assert_eq!((patched.changes, patched.existing), (gates + hub_count, 0));
+        let counted = plan_binary_mode(&stock, TargetKind::AgyCli, false, Mode::Count).unwrap();
+        assert_eq!(
+            (counted.changes, counted.existing),
+            (patched.changes, patched.existing)
+        );
+        assert!(matches!(counted.data, Cow::Borrowed(_)));
         assert_eq!(
             stock
                 .iter()
@@ -1459,6 +1555,68 @@ mod tests {
     }
 
     #[test]
+    fn counting_matches_the_full_plan_without_copying() {
+        let manager = b"\x80\x78\x08\x00\x74\x0a\x48\x8b\x44\x24\x20\x48\x89\x44\x60";
+        let gate = b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x00\x00\x00\x00";
+        let cases: Vec<(Vec<u8>, TargetKind)> = vec![
+            (pe_fixture(manager, 0x8664), TargetKind::LanguageServer),
+            (
+                pe_fixture(&[gate.as_slice(), manager.as_slice()].concat(), 0x8664),
+                TargetKind::AgyCli,
+            ),
+            (macho_fixture(gate, 0x01000007), TargetKind::AgyCli),
+            (arm64_cli_fixture(ARM64_CORE), TargetKind::AgyCli),
+            (
+                pe_fixture(b"\x90\x90\x90\x90", 0x8664),
+                TargetKind::LanguageServer,
+            ),
+            (
+                b"x.resetIsTierGCPTos(), this.isGoogleInternal".to_vec(),
+                TargetKind::IdeMainJs,
+            ),
+        ];
+        for (stock, kind) in cases {
+            let full = plan_mode(&stock, kind, Mode::Apply);
+            let counted = plan_mode(&stock, kind, Mode::Count);
+            match (&full, &counted) {
+                (Ok(full), Ok(counted)) => {
+                    assert_eq!(
+                        (full.changes, full.existing),
+                        (counted.changes, counted.existing)
+                    );
+                    assert!(matches!(counted.data, Cow::Borrowed(_)));
+                    // The patched result counts the same way as well.
+                    let patched = full.data.to_vec();
+                    let again = plan_mode(&patched, kind, Mode::Apply).unwrap();
+                    let again_counted = plan_mode(&patched, kind, Mode::Count).unwrap();
+                    assert_eq!(
+                        (again.changes, again.existing),
+                        (again_counted.changes, again_counted.existing)
+                    );
+                }
+                (Err(full), Err(counted)) => assert_eq!(full, counted),
+                _ => panic!("modes disagree for {kind:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn counting_falls_back_when_the_core_edit_touches_the_sign_in_gate() {
+        // A sign-in gate match that overlaps the core edit is counted from the
+        // patched bytes, exactly as the full plan does.
+        let edit = 100;
+        let mut bytes = vec![0u8; 256];
+        assert!(!core_edit_touches_login(&bytes, &[edit], &[]));
+        assert!(core_edit_touches_login(&bytes, &[edit], &[edit + 4]));
+        assert!(core_edit_touches_login(&bytes, &[edit], &[edit - 19]));
+        assert!(!core_edit_touches_login(&bytes, &[edit], &[edit - 20]));
+        assert!(!core_edit_touches_login(&bytes, &[edit], &[edit + 8]));
+        bytes[edit..edit + 4].copy_from_slice(b"\x00\x00\x00\x00");
+        // An edit near the end of the section only looks at the bytes it has.
+        assert!(!core_edit_touches_login(&bytes, &[240], &[]));
+    }
+
+    #[test]
     fn macho_arm64_cli_patch_is_exact_and_idempotent() {
         // Exercise both supported instruction gaps and every TBZ immediate prefix.
         for branch in [0x03, 0x23, 0x43, 0x63, 0x83, 0xa3, 0xc3, 0xe3] {
@@ -1575,6 +1733,12 @@ mod tests {
         let stock = fs::read(path).unwrap();
         let patched = plan_binary(&stock, TargetKind::AgyCli).unwrap();
         assert_eq!((patched.changes, patched.existing), (2, 0));
+        let counted = plan_binary_mode(&stock, TargetKind::AgyCli, false, Mode::Count).unwrap();
+        assert_eq!(
+            (counted.changes, counted.existing),
+            (patched.changes, patched.existing)
+        );
+        assert!(matches!(counted.data, Cow::Borrowed(_)));
         let mut expected = stock.clone();
         let file = object::File::parse(stock.as_slice()).unwrap();
         for section in file.sections().filter(|s| s.kind() == SectionKind::Text) {
