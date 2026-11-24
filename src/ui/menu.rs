@@ -583,6 +583,12 @@ const BROWSER_VPN: &str =
      На Antigravity это не влияет.";
 
 #[cfg(windows)]
+const BROWSER_FOLLOWS_VPN: &str =
+    "Пока включён VPN, веб-версии Gemini и AI Studio открываются через него. Когда вы \
+     отключите VPN, утилита сама включит для них обход, перезапускать её не нужно. \
+     На Antigravity это не влияет.";
+
+#[cfg(windows)]
 fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupStatus {
     use crate::net::windows_connect;
     use crate::system::windows_connect_launch::{
@@ -612,10 +618,20 @@ fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupSta
             return SetupStatus::Failed;
         }
     };
+    // The VPN blocked the local DNS service: the service itself moves the web
+    // versions to the bypass once the VPN is off (net::web_rules).
+    let follows_vpn = vpn && setup.as_ref().is_ok_and(|setup| !setup.local_relay_running);
     if !browser_dns && vpn {
         // With a VPN the reason is known: say it instead of the generic note.
         summary.notes.retain(|note| note != BROWSER_UNCHECKED);
-        summary.notes.push(BROWSER_VPN.into());
+        summary.notes.push(
+            if follows_vpn {
+                BROWSER_FOLLOWS_VPN
+            } else {
+                BROWSER_VPN
+            }
+            .into(),
+        );
     }
     let progress = Progress::new();
     progress.stage(steps, "Запускаем Antigravity", "Antigravity запущен");
@@ -649,7 +665,7 @@ fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupSta
     };
     progress.finish(antigravity_ok);
     drop(progress);
-    if setup.is_ok() && antigravity_ok && browser_dns {
+    if setup.is_ok() && antigravity_ok && (browser_dns || follows_vpn) {
         SetupStatus::Complete
     } else if setup.is_ok() || antigravity_ok {
         SetupStatus::Limited

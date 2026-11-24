@@ -318,6 +318,7 @@ fn refresh_system_network(notifications: &mpsc::Receiver<()>, subscribed: bool) 
     const RETRY: Duration = Duration::from_secs(10);
     const POLL: Duration = Duration::from_secs(30);
     let mut retry = true;
+    let mut follow_error = None;
     loop {
         let delay = if retry { RETRY } else { POLL };
         let changed = match notifications.recv_timeout(delay) {
@@ -342,6 +343,27 @@ fn refresh_system_network(notifications: &mpsc::Receiver<()>, subscribed: bool) 
                 true
             }
         };
+        // A VPN that blocks local DNS appeared or went away: move the web
+        // versions of Gemini and AI Studio between the bypass and the VPN.
+        let error = match super::web_rules::follow_network() {
+            Ok(super::web_rules::Follow::Settled) => None,
+            Ok(super::web_rules::Follow::Retry) => {
+                retry = true;
+                None
+            }
+            Err(error) => {
+                retry = true;
+                Some(error)
+            }
+        };
+        if error != follow_error {
+            if let Some(error) = &error {
+                log_event(&format!(
+                    "Переключение правил после смены VPN отложено: {error}"
+                ));
+            }
+            follow_error = error;
+        }
     }
 }
 

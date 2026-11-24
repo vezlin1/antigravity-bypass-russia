@@ -22,6 +22,8 @@ pub mod socket;
 #[cfg(any(target_os = "macos", test))]
 pub mod split_dns;
 #[cfg(windows)]
+mod web_rules;
+#[cfg(windows)]
 pub mod windows_connect;
 
 pub use relay::{detach_console, log_fatal, run as run_dns_relay};
@@ -810,6 +812,16 @@ fn apply_dns_rules_with(
         }
     }
     let _ = (&agent_rules, &studio_subs);
+    // The background service rewrites these same rules when the VPN is
+    // turned on or off (see web_rules).
+    #[cfg(windows)]
+    let mut followed_rules = web_rules::SavedRules {
+        agent: agent_rules.clone(),
+        studio: studio_subs.clone(),
+        udp_fallback: udp_ips.clone(),
+        skip_primary,
+        via_relay: false,
+    };
     #[cfg(not(target_os = "linux"))]
     let agent_rules: Vec<_> = agent_rules
         .iter()
@@ -873,6 +885,11 @@ fn apply_dns_rules_with(
     let browser_dns_confirmed = {
         progress(Working("записываем настройки Windows"));
         let plan = nrpt::apply_compatible_rules(&plan, NRPT_TAG, "Antigravity DNS")?;
+        followed_rules.via_relay = relay_ok;
+        if let Err(error) = web_rules::save(&followed_rules) {
+            // Setup itself succeeded; only the switch on VPN changes is lost.
+            relay::log_event(&format!("Правила для смены VPN не сохранены: {error}"));
+        }
         let latest_inventory = nrpt::inventory()?;
         // Foreign split-DNS often relies on system DoH policy. Hosts provides
         // the Agent fallback without changing those global settings.
@@ -995,14 +1012,13 @@ fn relay_answers(skip_primary: bool, probe: impl Fn(&str) -> bool + Sync) -> Rel
 }
 
 fn relay_returns_address(host: &str) -> bool {
+    relay_returns_address_within(host, Duration::from_secs(5))
+}
+
+fn relay_returns_address_within(host: &str, timeout: Duration) -> bool {
     let query = client::build_query(host, 0xA651);
-    client::query_raw_via(
-        &query,
-        LISTEN_IP.parse().unwrap(),
-        0,
-        Duration::from_secs(5),
-    )
-    .is_ok_and(|reply| has_usable_a_answer(&query, &reply))
+    client::query_raw_via(&query, LISTEN_IP.parse().unwrap(), 0, timeout)
+        .is_ok_and(|reply| has_usable_a_answer(&query, &reply))
 }
 
 fn has_usable_a_answer(query: &[u8], reply: &[u8]) -> bool {
@@ -1214,6 +1230,9 @@ fn remove_dns_configuration(restore_tcp: bool) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         if let Err(e) = remove_static_routes() {
+            errors.push(e);
+        }
+        if let Err(e) = web_rules::forget() {
             errors.push(e);
         }
         if let Err(e) = crate::net::nrpt::native_remove_nrpt_rules() {
