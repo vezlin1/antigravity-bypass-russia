@@ -309,32 +309,144 @@ pub fn image_running(image: &str) -> Result<bool, String> {
         .any(|entry| matches_image(entry, image, own_pid)))
 }
 
-/// Native `taskkill /F /T /IM`: terminates every process with this image name
-/// and its descendants, then waits up to `wait` for them to exit.
-#[cfg(windows)]
-pub fn terminate_image_tree(image: &str, wait: std::time::Duration) -> Result<(), String> {
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
-    };
-    let pids = process_tree(&process_entries()?, image, std::process::id());
-    let mut handles = Vec::new();
-    for pid in pids {
-        let raw = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, 0, pid) };
-        if raw.is_null() {
-            // Already exited, or not accessible; the caller re-checks the state.
+/// Descendants of `roots` that are provably theirs. Windows reuses PIDs, so a
+/// recorded parent PID may now belong to an unrelated, newer process: a child
+/// counts only if it was created no earlier than the parent it points to. Both
+/// creation times come from handles held open, which pins each PID.
+#[cfg(any(windows, test))]
+fn verified_tree(
+    entries: &[ProcessEntry],
+    roots: &[u32],
+    created: &std::collections::HashMap<u32, u64>,
+    own_pid: u32,
+) -> Vec<u32> {
+    let mut selected: Vec<u32> = roots.to_vec();
+    let mut next = 0;
+    while next < selected.len() {
+        let parent = selected[next];
+        next += 1;
+        let Some(parent_created) = created.get(&parent) else {
             continue;
+        };
+        for entry in entries {
+            if entry.parent != parent
+                || entry.pid == 0
+                || entry.pid == own_pid
+                || entry.pid == parent
+                || selected.contains(&entry.pid)
+            {
+                continue;
+            }
+            if created
+                .get(&entry.pid)
+                .is_some_and(|child_created| child_created >= parent_created)
+            {
+                selected.push(entry.pid);
+            }
         }
-        let handle = Handle(raw);
-        unsafe {
-            TerminateProcess(handle.0, 1);
+    }
+    selected
+}
+
+/// A handle that can terminate and wait for one process, with its creation time.
+#[cfg(windows)]
+fn open_for_termination(pid: u32) -> Option<(Handle, u64)> {
+    use windows_sys::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{
+            GetProcessTimes, OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+        },
+    };
+    let raw = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            pid,
+        )
+    };
+    if raw.is_null() {
+        return None;
+    }
+    let handle = Handle(raw);
+    // An exited process keeps its PID only while handles exist; skip it.
+    if unsafe { WaitForSingleObject(handle.0, 0) } == 0 {
+        return None;
+    }
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut creation, mut exit, mut kernel, mut user) = (zero, zero, zero, zero);
+    if unsafe { GetProcessTimes(handle.0, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return None;
+    }
+    let created = (u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime);
+    Some((handle, created))
+}
+
+#[cfg(windows)]
+fn same_image_path(actual: &std::path::Path, expected: &std::path::Path) -> bool {
+    // Canonical forms also resolve 8.3 short names and differing separators.
+    let canonical = |path: &std::path::Path| std::fs::canonicalize(path).unwrap_or(path.into());
+    canonical(actual)
+        .as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&canonical(expected).as_os_str().to_string_lossy())
+}
+
+/// Native `taskkill /F /T /IM`, restricted to provable members of the tree:
+/// roots must run `expected` (when given), descendants must be newer than
+/// their parent, and every process is terminated through the handle that was
+/// verified. Waits up to `wait` for them to exit.
+#[cfg(windows)]
+pub fn terminate_image_tree(
+    image: &str,
+    expected: Option<&std::path::Path>,
+    wait: std::time::Duration,
+) -> Result<(), String> {
+    use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+    let own_pid = std::process::id();
+    // Open every candidate first; an open handle keeps its PID from reuse.
+    let candidates = process_tree(&process_entries()?, image, own_pid);
+    let mut held = std::collections::HashMap::new();
+    for pid in candidates {
+        if let Some(opened) = open_for_termination(pid) {
+            held.insert(pid, opened);
         }
-        handles.push(handle);
+    }
+    // Parent links are read again while the handles pin those PIDs.
+    let entries = process_entries()?;
+    let roots: Vec<u32> = entries
+        .iter()
+        .filter(|entry| matches_image(entry, image, own_pid))
+        .filter_map(|entry| {
+            let (handle, _) = held.get(&entry.pid)?;
+            let path = image_path(handle.0)?;
+            expected
+                .is_none_or(|expected| same_image_path(&path, expected))
+                .then_some(entry.pid)
+        })
+        .collect();
+    let created = held
+        .iter()
+        .map(|(pid, (_, created))| (*pid, *created))
+        .collect();
+    let tree = verified_tree(&entries, &roots, &created, own_pid);
+    for pid in &tree {
+        if let Some((handle, _)) = held.get(pid) {
+            unsafe {
+                TerminateProcess(handle.0, 1);
+            }
+        }
     }
     let deadline = std::time::Instant::now() + wait;
-    for handle in &handles {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        unsafe {
-            WaitForSingleObject(handle.0, remaining.as_millis().min(u32::MAX as u128) as u32);
+    for pid in &tree {
+        if let Some((handle, _)) = held.get(pid) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            unsafe {
+                WaitForSingleObject(handle.0, remaining.as_millis().min(u32::MAX as u128) as u32);
+            }
         }
     }
     Ok(())
@@ -370,10 +482,63 @@ mod tree_tests {
         assert_eq!(tree, [100, 200, 300, 400, 800]);
         assert!(process_tree(&entries, "missing.exe", 700).is_empty());
     }
+
+    #[test]
+    fn reused_parent_pid_does_not_adopt_an_older_process() {
+        // 100 is the relay (created at t=50). 200 is its real child (t=60).
+        // 300 recorded parent 100 long ago (t=10), before the PID was reused.
+        let entries = [
+            entry(100, 4, "ag_dns.exe"),
+            entry(200, 100, "powershell.exe"),
+            entry(250, 200, "conhost.exe"),
+            entry(300, 100, "editor.exe"),
+            entry(400, 300, "child-of-editor.exe"),
+            entry(500, 100, "unverifiable.exe"),
+        ];
+        let created = [(100, 50), (200, 60), (250, 61), (300, 10), (400, 70)]
+            .into_iter()
+            .collect();
+        let mut tree = verified_tree(&entries, &[100], &created, 1);
+        tree.sort_unstable();
+        // 300 is older than 100, so neither it nor its child is touched; 500
+        // could not be opened and verified.
+        assert_eq!(tree, [100, 200, 250]);
+    }
 }
 
 #[cfg(all(test, windows))]
 mod tree_windows_tests {
+    #[test]
+    fn same_image_name_from_another_folder_is_left_running() {
+        use std::os::windows::process::CommandExt;
+        let image = format!("ag_tree_other_{}.exe", std::process::id());
+        let system = std::env::var_os("SystemRoot").unwrap();
+        let cmd = std::path::Path::new(&system).join(r"System32\cmd.exe");
+        let expected_dir = tempfile::tempdir().unwrap();
+        let other_dir = tempfile::tempdir().unwrap();
+        let expected = expected_dir.path().join(&image);
+        let other = other_dir.path().join(&image);
+        std::fs::copy(&cmd, &expected).unwrap();
+        std::fs::copy(&cmd, &other).unwrap();
+        let spawn = |path: &std::path::Path| {
+            std::process::Command::new(path)
+                .args(["/d", "/c", "ping -n 30 127.0.0.1 >nul"])
+                .creation_flags(0x0800_0000)
+                .spawn()
+                .unwrap()
+        };
+        let mut wanted = spawn(&expected);
+        let mut stranger = spawn(&other);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        super::terminate_image_tree(&image, Some(&expected), std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(wanted.try_wait().unwrap().is_some());
+        let survived = stranger.try_wait().unwrap().is_none();
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        assert!(survived, "a process from another folder was terminated");
+    }
+
     #[test]
     fn image_tree_termination_stops_the_process_and_its_children() {
         use std::os::windows::process::CommandExt;
@@ -406,7 +571,8 @@ mod tree_windows_tests {
         );
         assert!(super::image_running(&image).unwrap());
 
-        super::terminate_image_tree(&image, std::time::Duration::from_secs(2)).unwrap();
+        super::terminate_image_tree(&image, Some(&shell), std::time::Duration::from_secs(2))
+            .unwrap();
 
         assert!(parent.try_wait().unwrap().is_some());
         assert!(!super::image_running(&image).unwrap());

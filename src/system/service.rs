@@ -365,7 +365,11 @@ fn stop_worker() -> Result<(), String> {
     }
     // The relay's route helpers run as child processes; stop them with it.
     #[cfg(windows)]
-    crate::system::process::terminate_image_tree(EXE_NAME, std::time::Duration::from_secs(2))?;
+    crate::system::process::terminate_image_tree(
+        EXE_NAME,
+        Some(&installed_exe()),
+        std::time::Duration::from_secs(2),
+    )?;
     #[cfg(target_os = "macos")]
     crate::system::process::stop_process_by_name(EXE_NAME);
     Ok(())
