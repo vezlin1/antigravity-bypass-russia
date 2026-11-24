@@ -152,7 +152,7 @@ def main():
         root = (args.fixture_dir or temporary).resolve()
         pinned = json.loads((ROOT / "tests/upstream-versions.json").read_text())
         checks = [(check_historical, (root, args.target, *item)) for item in FIXTURES]
-        for platform, manifest in pinned["previous"]["cli"].items():
+        for platform, manifest in pinned["current"]["cli"].items():
             # macOS transaction tests invoke codesign, which cannot sign PE/ELF.
             # The Windows CI job covers those formats as well as both Mach-O builds.
             if sys.platform != "darwin" or platform.startswith("darwin"):

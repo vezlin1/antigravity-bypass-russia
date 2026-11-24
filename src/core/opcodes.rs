@@ -32,6 +32,11 @@ pub const CLI_GATE_X64_LONG_PATCHED_REGEX: &str =
     r"(?s-u)\x48\x85\xc0\x0f\x84....\x90\x90\x90\x90\x0f\x85....";
 pub const CLI_GATE_X64_LONG_FIX: &[u8] = b"\x90\x90\x90\x90";
 pub const CLI_GATE_X64_LONG_FIX_AT: usize = 9;
+/// Newer backends keep AuthResult in RCX after checking the error in RAX.
+/// Include the error guard and call to IneligibilityFromResult so the RAX
+/// comparison inside that diagnostic helper is not mistaken for the login gate.
+pub const CLI_GATE_X64_BACKEND_ORIG_REGEX: &str = r"(?s-u)\x48\x85\xc0\x0f\x85....\x48\x85\xc9\x0f\x84....\x80\x79\x08\x00\x0f\x85....\x48\x89\xc8\x90\xe8....";
+pub const CLI_GATE_X64_BACKEND_PATCHED_REGEX: &str = r"(?s-u)\x48\x85\xc0\x0f\x85....\x48\x85\xc9\x0f\x84....\x90\x90\x90\x90\x0f\x85....\x48\x89\xc8\x90\xe8....";
 pub const CLI_GATE_X64_LONG_V1_PATCHED_REGEX: &str =
     r"(?s-u)\x48\x85\xc0\x90\x90\x90\x90\x90\x90\x80\x78\x08\x00\x0f\x85....";
 pub const CLI_GATE_X64_LONG_V1_FIX: &[u8] = b"\x48\x85\xc0\x90\x90\x90\x90\x90\x90";
@@ -75,6 +80,16 @@ pub fn regex_cli_x64_long_orig() -> &'static BytesRegex {
 pub fn regex_cli_x64_long_patched() -> &'static BytesRegex {
     static RE: OnceLock<BytesRegex> = OnceLock::new();
     RE.get_or_init(|| BytesRegex::new(CLI_GATE_X64_LONG_PATCHED_REGEX).expect("Valid regex"))
+}
+#[inline]
+pub fn regex_cli_x64_backend_orig() -> &'static BytesRegex {
+    static RE: OnceLock<BytesRegex> = OnceLock::new();
+    RE.get_or_init(|| BytesRegex::new(CLI_GATE_X64_BACKEND_ORIG_REGEX).expect("Valid regex"))
+}
+#[inline]
+pub fn regex_cli_x64_backend_patched() -> &'static BytesRegex {
+    static RE: OnceLock<BytesRegex> = OnceLock::new();
+    RE.get_or_init(|| BytesRegex::new(CLI_GATE_X64_BACKEND_PATCHED_REGEX).expect("Valid regex"))
 }
 #[inline]
 pub fn regex_cli_x64_long_v1_patched() -> &'static BytesRegex {
