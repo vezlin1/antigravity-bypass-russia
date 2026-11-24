@@ -2,24 +2,23 @@
 
 <img src="assets/icon.png" width="115" height="115" alt="Antigravity Logo" />
 
-# ANTIGRAVITY-BYPASS-RUSSIA
+# Antigravity Bypass Russia
 
-### ⚡ Разблокировка Google Antigravity & Gemini в России
-**Выборочная настройка DNS для Google AI на Windows, macOS и Linux**
+### ⚡ Google Antigravity и Gemini в России — без VPN
+**Убирает региональную блокировку одной кнопкой на Windows, macOS и Linux**
 
 [![Платформы](https://img.shields.io/badge/Платформа-Windows_•_macOS_•_Linux-0078D4.svg?style=flat-square&logo=linux&logoColor=white)](README.md)
 [![Сеть](https://img.shields.io/badge/Сеть-VPN_не_нужен-2ea44f.svg?style=flat-square&logo=shield&logoColor=white)](README.md)
-[![Размер](https://img.shields.io/badge/Размер-1.08_МБ_(Rust)-8A2BE2.svg?style=flat-square&logo=rust&logoColor=white)](https://github.com/vezlin1/antigravity-bypass-russia/releases)
+[![Размер](https://img.shields.io/badge/Размер-2.7_МБ_(Rust)-8A2BE2.svg?style=flat-square&logo=rust&logoColor=white)](https://github.com/vezlin1/antigravity-bypass-russia/releases)
 [![Лицензия](https://img.shields.io/badge/Лицензия-MIT-informational.svg?style=flat-square)](LICENSE)
 
 <p align="center">
   <a href="#-что-это-такое">О проекте</a> •
   <a href="#-быстрый-старт">Быстрый старт</a> •
-  <a href="#-как-это-работает">Как это работает</a> •
-  <a href="#-поддерживаемые-редакторы">Поддержка</a> •
-  <a href="#-часто-задаваемые-вопросы-faq">FAQ</a> •
-  <a href="#-чистый-откат">Откат</a> •
-  <a href="#-сборка-из-исходников">Сборка</a>
+  <a href="#-пункты-меню">Меню</a> •
+  <a href="#-если-не-работает">Если не работает</a> •
+  <a href="#-частые-вопросы">Вопросы</a> •
+  <a href="#️-для-продвинутых">Для продвинутых</a>
 </p>
 
 </div>
@@ -28,21 +27,12 @@
 
 ## 💡 Что это такое
 
-**Antigravity Bypass Russia** — бесплатная открытая утилита, которая устраняет региональные блокировки (**`User is ineligible`**, **`Location not supported`**) в **Google Antigravity**, **Gemini**, **Antigravity IDE** и расширениях для **VS Code / Cursor / Windsurf**.
+Утилита убирает ошибки **«User is ineligible»** и **«Location not supported»** в
+**Google Antigravity**, **Gemini**, **Antigravity IDE** и расширениях для
+**VS Code / Cursor / Windsurf**.
 
-После настройки откройте нужный клиент и отправьте короткий запрос модели. Если ответа нет,
-команда `report` сохранит локальный JSON с результатами DNS по каждому домену, проверками
-TLS/HTTP и последними распознанными ошибками. Сообщение Google о лицензии (#3501) требует
-проверки доступа у администратора аккаунта. При сообщении о квоте проверьте лимит модели.
-
-На Windows пункт **[1] Включить обход** следует маршрутам Windows при включении и
-отключении VPN и запускает Antigravity с запасным CONNECT на случай блокировки
-локального DNS. Если VPN блокирует локальный DNS утилиты, веб-версии Gemini и
-AI Studio при включённом VPN работают через него, а после отключения VPN фоновая
-служба сама включает для них обход — перезапускать утилиту не нужно. При
-повторном включении VPN эти сайты снова передаются ему. После смены сети может
-потребоваться повторить запрос, который уже выполнялся.
-[Подключение через VPN](docs/network-providers.md#автоматическое-подключение-windows)
+Работает без VPN: всё настраивается одной кнопкой и так же одной кнопкой
+убирается. Бесплатно, с открытым кодом.
 
 <br/>
 
@@ -56,25 +46,191 @@ AI Studio при включённом VPN работают через него, 
 
 ### 🪟 Windows 10 / 11
 
-#### Вариант 1: Готовый файл (Рекомендуется)
-1. Скачайте [**`antigravity-bypass-russia.exe`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest) из раздела релизов.
-2. Запустите файл двойным кликом (при запросе подтвердите запуск от имени Администратора).
-3. В появившемся меню выберите **[1] Включить обход**. Утилита ищет Antigravity
-   в стандартных папках и по установочным записям Windows. Ненайденную
-   установку можно добавить через **[4] Пути к Antigravity**: утилита покажет,
-   что нашла по указанному пути, и сохранит его после подтверждения. Путь
-   учитывается при последующих запусках и откате; там же его можно убрать.
-4. После сообщения «Готово!» запустите Antigravity и войдите в свой Google-аккаунт.
+1. Скачайте [**`antigravity-bypass-russia.exe`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest).
+2. Запустите его двойным кликом и разрешите запуск от имени администратора.
+3. Нажмите **`1`** (**Включить обход**) и **Enter**.
+4. Когда появится «Готово», откроется Antigravity — войдите в свой Google-аккаунт.
+
+Утилита сама находит Antigravity. Если он установлен в необычную папку, укажите её
+в пункте **[4] Пути к Antigravity**.
 
 > [!TIP]
-> **Предупреждение Windows SmartScreen:**  
-> Это стандартное уведомление Windows для новых открытых утилит без платного сертификата Microsoft. Нажмите *«Подробнее» → «Выполнить в любом случае»*. Исходный код полностью открыт для проверки.
+> **Windows пишет «Система Windows защитила ваш компьютер»?**  
+> Так Windows встречает новые программы без платного сертификата Microsoft. Нажмите
+> *«Подробнее» → «Выполнить в любом случае»*. Исходный код открыт для проверки.
 
-#### Вариант 2: Запуск через PowerShell (Без скачивания .exe)
+### 🍏 macOS (Apple Silicon и Intel)
+
+1. Откройте **Терминал** и выполните:
+   ```bash
+   curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh
+   ```
+2. Нажмите **`1`** (**Включить обход**) и **Enter**. При необходимости утилита
+   спросит пароль администратора.
+3. Перезапустите Antigravity, если он был открыт.
+
 <details>
-<summary><b>Инструкция для PowerShell</b></summary>
+<summary>Скачать скрипт вручную</summary>
 
-1. Скачайте архив проекта: **[Download ZIP](https://github.com/vezlin1/antigravity-bypass-russia/archive/refs/heads/main.zip)** и распакуйте папку.
+Скачайте [**`unlock_and_restore.sh`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest)
+и запустите его в Терминале:
+```bash
+chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh
+```
+</details>
+
+### 🐧 Linux
+
+Подходят Ubuntu 22.04+, Debian 12+ и другие системы того же поколения (x86_64 и ARM64).
+
+1. Выполните в терминале:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/vezlin1/antigravity-bypass-russia/main/scripts/install.sh | bash
+   ```
+2. Запустите утилиту командой `ag-bypass`.
+3. Нажмите **`1`** (**Включить обход**) и **Enter**.
+
+<details>
+<summary>Пакет .deb или отдельный файл</summary>
+
+**Пакет `.deb` (Ubuntu, Debian, Linux Mint).** Скачайте
+[**`antigravity-bypass-russia-linux-x64.deb`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest)
+и установите:
+```bash
+sudo dpkg -i antigravity-bypass-russia-linux-x64.deb
+```
+
+**Отдельный файл:**
+```bash
+# Обычный компьютер (x86_64)
+curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
+
+# ARM64 (Raspberry Pi, Asahi Linux, ARM-серверы)
+curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-arm64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
+```
+</details>
+
+<details>
+<summary>Системные требования Linux</summary>
+
+Готовые сборки требуют glibc 2.35+ и OpenSSL 3. Нужны `iproute2`, `procps`, `psmisc`,
+`lsof` и `sudo` или PolicyKit. Перед изменением файлов закройте Antigravity.
+
+Как утилита работает с systemd-resolved и `/etc/resolv.conf`, описано в
+[Подробностях](docs/details.md#linux).
+</details>
+
+---
+
+## 📋 Пункты меню
+
+| Пункт | Что делает |
+|:---:|---|
+| **1** | **Включить обход.** Настраивает всё сразу. Начните с него. |
+| **2** | Настроить только файлы Antigravity — например, после его обновления. |
+| **3** | Настроить только подключение — например, после смены сети или провайдера. |
+| **4** | Указать, где установлен Antigravity, если утилита не нашла его сама. |
+| **5** | Проверить, есть ли связь с серверами Google. |
+| **6** | **Отключить обход** и вернуть всё как было. |
+| **7** | Сохранить файл диагностики для обращения в поддержку. |
+| **0** | Выход. |
+
+---
+
+## 🆘 Если не работает
+
+1. Выберите **[5] Проверить подключение**. Утилита покажет, с какими серверами нет
+   связи, и подскажет, что сделать.
+2. Закройте Antigravity и выберите **[1] Включить обход** ещё раз.
+3. Не помогло? Выберите **[7] Сохранить диагностику** и
+   [создайте обращение](https://github.com/vezlin1/antigravity-bypass-russia/issues/new),
+   приложив этот файл. В нём нет паролей, токенов и текстов переписок.
+
+Если утилита показала ошибку, в ней уже написано, что случилось и что сделать.
+Расшифровка технических причин — в [Подробностях](docs/details.md).
+
+---
+
+## ❓ Частые вопросы
+
+<details>
+<summary><b>Нужен ли VPN?</b></summary>
+<p>
+Нет. Утилита рассчитана на домашнюю или мобильную сеть. Доступность зависит от
+провайдера и прав Google-аккаунта.
+</p>
+</details>
+
+<details>
+<summary><b>Безопасно ли это для Google-аккаунта и системы?</b></summary>
+<p>
+<b>Абсолютно безопасно.</b> Проект полностью Open Source. Программа не крадёт токены,
+не подменяет SSL-сертификаты и не отправляет личные данные. Исходный код доступен для
+независимого аудита в этом репозитории.
+</p>
+</details>
+
+<details>
+<summary><b>Замедлится ли интернет или онлайн-игры?</b></summary>
+<p>
+Нет. Утилита меняет путь только для сервисов Google AI, остальной трафик идёт как
+раньше. Скорость самого Antigravity зависит от нагрузки на сервис и модели.
+</p>
+</details>
+
+<details>
+<summary><b>Antigravity обновился и снова пишет про регион</b></summary>
+<p>
+Запустите утилиту и выберите пункт <b>1</b> ещё раз.
+</p>
+</details>
+
+<details>
+<summary><b>При входе бесконечная загрузка</b></summary>
+<p>
+Закройте Antigravity и выберите пункт <b>1</b> ещё раз: утилита сбросит устаревший
+кэш сессий. Если не помогло, проверьте связь пунктом <b>5</b>.
+</p>
+</details>
+
+<details>
+<summary><b>У меня включён VPN — работают ли веб-версии Gemini и AI Studio?</b></summary>
+<p>
+Пока VPN включён, они открываются через него. Когда вы отключите VPN, утилита на
+Windows сама включит для них обход — перезапускать её не нужно. На сам Antigravity
+VPN не влияет.
+</p>
+</details>
+
+<details>
+<summary><b>Как всё удалить?</b></summary>
+<p>
+Выберите пункт <b>[6] Отключить обход</b>. Утилита вернёт исходные файлы Antigravity
+и прежние сетевые настройки. Настройки, которые вы меняли сами, она не трогает.
+Что именно восстанавливается — в <a href="docs/details.md#что-делает-откат">Подробностях</a>.
+</p>
+</details>
+
+---
+
+## 🛠️ Для продвинутых
+
+<details>
+<summary><b>Как это работает и технические подробности</b></summary>
+
+Через локальный DNS-релей идут только запросы к серверам Google AI, а проверка
+страны в Antigravity снимается локальным патчем. Всё работает на вашем компьютере.
+
+Подробно — в [docs/details.md](docs/details.md): поддерживаемые клиенты, работа с VPN,
+резервный сервер daily, расшифровка ошибок маршрута, состав отката, Linux.
+DNS-провайдеры и `network.json` — в [docs/network-providers.md](docs/network-providers.md).
+</details>
+
+<details>
+<summary><b>Windows: запуск через PowerShell без .exe</b></summary>
+
+1. Скачайте [архив проекта](https://github.com/vezlin1/antigravity-bypass-russia/archive/refs/heads/main.zip)
+   и распакуйте его.
 2. Запустите **PowerShell от имени администратора**, перейдите в папку проекта и выполните:
    ```powershell
    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
@@ -83,78 +239,10 @@ AI Studio при включённом VPN работают через него, 
 3. В меню выберите пункт **`1`**.
 </details>
 
----
-
-### 🍏 macOS (Apple Silicon & Intel)
-
-#### Вариант 1: Быстрый запуск в Терминале (Рекомендуется)
-1. Откройте **Терминал** и выполните команду для скачивания и запуска готовой утилиты:
-   ```bash
-   curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/unlock_and_restore.sh -o unlock_and_restore.sh && chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh
-   ```
-2. В интерактивном меню введите **`1`** (**`Включить обход`**) и нажмите **Enter**. Скрипт настроит системный резолвер и снимет региональные ограничения (при необходимости запросит пароль администратора).
-3. Если утилита сообщит, что основной Cloud Code недоступен и Antigravity переключён на daily, перезапустите Antigravity и откройте новое окно Терминала для CLI. Адрес daily задаётся через `CLOUD_CODE_URL` и сохраняется после перезагрузки. [Подробнее](docs/network-providers.md)
-
-> [!TIP]
-> Вы также можете вручную скачать [**`unlock_and_restore.sh`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest) из раздела релизов и запустить его через Терминал (`chmod +x unlock_and_restore.sh && ./unlock_and_restore.sh`).
-
-#### Вариант 2: Запуск из исходников (Для разработчиков)
 <details>
-<summary><b>Инструкция для сборки из репозитория (требуется Rust)</b></summary>
+<summary><b>macOS и Linux: запуск из исходников</b></summary>
 
-Если у вас установлен **Rust** (`cargo`), вы можете запустить утилиту прямо из клонированного репозитория:
-```bash
-git clone https://github.com/vezlin1/antigravity-bypass-russia.git
-cd antigravity-bypass-russia
-chmod +x scripts/unlock_and_restore.sh
-./scripts/unlock_and_restore.sh
-```
-*(Запускайте без `sudo` — скрипт сам соберёт движок через Cargo и запросит права администратора только при необходимости).*
-</details>
-
----
-
-### 🐧 Linux (Ubuntu, Debian, Fedora, Arch Linux, ARM64 и др.)
-
-Готовые Linux-сборки требуют glibc 2.35+ и OpenSSL 3 (например, Ubuntu 22.04+ или Debian 12+). Нужны `iproute2`, `procps`, `psmisc`, `lsof` и `sudo`/PolicyKit.
-
-В системах с systemd-resolved сохраняются исходные DNS и домены интерфейса; без него поддерживается обычный файл `/etc/resolv.conf`. Если другая служба управляет этим файлом через символическую ссылку, утилита сохраняет её настройки и сообщает о необходимости отдельной настройки DNS. Для Gemini и AI Studio используется локальный DNS-релей; обычные домены передаются исходным DNS-серверам. Откат восстанавливает сохранённые настройки. Без systemd фоновый процесс работает до перезапуска системы.
-
-Перед патчем закройте приложение. Ошибки проверки `lsof` останавливают запись.
-
-#### Вариант 1: Установка в один клик (Рекомендуется)
-Выполните команду автоматической установки в терминале:
-```bash
-curl -fsSL https://raw.githubusercontent.com/vezlin1/antigravity-bypass-russia/main/scripts/install.sh | bash
-```
-Скрипт автоматически определит вашу архитектуру (**x86_64** или **ARM64**), установит утилиту в систему и создаст команды:
-* `antigravity-bypass-russia`
-* `ag-bypass`
-
-Запустите утилиту командой `ag-bypass`, введите **`1`** (**`Включить обход`**) и нажмите **Enter**.
-
-#### Вариант 2: Готовый пакет .deb или бинарный файл
-* **Пакет `.deb` (Ubuntu / Debian / Linux Mint):**
-  Скачайте [**`antigravity-bypass-russia-linux-x64.deb`**](https://github.com/vezlin1/antigravity-bypass-russia/releases/latest) и установите:
-  ```bash
-  sudo dpkg -i antigravity-bypass-russia-linux-x64.deb
-  ```
-* **Прямой запуск бинарного файла:**
-  ```bash
-  # Для 64-битных ПК (x86_64):
-  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-x64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
-
-  # Для ARM64 (Raspberry Pi, Asahi Linux, ARM-серверы):
-  curl -fsSL https://github.com/vezlin1/antigravity-bypass-russia/releases/latest/download/antigravity-bypass-russia-linux-arm64 -o antigravity-bypass-russia && chmod +x antigravity-bypass-russia && ./antigravity-bypass-russia
-  ```
-* **Arch Linux / Manjaro:**
-  В репозитории доступен [`packages/arch/PKGBUILD`](packages/arch/PKGBUILD) для быстрой сборки и установки через `makepkg -si`.
-
-#### Вариант 3: Запуск из репозитория
-<details>
-<summary><b>Инструкция для сборки из репозитория (требуется Rust)</b></summary>
-
-Установите системные зависимости (если ещё не установлены):
+Нужен **Rust** (`cargo`). На Linux сначала установите зависимости:
 ```bash
 # Ubuntu / Debian
 sudo apt install build-essential pkg-config libssl-dev lsof iproute2 procps psmisc
@@ -166,138 +254,44 @@ sudo dnf install gcc pkgconf-pkg-config openssl-devel lsof iproute procps-ng psm
 sudo pacman -S base-devel openssl lsof iproute2 procps-ng psmisc
 ```
 
-Склонируйте репозиторий и запустите скрипт:
+Затем:
 ```bash
 git clone https://github.com/vezlin1/antigravity-bypass-russia.git
 cd antigravity-bypass-russia
 chmod +x scripts/unlock_and_restore.sh
 ./scripts/unlock_and_restore.sh
 ```
-*(Запускайте без `sudo` — скрипт сам соберёт движок через Cargo от вашего пользователя и запросит `sudo` только при установке службы и обновлении сетевых настроек).*
-</details>
+Запускайте без `sudo`: скрипт сам соберёт утилиту и запросит права администратора
+только там, где они нужны.
 
----
-
-## ⚙️ Как это работает
-
-Утилита работает точечно и полностью локально на вашем компьютере:
-
-- **Скорость запросов.** Задержка зависит от DNS, выбранного узла и времени ответа модели.
-- **Селективная маршрутизация (SmartDNS):**  
-  Только служебные запросы к серверам Google AI направляются через локальный DNS-релей. Лишний трафик через релей не проходит.
-- **Локальный патч региона:**  
-  Снимает внутреннюю проверку страны в ядре Antigravity, позволяя использовать ваш основной рабочий аккаунт.
-
-> [!NOTE]
-> **Конфиденциальность:** Программа не сохраняет пароли, не перехватывает SSL-сертификаты, не читает ваш код и не собирает телеметрию.
-
----
-
-## 🧩 Поддерживаемые редакторы
-
-- **Antigravity IDE** — автономная среда разработки от Google;
-- **Ядро Antigravity 2.0 (`language_server`)** — для процессоров x64 и ARM64;
-- **Расширения Antigravity** для **Visual Studio Code**, **Cursor**, **Windsurf**, **VS Code Insiders** и **VSCodium**;
-- Консольная утилита **Antigravity CLI (`agy`)**.
-
----
-
-## ❓ Часто задаваемые вопросы (FAQ)
-
-<details>
-<summary><b>1. Нужен ли теперь постоянный VPN для работы в Antigravity?</b></summary>
-<p>
-Утилита рассчитана на работу через домашнюю или мобильную сеть. Доступность зависит от провайдера, выбранного маршрута и прав Google-аккаунта.
-</p>
+Для Arch Linux и Manjaro есть [`packages/arch/PKGBUILD`](packages/arch/PKGBUILD)
+(`makepkg -si`).
 </details>
 
 <details>
-<summary><b>2. Безопасно ли это для Google-аккаунта и системы?</b></summary>
-<p>
-<b>Абсолютно безопасно.</b> Проект полностью Open Source. Программа не крадёт токены, не подменяет SSL-сертификаты и не отправляет личные данные. Исходный код доступен для независимого аудита в этом репозитории.
-</p>
-</details>
-
-<details>
-<summary><b>3. Замедлится ли скорость интернета или онлайн-игр?</b></summary>
-<p>
-Маршруты настраиваются для сервисов Google AI и их DNS-провайдеров. Время ответа самого Antigravity зависит от выбранного узла, нагрузки сервиса и модели.
-</p>
-</details>
-
-<details>
-<summary><b>4. Что делать при обновлении Antigravity IDE?</b></summary>
-<p>
-Если после обновления редактора снова появится сообщение о недоступности региона — просто запустите утилиту ещё раз и выберите пункт <b>1</b>.
-</p>
-</details>
-
-<details>
-<summary><b>5. Что делать, если при входе возникает бесконечная загрузка?</b></summary>
-<p>
-1. Запустите утилиту и выберите пункт <b>[5] Проверить подключение</b>, чтобы проверить связь с серверами Google.<br>
-2. Закройте Antigravity IDE.<br>
-3. Выполните пункт <b>[1] Включить обход</b> заново (это сбросит устаревший кэш сессий V8 и обновит сетевой стек).
-</p>
-</details>
-
-<details>
-<summary><b>6. Что означает ошибка «Не удалось подобрать маршрут»?</b></summary>
-<p>
-Утилита проверяет каждый домен Antigravity дважды, второй раз через 3 секунды со свежим ответом DNS. В сообщении указан этап, на котором проверка не прошла, и совет:<br>
-• <b>DNS не вернул адресов</b> — проверьте интернет или добавьте другой DNS-провайдер в <code>network.json</code>;<br>
-• <b>нет TCP-подключения</b> — проверьте файрвол, антивирус и Kill Switch в VPN;<br>
-• <b>обрыв TLS</b> — похоже на блокировку по имени сайта у провайдера: повторите позже, попробуйте другую сеть или VPN с обфускацией трафика;<br>
-• <b>сертификат не прошёл проверку</b> — отключите проверку HTTPS в антивирусе;<br>
-• <b>сервер отвечает ошибкой HTTP 5xx</b> — релей перегружен, повторите через несколько минут.<br>
-Если недоступен только основной <code>cloudcode-pa.googleapis.com</code>, настройка не прерывается: на Windows и macOS Antigravity App, IDE и CLI переключаются на резервный адрес daily. После этого перезапустите Antigravity и откройте новый терминал для CLI. <a href="https://github.com/vezlin1/antigravity-bypass-russia/issues/32">#32</a>
-</p>
-</details>
-
-<details>
-<summary><b>7. Как полностью удалить изменения и вернуть всё к исходному состоянию?</b></summary>
-<p>
-Запустите утилиту и выберите пункт <b>[6] Отключить обход</b>. Программа восстановит оригинальные файлы из резервных копий, очистит сетевые правила и вернёт прежние настройки endpoint.
-</p>
-</details>
-
----
-
-## ↩️ Чистый откат
-
-Если вы решите полностью удалить изменения:
-1. Запустите `antigravity-bypass-russia.exe` (или скрипт).
-2. Выберите пункт **`[6] Отключить обход`**.
-3. Программа автоматически:
-   - Восстановит оригинальные файлы ядра и интерфейса из резервных копий;
-   - Удалит записи маршрутизации (NRPT на Windows / `/etc/resolver/` на macOS / `/etc/hosts` и systemd-сервис на Linux);
-   - Сбросит системный кэш DNS и кэш сессий V8;
-   - Вернёт прежние `CLOUD_CODE_URL` и `jetski.cloudCodeUrl`. На macOS удалит LaunchAgent `com.antigravity.bypass.daily-endpoint` и помеченный блок в `~/.zshenv` (`~/.bash_profile`), остальные строки профиля сохранятся.
-
-Значения, которые вы изменили сами после настройки, откат не перезаписывает.
-
----
-
-## 🛠️ Сборка из исходников
-
-Если вы хотите собрать бинарный файл самостоятельно:
+<summary><b>Сборка из исходников</b></summary>
 
 ```bash
-# Клонирование репозитория
 git clone https://github.com/vezlin1/antigravity-bypass-russia.git
 cd antigravity-bypass-russia
-
-# Сборка релизной версии с максимальной оптимизацией (Fat LTO)
 cargo build --release
 ```
-Готовый исполняемый файл будет создан в папке: `target/release/`.
+Готовый файл появится в `target/release/`.
+</details>
+
+<details>
+<summary><b>Команды для терминала</b></summary>
+
+`antigravity-bypass-russia --help` покажет все команды. Основные: `unlock`
+(включить обход), `rollback` (отключить), `status`, `diagnostics` (проверить связь)
+и `report` (сохранить диагностику).
+</details>
 
 ---
 
 ## 🙏 Благодарности
 
-Проект вдохновлен наработками и концепциями:
-- [confeden/Antigravity](https://github.com/confeden/Antigravity)
+Проект вдохновлён наработками и идеями [confeden/Antigravity](https://github.com/confeden/Antigravity).
 
 ---
 
