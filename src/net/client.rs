@@ -463,10 +463,22 @@ fn query_targets(
         }
         let (n, from) = match sock.recv_from(&mut buf) {
             Ok(received) => received,
-            // Windows reports an ICMP error from one server on the shared
-            // socket; the remaining servers can still answer.
-            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => continue,
-            Err(_) => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break
+            }
+            // Windows reports an ICMP error (port unreachable, TTL expired)
+            // from one server on the shared socket. Each target got exactly
+            // one datagram, so the error stands for one server that will not
+            // answer: stop waiting for it, keep waiting for the others.
+            Err(_) => {
+                pending = pending.saturating_sub(1);
+                continue;
+            }
         };
         let std::net::SocketAddr::V4(from) = from else {
             continue;
@@ -514,6 +526,47 @@ mod fan_out_tests {
             socket.send_to(&reply, peer).unwrap();
         });
         (address, worker)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_unreachable_server_does_not_hold_up_the_others() {
+        // A loopback port with no listener answers with ICMP port unreachable,
+        // which Windows reports on the shared socket as ConnectionReset.
+        let closed = {
+            let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let std::net::SocketAddr::V4(address) = socket.local_addr().unwrap() else {
+                panic!()
+            };
+            address
+        };
+        let query = build_query("fan-out.example", 4343);
+        let (empty, worker) = server(vec![], 0);
+        let started = Instant::now();
+        let (_, from) = query_targets(
+            &query,
+            &[closed, empty],
+            0,
+            Duration::from_secs(1),
+            is_successful_response,
+            |reply| !answer_addrs(reply).is_empty(),
+        )
+        .unwrap();
+        worker.join().unwrap();
+        assert_eq!(from, empty);
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        let started = Instant::now();
+        assert!(query_targets(
+            &query,
+            &[closed],
+            0,
+            Duration::from_secs(1),
+            is_successful_response,
+            |_| true,
+        )
+        .is_none());
+        assert!(started.elapsed() < Duration::from_millis(500));
     }
 
     #[test]

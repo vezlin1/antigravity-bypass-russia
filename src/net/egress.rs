@@ -154,7 +154,8 @@ fn pick_physical_route(adapters: &[AdapterInfo], routes: &[DefaultRoute]) -> Opt
 #[cfg(windows)]
 fn physical_default_route() -> Option<(u32, String)> {
     use windows_sys::Win32::NetworkManagement::IpHelper::{
-        FreeMibTable, GetIfTable2, GetIpForwardTable2, MIB_IF_TABLE2, MIB_IPFORWARD_TABLE2,
+        FreeMibTable, GetIfTable2, GetIpForwardTable2, MIB_IF_ROW2, MIB_IF_TABLE2,
+        MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
     };
     use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
     use windows_sys::Win32::Networking::WinSock::AF_INET;
@@ -167,8 +168,10 @@ fn physical_default_route() -> Option<(u32, String)> {
         if GetIfTable2(&mut table) != 0 || table.is_null() {
             return None;
         }
-        let rows =
-            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        let rows = std::slice::from_raw_parts(
+            std::ptr::addr_of!((*table).Table).cast::<MIB_IF_ROW2>(),
+            (*table).NumEntries as usize,
+        );
         for row in rows {
             let flags = row.InterfaceAndOperStatusFlags._bitfield;
             let length = row
@@ -193,8 +196,10 @@ fn physical_default_route() -> Option<(u32, String)> {
         if GetIpForwardTable2(AF_INET, &mut table) != 0 || table.is_null() {
             return None;
         }
-        let rows =
-            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        let rows = std::slice::from_raw_parts(
+            std::ptr::addr_of!((*table).Table).cast::<MIB_IPFORWARD_ROW2>(),
+            (*table).NumEntries as usize,
+        );
         for row in rows {
             let prefix = &row.DestinationPrefix;
             if prefix.PrefixLength != 0
