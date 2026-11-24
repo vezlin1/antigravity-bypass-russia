@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Pre-push: `cargo check` and the unit + socket tests on the exact commit being pushed.
+#
+# Enabled per clone with:  git config core.hooksPath .githooks
+# Runs in a reusable detached worktree under target/pre-push, so uncommitted edits in
+# this checkout can neither hide nor cause a failure. Budget: 30s once warm (the first
+# run builds dependencies). Skip deliberately with `git push --no-verify`.
+set -euo pipefail
+
+root=$(git rev-parse --show-toplevel)
+zero=0000000000000000000000000000000000000000
+shas=()
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+    [[ "$local_sha" == "$zero" ]] && continue          # deleting a remote branch
+    [[ "$local_ref" == refs/tags/* ]] && continue      # a tag names a commit pushed before
+    shas+=("$local_sha")
+done
+((${#shas[@]})) || exit 0
+
+start=$SECONDS
+base="$root/target/pre-push"
+tree="$base/worktree"
+export CARGO_TARGET_DIR="$base/target"
+if ! git -C "$tree" rev-parse --git-dir >/dev/null 2>&1; then
+    rm -rf "$tree"
+    git -C "$root" worktree prune
+    git -C "$root" worktree add --detach --quiet "$tree" "${shas[0]}"
+fi
+
+for sha in $(printf '%s\n' "${shas[@]}" | sort -u); do
+    git -C "$tree" checkout --detach --force --quiet "$sha"
+    git -C "$tree" clean -fdq
+    echo "pre-push: checking $(git -C "$tree" log -1 --format='%h %s')"
+    (
+        cd "$tree"
+        cargo check --locked --quiet --bin antigravity-bypass-russia
+        cargo test --locked --quiet --bin antigravity-bypass-russia --test socket_tests
+    )
+done
+
+elapsed=$((SECONDS - start))
+echo "pre-push: passed in ${elapsed}s (budget 30s)"
