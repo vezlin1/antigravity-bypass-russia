@@ -5,7 +5,9 @@ use std::fs;
 use std::io::Write;
 use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+#[cfg(any(windows, target_os = "linux"))]
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
