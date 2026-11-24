@@ -7,7 +7,7 @@ use std::net::{Ipv4Addr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 pub const LISTEN_IP: &str = "127.0.0.1";
@@ -29,80 +29,130 @@ const WORKER_IDLE_EXIT: Duration = Duration::from_secs(60);
 const WORKER_STACK: usize = 512 * 1024;
 
 type Job = (Vec<u8>, std::net::SocketAddr);
+type Handler = Box<dyn Fn(Job) + Send + Sync>;
+// Same bound as the former channel: a flood beyond it is dropped, not queued.
+const QUEUE_LIMIT: usize = 256;
 
-/// Grows from MIN_WORKERS to WORKER_THREADS on demand.
+struct PoolState {
+    jobs: std::collections::VecDeque<Job>,
+    /// Workers waiting for a job, including ones that are still starting.
+    idle: usize,
+    total: usize,
+}
+
+/// Grows from MIN_WORKERS to WORKER_THREADS while queued jobs outnumber idle
+/// workers. Every worker has its own idle timer, so extra workers leave
+/// independently after a quiet `idle_exit`.
 struct WorkerPool {
-    jobs: Mutex<mpsc::Receiver<Job>>,
-    socket: Arc<UdpSocket>,
-    policy: RoutePolicy,
-    total: std::sync::atomic::AtomicUsize,
-    idle: std::sync::atomic::AtomicUsize,
+    state: Mutex<PoolState>,
+    ready: std::sync::Condvar,
+    handler: Handler,
+    idle_exit: Duration,
 }
 
 impl WorkerPool {
-    fn spawn_worker(pool: &Arc<Self>) {
-        use std::sync::atomic::Ordering;
-        if pool
-            .total
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |total| {
-                (total < WORKER_THREADS).then_some(total + 1)
-            })
-            .is_err()
-        {
-            return;
+    fn new(handler: Handler, idle_exit: Duration) -> Arc<Self> {
+        let pool = Arc::new(Self {
+            state: Mutex::new(PoolState {
+                jobs: std::collections::VecDeque::new(),
+                idle: 0,
+                total: 0,
+            }),
+            ready: std::sync::Condvar::new(),
+            handler,
+            idle_exit,
+        });
+        for _ in 0..MIN_WORKERS {
+            let reserved = {
+                let mut state = pool.lock();
+                Self::reserve(&mut state)
+            };
+            if reserved {
+                Self::spawn(&pool);
+            }
         }
+        pool
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PoolState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Counts a new worker as idle before it starts, so a burst of submits
+    /// does not spawn a thread per job while earlier ones are still starting.
+    fn reserve(state: &mut PoolState) -> bool {
+        if state.total >= WORKER_THREADS {
+            return false;
+        }
+        state.total += 1;
+        state.idle += 1;
+        true
+    }
+
+    fn spawn(pool: &Arc<Self>) {
         let worker = Arc::clone(pool);
         let spawned = thread::Builder::new()
             .name("ag-dns-worker".into())
             .stack_size(WORKER_STACK)
             .spawn(move || worker.run());
         if spawned.is_err() {
-            pool.total.fetch_sub(1, Ordering::AcqRel);
+            let mut state = pool.lock();
+            state.total -= 1;
+            state.idle -= 1;
         }
+    }
+
+    /// Queues a job; false when the queue is full and the packet is dropped.
+    fn submit(pool: &Arc<Self>, job: Job) -> bool {
+        let grow = {
+            let mut state = pool.lock();
+            if state.jobs.len() >= QUEUE_LIMIT {
+                return false;
+            }
+            state.jobs.push_back(job);
+            state.jobs.len() > state.idle && Self::reserve(&mut state)
+        };
+        pool.ready.notify_one();
+        if grow {
+            Self::spawn(pool);
+        }
+        true
     }
 
     fn run(&self) {
-        use std::sync::atomic::Ordering;
+        let mut state = self.lock();
+        let mut idle_since = Instant::now();
         loop {
-            self.idle.fetch_add(1, Ordering::AcqRel);
-            let job = match self.jobs.lock() {
-                Ok(jobs) => jobs.recv_timeout(WORKER_IDLE_EXIT),
-                Err(_) => Err(mpsc::RecvTimeoutError::Disconnected),
-            };
-            self.idle.fetch_sub(1, Ordering::AcqRel);
-            match job {
-                Ok((query, client_addr)) => {
-                    if let Some(resp) = relay(&query, self.policy) {
-                        let _ = self.socket.send_to(&resp, client_addr);
-                    } else {
-                        let name = question_name(&query).unwrap_or_else(|| "?".into());
-                        log_fatal(&format!("no answer for {} from {:?}", name, client_addr));
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    let retired = self
-                        .total
-                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |total| {
-                            (total > MIN_WORKERS).then_some(total - 1)
-                        })
-                        .is_ok();
-                    if retired {
-                        return;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.total.fetch_sub(1, Ordering::AcqRel);
+            if let Some(job) = state.jobs.pop_front() {
+                state.idle -= 1;
+                drop(state);
+                (self.handler)(job);
+                state = self.lock();
+                state.idle += 1;
+                idle_since = Instant::now();
+                continue;
+            }
+            let waited = idle_since.elapsed();
+            if waited >= self.idle_exit {
+                if state.total > MIN_WORKERS {
+                    state.total -= 1;
+                    state.idle -= 1;
                     return;
                 }
+                idle_since = Instant::now();
+                continue;
             }
+            state = self
+                .ready
+                .wait_timeout(state, self.idle_exit - waited)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
         }
     }
 
-    /// Called after queueing a job: add a worker if none is waiting for it.
-    fn ensure_capacity(pool: &Arc<Self>) {
-        if pool.idle.load(std::sync::atomic::Ordering::Acquire) == 0 {
-            Self::spawn_worker(pool);
-        }
+    #[cfg(test)]
+    fn workers(&self) -> usize {
+        self.lock().total
     }
 }
 
@@ -502,17 +552,18 @@ pub fn run() -> Result<(), String> {
     });
     let sock_arc = Arc::new(socket);
 
-    let (tx, rx) = mpsc::sync_channel::<Job>(256);
-    let pool = Arc::new(WorkerPool {
-        jobs: Mutex::new(rx),
-        socket: Arc::clone(&sock_arc),
-        policy,
-        total: Default::default(),
-        idle: Default::default(),
-    });
-    for _ in 0..MIN_WORKERS {
-        WorkerPool::spawn_worker(&pool);
-    }
+    let reply_socket = Arc::clone(&sock_arc);
+    let pool = WorkerPool::new(
+        Box::new(move |(query, client_addr): Job| {
+            if let Some(resp) = relay(&query, policy) {
+                let _ = reply_socket.send_to(&resp, client_addr);
+            } else {
+                let name = question_name(&query).unwrap_or_else(|| "?".into());
+                log_fatal(&format!("no answer for {} from {:?}", name, client_addr));
+            }
+        }),
+        WORKER_IDLE_EXIT,
+    );
 
     let mut buf = [0u8; 1500];
     let mut backoff_ms = 100;
@@ -522,9 +573,7 @@ pub fn run() -> Result<(), String> {
                 backoff_ms = 100;
                 if n >= 12 {
                     let query = buf[..n].to_vec();
-                    if tx.try_send((query, client_addr)).is_ok() {
-                        WorkerPool::ensure_capacity(&pool);
-                    }
+                    WorkerPool::submit(&pool, (query, client_addr));
                 }
             }
             Err(e) => {
@@ -744,25 +793,22 @@ mod tests {
     }
 
     #[test]
-    fn worker_pool_starts_small_answers_every_job_and_stays_bounded() {
-        use std::sync::atomic::Ordering;
+    fn worker_pool_answers_relay_jobs_and_stays_bounded() {
         let relay_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").unwrap());
         let client = UdpSocket::bind("127.0.0.1:0").unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let (tx, rx) = mpsc::sync_channel::<Job>(256);
-        let pool = Arc::new(WorkerPool {
-            jobs: Mutex::new(rx),
-            socket: Arc::clone(&relay_socket),
-            policy: RoutePolicy::Physical,
-            total: Default::default(),
-            idle: Default::default(),
-        });
-        for _ in 0..MIN_WORKERS {
-            WorkerPool::spawn_worker(&pool);
-        }
-        assert_eq!(pool.total.load(Ordering::Acquire), MIN_WORKERS);
+        let reply_socket = Arc::clone(&relay_socket);
+        let pool = WorkerPool::new(
+            Box::new(move |(query, client_addr): Job| {
+                if let Some(resp) = relay(&query, RoutePolicy::Physical) {
+                    let _ = reply_socket.send_to(&resp, client_addr);
+                }
+            }),
+            WORKER_IDLE_EXIT,
+        );
+        assert_eq!(pool.workers(), MIN_WORKERS);
         // AAAA questions are answered locally, without upstream traffic.
         let jobs = 40u16;
         for id in 0..jobs {
@@ -770,8 +816,10 @@ mod tests {
                 crate::net::client::build_query("daily-cloudcode-pa.googleapis.com", id);
             let at = query.len() - 4;
             query[at..at + 2].copy_from_slice(&28u16.to_be_bytes());
-            tx.send((query, client.local_addr().unwrap())).unwrap();
-            WorkerPool::ensure_capacity(&pool);
+            assert!(WorkerPool::submit(
+                &pool,
+                (query, client.local_addr().unwrap())
+            ));
         }
         let mut answered = std::collections::HashSet::new();
         let mut bytes = [0u8; 512];
@@ -780,8 +828,42 @@ mod tests {
             answered.insert(u16::from_be_bytes([bytes[0], bytes[1]]));
             assert!(n >= 12);
         }
-        let total = pool.total.load(Ordering::Acquire);
-        assert!((MIN_WORKERS..=WORKER_THREADS).contains(&total), "{total}");
+        assert!((MIN_WORKERS..=WORKER_THREADS).contains(&pool.workers()));
+    }
+
+    #[test]
+    fn worker_pool_grows_for_a_burst_and_extra_workers_retire_independently() {
+        let done = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let finished = Arc::clone(&done);
+        let pool = WorkerPool::new(
+            Box::new(move |_: Job| {
+                std::thread::sleep(Duration::from_millis(20));
+                finished.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+            Duration::from_millis(200),
+        );
+        let client: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let burst = || {
+            let started = Instant::now();
+            let before = done.load(std::sync::atomic::Ordering::SeqCst);
+            for _ in 0..32 {
+                assert!(WorkerPool::submit(&pool, (vec![0; 12], client)));
+            }
+            while done.load(std::sync::atomic::Ordering::SeqCst) < before + 32 {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            started.elapsed()
+        };
+        // 32 jobs of 20 ms take 320 ms on two workers; the pool must grow.
+        let first = burst();
+        assert!(first < Duration::from_millis(200), "{first:?}");
+        assert!(pool.workers() > MIN_WORKERS);
+        // Each extra worker has its own idle timer: all of them leave after
+        // one quiet period, not one per period.
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(pool.workers(), MIN_WORKERS);
+        let second = burst();
+        assert!(second < Duration::from_millis(200), "{second:?}");
     }
 
     #[test]
