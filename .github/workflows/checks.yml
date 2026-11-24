@@ -293,3 +293,19 @@ jobs:
         with:
           path: ${{ env.UPSTREAM }}
           key: ${{ steps.upstream.outputs.cache-primary-key }}
+
+  timing:
+    name: Timing report
+    needs: [changes, rust, checks, linux-runtime, aarch64, upstream-fixtures]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/scripts
+      - name: Job times against budgets
+        run: python3 .github/scripts/ci.py timing
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

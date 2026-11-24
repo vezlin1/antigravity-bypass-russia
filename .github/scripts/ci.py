@@ -1,6 +1,7 @@
-"""CI decisions and helpers for checks.yml (stdlib only).
+"""CI decisions, helpers and reports for checks.yml (stdlib only).
 
   ci.py changes        decide whether the Rust jobs must run (GITHUB_OUTPUT rust=true|false)
+  ci.py timing         write each job's time against its budget to the run summary
   ci.py build-tests CARGO_ARGS...         cargo test --no-run; export TEST_BIN and CLI_BIN
   ci.py wait-artifact NAME PRODUCER_JOB   wait for another job's upload in this run
   ci.py docs-only PATH...  print which paths the Rust filter treats as docs-only (for tests)
@@ -16,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 
 # Jobs whose success proves the full Rust suite ran for a commit.
 RUST_JOB_PREFIXES = ("Rust - ", "Checks - ", "Linux namespaces", "Build - aarch64")
@@ -158,6 +160,72 @@ def decide(rust, reason):
     output(rust=str(rust).lower())
 
 
+# Budgets in seconds: (queue, setup, running). Prefix match on the job name.
+BUDGETS = [
+    ("Changes", (30, 15, 15)),
+    ("Rust - ", (30, 60, 240)),
+    ("Checks - ", (30, 60, 180)),
+    ("Linux namespaces", (30, 30, 60)),
+    ("Build - aarch64", (30, 60, 150)),
+    ("Pinned App", (30, 30, 120)),
+    ("Release build - ", (30, 60, 240)),
+    ("Package", (30, 30, 60)),
+]
+
+
+SETUP_STEPS = ("Set up job", "Checkout", "Rust cache", "Python", "Linux packages", "Download build",
+               "Cross toolchain", "Fixture cache", "Upstream cache")
+
+
+def stamp(text):
+    return datetime.fromisoformat(text.replace("Z", "+00:00")) if text else None
+
+
+def timing():
+    repo, run_id = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
+    run = api(f"repos/{repo}/actions/runs/{run_id}")
+    now = datetime.now(timezone.utc)
+    rows, last = [], stamp(run["run_started_at"])
+    for job in sorted(run_jobs(repo, run_id), key=lambda job: job["created_at"]):
+        if job_name(job) == "Timing report" or not job["started_at"]:
+            continue
+        created, started = stamp(job["created_at"]), stamp(job["started_at"])
+        completed = stamp(job["completed_at"]) or now
+        last = max(last, completed)
+        setup = waiting = running = 0.0
+        for step in job.get("steps", []):
+            if not step.get("started_at") or not step.get("completed_at") or step["conclusion"] == "skipped":
+                continue
+            seconds = (stamp(step["completed_at"]) - stamp(step["started_at"])).total_seconds()
+            if step["name"].startswith("Post ") or step["name"] == "Complete job":
+                continue
+            if step["name"].startswith(SETUP_STEPS):
+                setup += seconds
+            elif step["name"].startswith("Wait for"):
+                waiting += seconds
+            else:
+                running += seconds
+        queue = (started - created).total_seconds()
+        budget = next((value for prefix, value in BUDGETS if job_name(job).startswith(prefix)), None)
+
+        def cell(value, limit):
+            mark = "" if limit is None or value <= limit else " ⚠"
+            return f"{value:.0f}s" + (f" / {limit}s" if limit is not None else "") + mark
+
+        rows.append(f"| {job['name']} | {job['conclusion'] or job['status']} | "
+                    f"{cell(queue, budget and budget[0])} | {cell(setup, budget and budget[1])} | "
+                    f"{waiting:.0f}s | {cell(running, budget and budget[2])} | "
+                    f"{(completed - created).total_seconds():.0f}s |")
+    wall = (last - stamp(run["created_at"])).total_seconds()
+    goal = 300
+    summary("### CI time against budget\n")
+    summary(f"Push to result: **{wall:.0f}s** (budget {goal}s at the median, 480s at p95){' ⚠' if wall > goal else ''}. "
+            "Budgets are reported, never enforced: shared runners are too noisy to fail on time.\n")
+    summary("| Job | Result | Queue | Setup | Waiting on build | Running | Total |\n|---|---|---|---|---|---|---|")
+    for row in rows:
+        summary(row)
+
+
 def build_tests():
     """Run `cargo test --no-run ARGS`; export the unit-test and CLI executables it built."""
     import subprocess
@@ -214,7 +282,7 @@ if __name__ == "__main__":
         for path in sys.argv[2:]:
             print(f"{'docs-only' if docs_only(path) else 'code'}	{path}")
         sys.exit()
-    commands = {"changes": changes, "build-tests": build_tests, "wait-artifact": wait_artifact}
+    commands = {"changes": changes, "timing": timing, "build-tests": build_tests, "wait-artifact": wait_artifact}
     if command not in commands:
         sys.exit(__doc__)
     try:
