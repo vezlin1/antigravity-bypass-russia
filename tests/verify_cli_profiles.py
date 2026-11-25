@@ -83,10 +83,14 @@ def verified_distribution(root, platform, manifest):
     return archive
 
 
-def check_profile(binary, arch, target, label):
+def check_profile(binary, arch, target, label, expected_profile=None):
     environment = dict(os.environ)
     environment[f"AGY_{arch.upper()}_FIXTURE"] = str(binary)
     environment["AGY_X64_GATE_COUNT"] = "1"
+    if expected_profile:
+        environment["AGY_X64_EXPECTED_PROFILE"] = expected_profile
+    else:
+        environment.pop("AGY_X64_EXPECTED_PROFILE", None)
     filters = [f"official_{arch}_cli_fixture", "--ignored", "--nocapture"]
     if TEST_BINARY:
         # The unit-test executable a CI build job produced: the same tests cargo would run.
@@ -110,10 +114,11 @@ def check_profile(binary, arch, target, label):
 
 def check_historical(root, target, version, arch, expected):
     binary = fixture(root, version, arch, expected)
-    check_profile(binary, arch, target, f"{version} macOS {arch}")
+    profile = "agy-x64-cli-hub-v3" if arch == "x64" else None
+    check_profile(binary, arch, target, f"{version} macOS {arch}", profile)
 
 
-def check_distribution(root, temporary, target, platform, manifest):
+def check_distribution(root, temporary, target, platform, manifest, expected_profile=None):
     folder = temporary / (manifest["version"] + "-" + platform)
     folder.mkdir(parents=True, exist_ok=True)
     binary = folder / ("agy.exe" if platform.startswith("windows") else "agy")
@@ -130,7 +135,13 @@ def check_distribution(root, temporary, target, platform, manifest):
                 with archive.extractfile(members[0]) as source, binary.open("wb") as output:
                     shutil.copyfileobj(source, output)
     arch = "arm64" if platform.endswith("arm64") else "x64"
-    check_profile(binary, arch, target, f"{manifest['version']} {platform}")
+    check_profile(
+        binary,
+        arch,
+        target,
+        f"{manifest['version']} {platform}",
+        expected_profile if arch == "x64" else None,
+    )
 
 
 def main():
@@ -156,7 +167,10 @@ def main():
             # macOS transaction tests invoke codesign, which cannot sign PE/ELF.
             # The Windows CI job covers those formats as well as both Mach-O builds.
             if sys.platform != "darwin" or platform.startswith("darwin"):
-                checks.append((check_distribution, (root, temporary, args.target, platform, manifest)))
+                checks.append((
+                    check_distribution,
+                    (root, temporary, args.target, platform, manifest, "agy-x64-backend-v4"),
+                ))
 
         if args.parallel and (os.cpu_count() or 1) >= 2 and "AGY_X64_PATCH_OUTPUT" not in os.environ:
             with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as workers:

@@ -1,12 +1,12 @@
 {
   "source": "https://antigravity.google/download",
-  "checked_at": "2026-11-24",
+  "checked_at": "2026-11-25",
   "current": {
     "app": {
-      "version": "2.35.0",
-      "url": "https://storage.googleapis.com/antigravity-public/antigravity-hub/2.35.0-6394266482769920/linux-x64/Antigravity.tar.gz",
-      "sha256": "b88719cbd5f408c0121ee77d2974011a2748306b2591d346eb488a20bc51ec29",
-      "asar_sha256": "99ff7f6cf1219f46c8437df65ca866e384836b5230adba8efd91b3152f823e15"
+      "version": "2.35.2",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-hub/2.35.2-4585983447007232/linux-x64/Antigravity.tar.gz",
+      "sha256": "2d33db282b1e9b3c7582c140dab9e86848f1b37a05bfa4a1dff7f44de1bf304f",
+      "asar_sha256": "e057115571cf5085406d20f2427a5afac272b712ec84332c7157da0113d4b2d0"
     },
     "ide": {
       "version": "2.8.0",
@@ -15,24 +15,24 @@
     },
     "cli": {
       "windows_amd64": {
-        "version": "1.5.16",
-        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.16-5250855658717184/windows-x64/cli_windows_x64.exe",
-        "sha512": "058a85911c40a0beba24d0ae4e3227ea5060388060d4746aa6b48722ff43516c16fbffe6d30e31e2c266d5b47495a7886f072cc4e0143b26eb3cd9a007578c83"
+        "version": "1.5.17",
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.17-4823843970351104/windows-x64/cli_windows_x64.exe",
+        "sha512": "7b468fb7b83f0dbd5be39afebc5ce71570de4d1020e248cf1d2461d338f5d0f6eb689500e0f68a36d26179be6632f74a2d96a34f37d6ef20f62b28b87d7c55b2"
       },
       "linux_amd64": {
-        "version": "1.5.16",
-        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.16-5250855658717184/linux-x64/cli_linux_x64.tar.gz",
-        "sha512": "3dee9f26e298156db673f6ce2a0f5dfed5b30006e04ceb9809c68070e7b717587b33a3da0f8bc2eda45af81a50bc8b14c82b28ae5832bcfe3e7fd49397117b31"
+        "version": "1.5.17",
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.17-4823843970351104/linux-x64/cli_linux_x64.tar.gz",
+        "sha512": "71a967aa16e0ab5d87196bcd6772130bdab55b2fd768cd24d21b1da401ff9f60280b976cad3dc14a2d646233b0eaf8caf87c490eed73044d54550cbb3d8d67d2"
       },
       "darwin_arm64": {
-        "version": "1.5.16",
-        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.16-5250855658717184/darwin-arm/cli_mac_arm64.tar.gz",
-        "sha512": "33f5617dc74fea606d47b2483c6d271c850c9f3c9c55b724c664c3c0d4b82100d819fbcf55714f851765f6628d4296883ac8939b4fdeb55d5e6b9ce923135d18"
+        "version": "1.5.17",
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.17-4823843970351104/darwin-arm/cli_mac_arm64.tar.gz",
+        "sha512": "209e6d2e938f2c2eb908d6d4ffd6a130a058b32e97aa16cf4e7e29cc0cd3a08867c6af4522bd41eb762a7e505eee418409a8887c2ce2d24d8abd66e246b6b972"
       },
       "darwin_amd64": {
-        "version": "1.5.16",
-        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.16-5250855658717184/darwin-x64/cli_mac_x64.tar.gz",
-        "sha512": "b3eae073ee633032e9d473cdc7725c30bdfe2e09436bc36cfb3422e7e5fa3733de9591a7f78d02362294e7bf87e345d70e5d839689e526129a6f3fc041857a05"
+        "version": "1.5.17",
+        "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.17-4823843970351104/darwin-x64/cli_mac_x64.tar.gz",
+        "sha512": "6206eaef8296920839769db7a842f959b7d58b4751929e80f27cfb087dd90ba4896ccfec4157a4e05e3b9de51e963f4c344cd00a77c7de31c08627dbb47a6308"
       }
     }
   },

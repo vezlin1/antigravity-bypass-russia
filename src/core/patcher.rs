@@ -301,6 +301,7 @@ fn x64_backend_cli_gate_in(
                 }
                 const ERROR_GUARD_LEN: usize = 9;
                 const GATE_LEN: usize = 19;
+                const MAX_HELPER_PROLOGUE: usize = 64;
                 let code = m.as_bytes();
                 let relative =
                     |at| i64::from(i32::from_le_bytes(code[at..at + 4].try_into().unwrap()));
@@ -315,12 +316,15 @@ fn x64_backend_cli_gate_in(
                     || error >= bytes.len() as i64
                     || success >= bytes.len() as i64
                     || helper < 0
-                    || helper + 32 >= bytes.len() as i64
+                    || helper + GATE_LEN as i64 > bytes.len() as i64
                 {
                     return Err("Некорректные переходы agy x64 backend; файл не изменён".into());
                 }
+                let helper_file = start + helper as usize;
                 if diagnostic_gates.len() != 1
-                    || diagnostic_gates[0].0 != start + helper as usize + 32
+                    || !(helper_file..=helper_file + MAX_HELPER_PROLOGUE)
+                        .contains(&diagnostic_gates[0].0)
+                    || diagnostic_gates[0].0 + GATE_LEN > start + bytes.len()
                 {
                     return Err(
                         "Вызов agy x64 backend не ведёт в проверенную диагностическую функцию"
@@ -653,10 +657,11 @@ fn plan_binary_mode(
     })
 }
 
-/// A legacy v1 x64 CLI patch needs its verified backup; anything else gets a
-/// plan. The x64 gates are parsed and searched once for both decisions.
+/// A legacy v1 or diagnostic-only x64 CLI patch needs its verified backup;
+/// anything else gets a plan. The x64 gates are parsed and searched once.
 enum Scan<'a> {
-    LegacyX64,
+    LegacyX64V1,
+    LegacyX64Diagnostic,
     Plan(Result<Plan<'a>, String>),
 }
 
@@ -668,14 +673,18 @@ fn scan(data: &[u8], kind: TargetKind, mode: Mode) -> Scan<'_> {
                     Ok(Some(gates))
                         if gates
                             .iter()
-                            .any(|(_, state)| *state == X64GateState::Legacy)
-                            || (gates
-                                .iter()
-                                .any(|(_, state)| *state == X64GateState::Patched)
-                                && x64_backend_cli_gate_in(&file, data, &gates)
-                                    .is_ok_and(|gate| gate.is_some())) =>
+                            .any(|(_, state)| *state == X64GateState::Legacy) =>
                     {
-                        Scan::LegacyX64
+                        Scan::LegacyX64V1
+                    }
+                    Ok(Some(gates))
+                        if gates
+                            .iter()
+                            .any(|(_, state)| *state == X64GateState::Patched)
+                            && x64_backend_cli_gate_in(&file, data, &gates)
+                                .is_ok_and(|gate| gate.is_some()) =>
+                    {
+                        Scan::LegacyX64Diagnostic
                     }
                     Ok(Some(gates)) => Scan::Plan(plan_x64_cli(&file, data, false, gates, mode)),
                     Ok(None) => Scan::Plan(plan_mode(data, kind, mode)),
@@ -756,7 +765,7 @@ pub fn check_target_state(target: &FoundTarget) -> BinaryState {
 fn state_for_data(data: &[u8], kind: TargetKind) -> BinaryState {
     // Status needs only the counts: never build (and copy) patched bytes.
     match scan(data, kind, Mode::Count) {
-        Scan::LegacyX64 => BinaryState::PartiallyPatched,
+        Scan::LegacyX64V1 | Scan::LegacyX64Diagnostic => BinaryState::PartiallyPatched,
         Scan::Plan(Ok(p)) => state_from_counts(p.changes, p.existing),
         Scan::Plan(Err(_)) => BinaryState::Unknown,
     }
@@ -893,7 +902,7 @@ fn legacy_cli_backup_matches(original: &[u8], current: &[u8]) -> bool {
                     return false;
                 };
                 let sites = x64_manager_sites(bytes);
-                let _ = rewrite_sites(
+                if rewrite_sites(
                     &mut with_hub,
                     range,
                     sites,
@@ -901,7 +910,11 @@ fn legacy_cli_backup_matches(original: &[u8], current: &[u8]) -> bool {
                     0,
                     1,
                     Mode::Apply,
-                );
+                )
+                .is_err()
+                {
+                    return false;
+                }
             }
             if *with_hub == *current {
                 return true;
@@ -951,8 +964,15 @@ fn patch_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
     crate::system::fs_utils::recover_pending(&target.path)?;
     ensure_not_symlink(&target.path)?;
     let mut before = fs::read(&target.path).map_err(|e| e.to_string())?;
-    let (legacy_x64, mut p) = match scan(&before, target.kind, Mode::Apply) {
-        Scan::LegacyX64 => (true, None),
+    let (legacy_x64_error, mut p) = match scan(&before, target.kind, Mode::Apply) {
+        Scan::LegacyX64V1 => (
+            Some("Обнаружен старый или смешанный патч agy-x64-long-v1, но точный исходный backup не найден; переустановите исходный agy"),
+            None,
+        ),
+        Scan::LegacyX64Diagnostic => (
+            Some("Обнаружен старый патч диагностической функции agy x64, но точный исходный backup не найден; переустановите исходный agy"),
+            None,
+        ),
         Scan::Plan(planned) => {
             let planned = planned.map_err(|e| with_digest(e, &before))?;
             let partial =
@@ -961,13 +981,13 @@ fn patch_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
             if planned.changes == 0 && !partial {
                 return unchanged_outcome(planned.existing, target.kind);
             }
-            (false, Some(planned.into_owned()))
+            (None, Some(planned.into_owned()))
         }
     };
     let partial_cli = target.kind == TargetKind::AgyCli
         && p.as_ref().is_some_and(|p| p.changes > 0 && p.existing > 0);
     let mut require_continuation = false;
-    if legacy_x64 || partial_cli {
+    if legacy_x64_error.is_some() || partial_cli {
         ensure_file_closed(&target.path)?;
         if journal::has_record(&target.path) {
             let original = journal::verified_original(&target.path, &before)?
@@ -987,11 +1007,9 @@ fn patch_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
             require_continuation = true;
         } else {
             let original = verified_legacy_cli_backup(&target.path, &before).ok_or(
-                if legacy_x64 {
-                    "Обнаружен старый или смешанный патч agy-x64-long-v1, но точный исходный backup не найден; переустановите исходный agy"
-                } else {
-                    "Обнаружен частичный патч agy, но точный исходный backup не найден; переустановите исходный agy"
-                },
+                legacy_x64_error.unwrap_or(
+                    "Обнаружен частичный патч agy, но точный исходный backup не найден; переустановите исходный agy",
+                ),
             )?;
             let fresh = plan(&original, target.kind)
                 .map_err(|e| with_digest(e, &original))?
@@ -1124,6 +1142,26 @@ mod tests {
         duplicate[512 + 160..512 + 197].copy_from_slice(&stock[512 + 96..512 + 133]);
         duplicate[512 + 193..512 + 197].copy_from_slice(&(-197i32).to_le_bytes());
         assert!(plan_binary(&duplicate, TargetKind::AgyCli).is_err());
+
+        // Shifted Go prologue within the bounded window still matches; outside is rejected.
+        let mut shifted = vec![0x90; 512];
+        let helper =
+            b"\x48\x85\xc0\x0f\x84\x0a\x00\x00\x00\x80\x78\x08\x00\x0f\x85\x00\x00\x00\x00";
+        shifted[40..40 + helper.len()].copy_from_slice(helper);
+        let hub = b"\x80\x78\x08\x00\x74\x0a\x48\x8b\x44\x24\x20\x48\x89\x44\x60";
+        shifted[64..64 + hub.len()].copy_from_slice(hub);
+        let gate = b"\x48\x85\xc0\x0f\x85\x00\x01\x00\x00\x48\x85\xc9\x0f\x84\x80\x00\x00\x00\x80\x79\x08\x00\x0f\x85\x76\x00\x00\x00\x48\x89\xc8\x90\xe8\x00\x00\x00\x00";
+        shifted[96..96 + gate.len()].copy_from_slice(gate);
+        shifted[96 + 33..96 + 37].copy_from_slice(&(-133i32).to_le_bytes());
+        let shifted_pe = pe_fixture(&shifted, 0x8664);
+        let shifted_plan = plan_binary(&shifted_pe, TargetKind::AgyCli).unwrap();
+        assert_eq!(shifted_plan.profile, "agy-x64-backend-v4");
+
+        let mut too_far = vec![0x90; 512];
+        too_far[72..72 + helper.len()].copy_from_slice(helper);
+        too_far[96..96 + gate.len()].copy_from_slice(gate);
+        too_far[96 + 33..96 + 37].copy_from_slice(&(-133i32).to_le_bytes());
+        assert!(plan_binary(&pe_fixture(&too_far, 0x8664), TargetKind::AgyCli).is_err());
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1145,12 +1183,13 @@ mod tests {
             name: "agy".into(),
         };
         fs::write(&target.path, &old).unwrap();
-        assert!(patch_target(&target).is_err());
+        let error = patch_target(&target).unwrap_err();
+        assert!(error.contains("диагностической функции"), "{error}");
         assert_eq!(fs::read(&target.path).unwrap(), old);
         let legacy_bak = target.path.with_extension("bak");
         fs::write(&legacy_bak, &stock).unwrap();
         assert_eq!(patch_target(&target).unwrap(), PatchOutcome::Changed(2));
-        assert_eq!(fs::read(&target.path).unwrap(), fresh.data);
+        assert_eq!(fs::read(&target.path).unwrap(), fresh.data.as_ref());
         assert_eq!(restore_target(&target).unwrap(), PatchOutcome::Restored);
         assert_eq!(fs::read(&target.path).unwrap(), stock);
         fs::remove_file(&legacy_bak).unwrap();
@@ -1158,7 +1197,7 @@ mod tests {
         fs::write(&target.path, &stock).unwrap();
         journal::apply(&target.path, Some(&stock), &old, "agy-x64-cli-hub-v3").unwrap();
         assert_eq!(patch_target(&target).unwrap(), PatchOutcome::Changed(2));
-        assert_eq!(fs::read(&target.path).unwrap(), fresh.data);
+        assert_eq!(fs::read(&target.path).unwrap(), fresh.data.as_ref());
         assert_eq!(patch_target(&target).unwrap(), PatchOutcome::AlreadyPatched);
         assert_eq!(restore_target(&target).unwrap(), PatchOutcome::Restored);
         assert_eq!(fs::read(&target.path).unwrap(), stock);
@@ -1362,6 +1401,9 @@ mod tests {
                 .count()
         });
         let patched = plan_binary(&stock, TargetKind::AgyCli).unwrap();
+        if let Ok(expected_profile) = std::env::var("AGY_X64_EXPECTED_PROFILE") {
+            assert_eq!(patched.profile, expected_profile);
+        }
         assert_eq!((patched.changes, patched.existing), (gates + hub_count, 0));
         let counted = plan_binary_mode(&stock, TargetKind::AgyCli, false, Mode::Count).unwrap();
         assert_eq!(
