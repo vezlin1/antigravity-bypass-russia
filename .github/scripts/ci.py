@@ -4,20 +4,25 @@
   ci.py verified-run   find a green checks.yml run that ran the full suite for GITHUB_SHA
   ci.py timing         write each job's time against its budget to the run summary
   ci.py build-tests CARGO_ARGS...   cargo test --no-run; export TEST_BIN and CLI_BIN
-  ci.py wait-artifact NAME PRODUCER_JOB   wait for another job's upload in this run
+  ci.py wait-artifact NAME PRODUCER_JOB [DEST]   wait for another job's upload (and optionally download/extract it)
   ci.py docs-only PATH...  print which paths the Rust filter treats as docs-only (for tests)
 
 The Rust filter compares HEAD with the last commit whose Rust jobs passed on this
 branch, not with the previous push, so a cancelled or red run can never be hidden
 by a later docs-only commit.
 """
+import hashlib
 import json
 import os
+from pathlib import Path
+import shutil
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from datetime import datetime, timezone
 
 # Jobs whose success proves the full Rust suite ran for a commit.
@@ -268,15 +273,86 @@ def build_tests():
                 handle.write(f"{key}={value}\n")
 
 
+class _StripAuthOnCrossHostRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and urllib.parse.urlparse(newurl).netloc != urllib.parse.urlparse(req.full_url).netloc:
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def download_artifact_zip(artifact, dest_dir):
+    """Download and extract a GitHub Actions artifact zip via the REST API with retries."""
+    url = artifact["archive_download_url"]
+    digest = artifact.get("digest") or ""
+    expected_digest = digest.removeprefix("sha256:") if digest.startswith("sha256:") else ""
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    opener = urllib.request.build_opener(_StripAuthOnCrossHostRedirect())
+    last_error = None
+    for attempt in range(1, 7):
+        request = urllib.request.Request(url, headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "checks-ci",
+        })
+        try:
+            with tempfile.NamedTemporaryFile(dir=dest, suffix=".zip", delete=False) as temp:
+                zip_path = Path(temp.name)
+            try:
+                with opener.open(request, timeout=120) as response, zip_path.open("wb") as output:
+                    shutil.copyfileobj(response, output)
+                if expected_digest:
+                    with zip_path.open("rb") as handle:
+                        actual = hashlib.file_digest(handle, "sha256").hexdigest()
+                    if actual != expected_digest:
+                        raise RuntimeError(f"artifact digest mismatch: expected {expected_digest}, got {actual}")
+                with zipfile.ZipFile(zip_path) as archive:
+                    dest_resolved = dest.resolve()
+                    for info in archive.infolist():
+                        if info.is_dir():
+                            continue
+                        member = Path(info.filename)
+                        if member.is_absolute() or ".." in member.parts:
+                            raise RuntimeError(f"unsafe artifact member path: {info.filename}")
+                        # Reject symlinks encoded in Unix external_attr.
+                        mode = info.external_attr >> 16
+                        if (mode & 0o170000) == 0o120000:
+                            raise RuntimeError(f"unexpected symlink in artifact: {info.filename}")
+                        target = (dest_resolved / member).resolve()
+                        if dest_resolved != target.parent and dest_resolved not in target.parents:
+                            raise RuntimeError(f"artifact member escapes destination: {info.filename}")
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with archive.open(info) as source, target.open("wb") as output:
+                            shutil.copyfileobj(source, output)
+                return
+            finally:
+                zip_path.unlink(missing_ok=True)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, zipfile.BadZipFile) as error:
+            last_error = error
+            if attempt < 6:
+                wait = min(10, attempt * 2)
+                print(f"Artifact download attempt {attempt} failed ({error}); retrying in {wait}s...", flush=True)
+                time.sleep(wait)
+    sys.exit(f"Failed to download artifact {artifact['name']}: {last_error}")
+
+
 def wait_artifact():
-    """Wait until a job in this run uploads an artifact; fail at once if that job ends without it."""
+    """Wait until a job in this run uploads an artifact; optionally download and extract it."""
     name, producer = sys.argv[2], sys.argv[3]
+    dest = sys.argv[4] if len(sys.argv) > 4 else None
     repo, run_id = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
     start, polls = time.monotonic(), 0
     while True:
         artifacts = api(f"repos/{repo}/actions/runs/{run_id}/artifacts", {"name": name})["artifacts"]
-        if any(not artifact["expired"] for artifact in artifacts):
-            print(f"{name} is available after {time.monotonic() - start:.0f}s of waiting")
+        ready = [a for a in artifacts if not a["expired"] and a.get("size_in_bytes", 0) > 0]
+        if ready:
+            artifact = ready[0]
+            print(f"{name} is available after {time.monotonic() - start:.0f}s of waiting", flush=True)
+            if dest:
+                download_artifact_zip(artifact, dest)
+                print(f"Extracted {name} to {dest} (total {time.monotonic() - start:.0f}s)", flush=True)
             return
         if polls % 3 == 0:
             jobs = [job for job in run_jobs(repo, run_id) if job_name(job) == producer]

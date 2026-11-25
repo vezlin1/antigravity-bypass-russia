@@ -188,18 +188,13 @@ jobs:
           key: cli-fixtures-v2-${{ hashFiles('tests/verify_cli_profiles.py', 'tests/upstream-versions.json') }}
           enableCrossOsArchive: true
       - name: Wait for the unit-test executable
+        id: test_bin
         if: ${{ !cancelled() && env.RUST == 'true' }}
-        run: python .github/scripts/ci.py wait-artifact test-bin-${{ matrix.target }} "Rust - ${{ matrix.target }}"
+        run: python .github/scripts/ci.py wait-artifact test-bin-${{ matrix.target }} "Rust - ${{ matrix.target }}" .ci/bin
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - name: Download build
-        if: ${{ !cancelled() && env.RUST == 'true' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: test-bin-${{ matrix.target }}
-          path: .ci/bin
       - name: Official CLI profiles and rollback
-        if: ${{ !cancelled() && env.RUST == 'true' }}
+        if: ${{ !cancelled() && env.RUST == 'true' && steps.test_bin.outcome == 'success' }}
         shell: bash
         run: |
           test_bin=$(ls .ci/bin/*)
@@ -231,14 +226,9 @@ jobs:
       - name: Linux packages
         run: bash .github/scripts/apt-ensure.sh lsof iproute2 openssl
       - name: Wait for the Linux CLI
-        run: python3 .github/scripts/ci.py wait-artifact cli-x86_64-unknown-linux-gnu "Rust - x86_64-unknown-linux-gnu"
+        run: python3 .github/scripts/ci.py wait-artifact cli-x86_64-unknown-linux-gnu "Rust - x86_64-unknown-linux-gnu" .ci/bin
         env:
           GITHUB_TOKEN: ${{ github.token }}
-      - name: Download build
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: cli-x86_64-unknown-linux-gnu
-          path: .ci/bin
       - name: Linux setup and rollback in isolated namespaces
         run: |
           chmod +x .ci/bin/antigravity-bypass-russia
