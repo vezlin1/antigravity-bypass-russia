@@ -304,8 +304,11 @@ def download_artifact_zip(artifact, dest_dir):
                 with opener.open(request, timeout=120) as response, zip_path.open("wb") as output:
                     shutil.copyfileobj(response, output)
                 if expected_digest:
+                    hasher = hashlib.sha256()
                     with zip_path.open("rb") as handle:
-                        actual = hashlib.file_digest(handle, "sha256").hexdigest()
+                        for chunk in iter(lambda: handle.read(1 << 20), b""):
+                            hasher.update(chunk)
+                    actual = hasher.hexdigest()
                     if actual != expected_digest:
                         raise RuntimeError(f"artifact digest mismatch: expected {expected_digest}, got {actual}")
                 with zipfile.ZipFile(zip_path) as archive:
