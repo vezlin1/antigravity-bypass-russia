@@ -340,9 +340,39 @@ fn parse_lsof(
     Ok(result)
 }
 
+#[cfg(target_os = "linux")]
+fn path_is_on_fuse(path: &std::path::Path) -> Result<bool, std::io::Error> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+
+    const FUSE_SUPER_MAGIC: u64 = 0x6573_5546;
+    const FUSE_CTL_SUPER_MAGIC: u64 = 0x6573_5543;
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::zeroed();
+    if unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let fs_type = unsafe { stat.assume_init() }.f_type as u64;
+    Ok(matches!(fs_type, FUSE_SUPER_MAGIC | FUSE_CTL_SUPER_MAGIC))
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn linux_lsof_stderr_is_safe(stderr: &str, paths: &[PathBuf]) -> bool {
-    use std::path::Path;
+    #[cfg(target_os = "linux")]
+    let is_on_fuse = |path: &std::path::Path| path_is_on_fuse(path).unwrap_or(true);
+    #[cfg(not(target_os = "linux"))]
+    let is_on_fuse = |_: &std::path::Path| false;
+    linux_lsof_stderr_is_safe_with(stderr, paths, is_on_fuse)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_lsof_stderr_is_safe_with(
+    stderr: &str,
+    paths: &[PathBuf],
+    is_on_fuse: impl Fn(&std::path::Path) -> bool,
+) -> bool {
+    use std::path::{Component, Path};
 
     const WSLG_PREFIX: &str = "/mnt/wslg";
     let mut incomplete_expected = false;
@@ -361,37 +391,44 @@ fn linux_lsof_stderr_is_safe(stderr: &str, paths: &[PathBuf]) -> bool {
         else {
             return false;
         };
-        let (directory, local_mount) = match filesystem {
-            "fuse.portal" => ("doc", mount.strip_prefix(WSLG_PREFIX).unwrap_or(mount)),
-            "fuse.gvfsd-fuse" => ("gvfs", mount),
-            _ => return false,
-        };
-        let Some(uid) = local_mount
-            .strip_prefix("/run/user/")
-            .and_then(|path| path.strip_suffix(&format!("/{directory}")))
-        else {
+        let is_fuse_fs = filesystem == "fuse"
+            || filesystem.strip_prefix("fuse.").is_some_and(|sub| {
+                !sub.is_empty() && !sub.bytes().any(|b| b.is_ascii_whitespace())
+            });
+        if !is_fuse_fs {
             return false;
-        };
-        if uid.is_empty() || !uid.bytes().all(|b| b.is_ascii_digit()) || uid.parse::<u32>().is_err()
+        }
+        let mount_path = Path::new(mount);
+        if !mount.starts_with('/')
+            || mount_path.components().count() <= 1
+            || mount_path
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
         {
             return false;
         }
-        // WSLg can expose the same portal at either path. Check both aliases
-        // even if lsof reports only one, and reject unresolved symlinks.
-        let wslg_mount = (filesystem == "fuse.portal")
-            .then(|| PathBuf::from(format!("{WSLG_PREFIX}{local_mount}")));
+        // WSLg can expose /run/user/<uid>/... under /mnt/wslg as well. Check
+        // both aliases even if lsof reports only one, reject unresolved
+        // symlinks, and reject any target that itself resides on FUSE.
+        let stripped_wslg = mount
+            .strip_prefix(WSLG_PREFIX)
+            .filter(|rest| rest.starts_with('/'));
+        let prefixed_wslg = mount
+            .starts_with("/run/user/")
+            .then(|| PathBuf::from(format!("{WSLG_PREFIX}{mount}")));
         let in_mount = |path: &Path| {
-            path.starts_with(local_mount)
-                || wslg_mount
+            path.starts_with(mount_path)
+                || stripped_wslg.is_some_and(|alias| path.starts_with(alias))
+                || prefixed_wslg
                     .as_ref()
-                    .is_some_and(|mount| path.starts_with(mount))
+                    .is_some_and(|alias| path.starts_with(alias))
         };
         if paths.is_empty()
             || paths.iter().any(|path| {
                 in_mount(path)
-                    || path
-                        .canonicalize()
-                        .map_or(true, |resolved| in_mount(&resolved))
+                    || path.canonicalize().map_or(true, |resolved| {
+                        in_mount(&resolved) || is_on_fuse(&resolved)
+                    })
             })
         {
             return false;
@@ -516,20 +553,32 @@ mod mac_lock_tests {
     }
 
     #[test]
-    fn only_unrelated_desktop_fuse_warnings_are_safe() {
+    fn only_unrelated_fuse_warnings_are_safe() {
         let target = tempfile::NamedTempFile::new().unwrap();
         let paths = [target.path().to_path_buf()];
         let warnings = "lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc\n\
                         Output information may be incomplete.\n\
                         lsof: WARNING: can't stat() fuse.gvfsd-fuse file system /run/user/1000/gvfs\n\
+                        Output information may be incomplete.\n\
+                        lsof: WARNING: can't stat() fuse.rclone file system /mnt/yandex\n\
+                        Output information may be incomplete.\n\
+                        lsof: WARNING: can't stat() fuse.sshfs file system /mnt/remote\n\
                         Output information may be incomplete.";
         assert!(super::linux_lsof_stderr_is_safe(warnings, &paths));
+        // Targets residing on FUSE itself must still fail closed even if the path
+        // does not lexically match the warned mount (e.g. bind mounts).
+        assert!(!super::linux_lsof_stderr_is_safe_with(
+            warnings,
+            &paths,
+            |_| true,
+        ));
         for stderr in [
             "lsof: WARNING: can't stat() ext4 file system /opt",
-            "lsof: WARNING: can't stat() fuse.sshfs file system /run/user/1000/gvfs",
-            "lsof: WARNING: can't stat() fuse.portal file system /opt/doc",
-            "lsof: WARNING: can't stat() fuse.portal file system /run/user/invalid/doc",
-            "lsof: WARNING: can't stat() fuse.portal file system /run/user/1000/doc/subdir",
+            "lsof: WARNING: can't stat() nfs file system /mnt/share",
+            "lsof: WARNING: can't stat() fuse. file system /mnt/yandex",
+            "lsof: WARNING: can't stat() fuse.rclone file system /",
+            "lsof: WARNING: can't stat() fuse.rclone file system relative/path",
+            "lsof: WARNING: can't stat() fuse.rclone file system /mnt/../yandex",
             "lsof: WARNING: permission denied",
             "Output information may be incomplete.",
         ] {
@@ -546,6 +595,10 @@ mod mac_lock_tests {
         assert!(!super::linux_lsof_stderr_is_safe(
             warnings,
             &[PathBuf::from("/run/user/1000/doc/agy")]
+        ));
+        assert!(!super::linux_lsof_stderr_is_safe(
+            warnings,
+            &[PathBuf::from("/mnt/yandex/agy")]
         ));
         assert!(!super::linux_lsof_stderr_is_safe(
             warnings,
@@ -587,11 +640,7 @@ mod mac_lock_tests {
         assert!(super::linux_lsof_stderr_is_safe(&warnings, &paths));
         assert!(!super::linux_lsof_stderr_is_safe(&error, &paths));
         assert!(!super::linux_lsof_stderr_is_safe(
-            &wslg.replace("fuse.portal", "fuse.sshfs"),
-            &paths,
-        ));
-        assert!(!super::linux_lsof_stderr_is_safe(
-            &wslg.replace("/mnt/wslg/", "/mnt/wslg-backup/"),
+            &wslg.replace("fuse.portal", "ext4"),
             &paths,
         ));
         for (warning, locked_path) in [
