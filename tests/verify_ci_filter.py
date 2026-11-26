@@ -62,6 +62,7 @@ def main():
         sys.exit(1)
     print(f"PASS: {len(docs)} docs-only files are not named by any Rust-job input")
     check_decisions()
+    check_wait_artifact()
 
 
 def run(number, sha, rust="success"):
@@ -138,6 +139,142 @@ def check_decisions():
     if failures:
         sys.exit("CI docs filter would hide changes:\n" + "\n".join(failures))
     print(f"PASS: {len(cases) + 2} filter decisions, including a docs push that cancelled a code push")
+
+
+def check_wait_artifact():
+    """Verify wait_artifact handles fan-out lag, completion races, and transient API errors."""
+    import contextlib
+    import importlib
+    import io
+    import os
+    import urllib.error
+
+    ci = importlib.import_module("ci")
+    producer = "Rust - x86_64-unknown-linux-gnu"
+    artifact_name = "cli-x86_64-unknown-linux-gnu"
+
+    def run_case(handler):
+        now = 0.0
+
+        def fake_monotonic():
+            return now
+
+        def fake_sleep(seconds):
+            nonlocal now
+            now += seconds
+
+        def fake_api(path, params=None):
+            return handler(path, params, now)
+
+        saved_argv = list(sys.argv)
+        saved_env = dict(os.environ)
+        saved_api = ci.api
+        saved_monotonic = ci.time.monotonic
+        saved_sleep = ci.time.sleep
+        sys.argv = ["ci.py", "wait-artifact", artifact_name, producer]
+        os.environ.update(GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="123")
+        ci.api = fake_api
+        ci.time.monotonic = fake_monotonic
+        ci.time.sleep = fake_sleep
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                ci.wait_artifact()
+        finally:
+            sys.argv = saved_argv
+            os.environ.clear()
+            os.environ.update(saved_env)
+            ci.api = saved_api
+            ci.time.monotonic = saved_monotonic
+            ci.time.sleep = saved_sleep
+
+    # 1. Producer absent initially (fan-out lag), appears later, then artifact appears.
+    def fanout_lag(path, params, now):
+        if path.endswith("/artifacts"):
+            ready = [{"name": artifact_name, "expired": False, "size_in_bytes": 1024}] if now >= 40 else []
+            return {"artifacts": ready}
+        if path.endswith("/jobs"):
+            jobs = [{"name": producer, "status": "in_progress", "conclusion": None}] if now >= 30 else []
+            return {"jobs": jobs}
+        raise AssertionError(f"unexpected path: {path}")
+
+    run_case(fanout_lag)
+
+    # 2. Producer stays absent past PRODUCER_APPEAR_GRACE_SECONDS -> SystemExit.
+    def missing_producer(path, params, now):
+        if path.endswith("/artifacts"):
+            return {"artifacts": []}
+        if path.endswith("/jobs"):
+            return {"jobs": []}
+        raise AssertionError(f"unexpected path: {path}")
+
+    try:
+        run_case(missing_producer)
+    except SystemExit as exc:
+        assert str(exc) == f"No job named {producer!r} in this run", exc
+    else:
+        raise AssertionError("expected SystemExit when producer never appears")
+
+    # 3. Producer completes right before artifact appears on immediate re-check.
+    recheck_calls = 0
+
+    def completion_recheck(path, params, now):
+        nonlocal recheck_calls
+        if path.endswith("/artifacts"):
+            recheck_calls += 1
+            if recheck_calls >= 2:
+                return {"artifacts": [{"name": artifact_name, "expired": False, "size_in_bytes": 2048}]}
+            return {"artifacts": []}
+        if path.endswith("/jobs"):
+            return {"jobs": [{"name": producer, "status": "completed", "conclusion": "success"}]}
+        raise AssertionError(f"unexpected path: {path}")
+
+    run_case(completion_recheck)
+    assert recheck_calls == 2, recheck_calls
+
+    # 4. Producer fails and artifact never appears past ARTIFACT_COMPLETE_GRACE_OTHER_SECONDS -> SystemExit.
+    def failed_producer(path, params, now):
+        if path.endswith("/artifacts"):
+            return {"artifacts": []}
+        if path.endswith("/jobs"):
+            return {"jobs": [{"name": producer, "status": "completed", "conclusion": "failure"}]}
+        raise AssertionError(f"unexpected path: {path}")
+
+    try:
+        run_case(failed_producer)
+    except SystemExit as exc:
+        assert "finished (failure) without uploading" in str(exc), exc
+    else:
+        raise AssertionError("expected SystemExit when producer failed without uploading")
+
+    # 5. Transient 502 error during polling retries and succeeds.
+    transient_calls = 0
+
+    def transient_502(path, params, now):
+        nonlocal transient_calls
+        transient_calls += 1
+        if transient_calls == 1:
+            raise urllib.error.HTTPError("https://api.github.com/test", 502, "Bad Gateway", {}, io.BytesIO(b""))
+        return {"artifacts": [{"name": artifact_name, "expired": False, "size_in_bytes": 512}]}
+
+    run_case(transient_502)
+    assert transient_calls == 2, transient_calls
+
+    # 6. Permanent 403 error propagates immediately without retrying.
+    perm_calls = 0
+
+    def permanent_403(path, params, now):
+        nonlocal perm_calls
+        perm_calls += 1
+        raise urllib.error.HTTPError("https://api.github.com/test", 403, "Forbidden", {}, io.BytesIO(b""))
+
+    try:
+        run_case(permanent_403)
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 403 and perm_calls == 1, (exc.code, perm_calls)
+    else:
+        raise AssertionError("expected HTTPError 403 to propagate")
+
+    print("PASS: 6 wait_artifact cases (fan-out lag, missing producer, completion re-check, failure, 502 retry, 403)")
 
 
 if __name__ == "__main__":

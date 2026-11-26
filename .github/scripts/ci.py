@@ -341,31 +341,85 @@ def download_artifact_zip(artifact, dest_dir):
     sys.exit(f"Failed to download artifact {artifact['name']}: {last_error}")
 
 
+WAIT_POLL_SECONDS = 10
+PRODUCER_APPEAR_GRACE_SECONDS = 90
+ARTIFACT_COMPLETE_GRACE_SUCCESS_SECONDS = 30
+ARTIFACT_COMPLETE_GRACE_OTHER_SECONDS = 10
+TRANSIENT_HTTP_CODES = {429, 500, 502, 503, 504}
+MAX_POLL_ERRORS = 6
+
+
+def _find_ready_artifact(repo, run_id, name):
+    artifacts = api(f"repos/{repo}/actions/runs/{run_id}/artifacts", {"name": name})["artifacts"]
+    ready = [a for a in artifacts if not a["expired"] and a.get("size_in_bytes", 0) > 0]
+    return ready[0] if ready else None
+
+
+def _is_transient_poll_error(error):
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in TRANSIENT_HTTP_CODES
+    return isinstance(error, (urllib.error.URLError, TimeoutError, OSError))
+
+
 def wait_artifact():
     """Wait until a job in this run uploads an artifact; optionally download and extract it."""
     name, producer = sys.argv[2], sys.argv[3]
     dest = sys.argv[4] if len(sys.argv) > 4 else None
     repo, run_id = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
-    start, polls = time.monotonic(), 0
+    start = time.monotonic()
+    polls = 0
+    completed_since = None
+    consecutive_errors = 0
+
+    def finish(artifact):
+        print(f"{name} is available after {time.monotonic() - start:.0f}s of waiting", flush=True)
+        if dest:
+            download_artifact_zip(artifact, dest)
+            print(f"Extracted {name} to {dest} (total {time.monotonic() - start:.0f}s)", flush=True)
+
     while True:
-        artifacts = api(f"repos/{repo}/actions/runs/{run_id}/artifacts", {"name": name})["artifacts"]
-        ready = [a for a in artifacts if not a["expired"] and a.get("size_in_bytes", 0) > 0]
-        if ready:
-            artifact = ready[0]
-            print(f"{name} is available after {time.monotonic() - start:.0f}s of waiting", flush=True)
-            if dest:
-                download_artifact_zip(artifact, dest)
-                print(f"Extracted {name} to {dest} (total {time.monotonic() - start:.0f}s)", flush=True)
-            return
-        if polls % 3 == 0:
-            jobs = [job for job in run_jobs(repo, run_id) if job_name(job) == producer]
-            if not jobs:
-                sys.exit(f"No job named {producer!r} in this run")
-            if jobs[0]["status"] == "completed":
-                sys.exit(f"{producer} finished ({jobs[0]['conclusion']}) without uploading {name}; "
-                         "its failure is the one to fix")
+        try:
+            artifact = _find_ready_artifact(repo, run_id, name)
+            if artifact is not None:
+                finish(artifact)
+                return
+            if polls % 3 == 0 or completed_since is not None:
+                jobs = [job for job in run_jobs(repo, run_id) if job_name(job) == producer]
+                if not jobs:
+                    elapsed = time.monotonic() - start
+                    if elapsed >= PRODUCER_APPEAR_GRACE_SECONDS:
+                        sys.exit(f"No job named {producer!r} in this run")
+                    print(f"{producer} is not listed by GitHub yet ({elapsed:.0f}s); waiting...", flush=True)
+                elif all(job["status"] == "completed" for job in jobs):
+                    artifact = _find_ready_artifact(repo, run_id, name)
+                    if artifact is not None:
+                        finish(artifact)
+                        return
+                    now = time.monotonic()
+                    if completed_since is None:
+                        completed_since = now
+                    succeeded = any(job.get("conclusion") == "success" for job in jobs)
+                    grace = ARTIFACT_COMPLETE_GRACE_SUCCESS_SECONDS if succeeded else ARTIFACT_COMPLETE_GRACE_OTHER_SECONDS
+                    if now - completed_since >= grace:
+                        conclusions = ", ".join(job.get("conclusion") or "unknown" for job in jobs)
+                        sys.exit(f"{producer} finished ({conclusions}) without uploading {name}; "
+                                 "its failure is the one to fix")
+                    print(f"{producer} completed; waiting for {name} to appear ({now - completed_since:.0f}s)...",
+                          flush=True)
+                else:
+                    completed_since = None
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError) as error:
+            if not _is_transient_poll_error(error):
+                raise
+            consecutive_errors += 1
+            if consecutive_errors >= MAX_POLL_ERRORS:
+                raise
+            print(f"Polling {name} hit transient error ({error}); retrying in {WAIT_POLL_SECONDS}s...", flush=True)
+            time.sleep(WAIT_POLL_SECONDS)
+            continue
+        consecutive_errors = 0
         polls += 1
-        time.sleep(10)
+        time.sleep(WAIT_POLL_SECONDS)
 
 
 if __name__ == "__main__":
