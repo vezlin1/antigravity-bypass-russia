@@ -876,9 +876,14 @@ fn substituted_candidates(hits: &[RaceResult], reference: &[IpAddr]) -> Vec<IpAd
 
 /// Ranking tries every substituter, even if the preferred DNS returns a dead proxy.
 pub fn candidate_addrs(name: &str, interface: u32) -> Result<Vec<IpAddr>, String> {
+    candidate_addrs_report(name, interface).map(|(candidates, _)| candidates)
+}
+
+/// Like `candidate_addrs`, and also reports whether any DNS provider answered.
+pub fn candidate_addrs_report(name: &str, interface: u32) -> Result<(Vec<IpAddr>, bool), String> {
     let pool = resolver_pool::load()?;
     let (hits, reference) = race_providers(&pool, &build_query(name, 0x524b), interface, false);
-    Ok(substituted_candidates(&hits, &reference))
+    Ok((substituted_candidates(&hits, &reference), !hits.is_empty()))
 }
 
 /// An allowlisted report: custom names and URLs may contain secrets.

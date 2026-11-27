@@ -1,6 +1,10 @@
 //! User-owned network configuration shared with the elevated DNS worker.
 use serde::{Deserialize, Serialize};
-use std::{fs, net::IpAddr, path::PathBuf};
+use std::{
+    fs,
+    net::IpAddr,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -101,7 +105,30 @@ fn user_log_roots() -> Vec<PathBuf> {
             ["Antigravity", "Antigravity IDE", "Google Antigravity"]
                 .map(|product| base.join(product).join("logs"))
         })
+        .chain(std::iter::once(cli_log_root()))
         .collect()
+}
+
+/// Antigravity CLI writes `cli-*.log` here, including region errors such as
+/// `FAILED_PRECONDITION … User location is not supported` (#50, #52).
+fn cli_log_root() -> PathBuf {
+    #[cfg(windows)]
+    let home = crate::system::env::expand_env_vars("%USERPROFILE%");
+    #[cfg(not(windows))]
+    let home = crate::system::env::expand_env_vars("~");
+    home.join(".gemini").join("antigravity-cli").join("log")
+}
+
+/// Configurations saved before the CLI log root existed list exactly the old
+/// stock roots: extend those, keep any list the user changed.
+fn upgrade_log_roots(roots: &mut Vec<PathBuf>, stock: &[PathBuf], added: &Path) {
+    let legacy: Vec<_> = stock.iter().filter(|root| *root != added).collect();
+    if !roots.iter().any(|root| root == added)
+        && roots.len() == legacy.len()
+        && roots.iter().zip(&legacy).all(|(root, old)| root == *old)
+    {
+        roots.push(added.to_path_buf());
+    }
 }
 
 pub(super) fn context_path() -> PathBuf {
@@ -244,6 +271,7 @@ fn without_dev_marker(bytes: &[u8]) -> Result<Option<Vec<u8>>, String> {
 // those exact bootstrap lists; custom endpoints/address lists remain user-owned.
 fn upgrade_builtin_defaults(config: &mut Config) {
     let defaults = Config::default();
+    upgrade_log_roots(&mut config.log_roots, &defaults.log_roots, &cli_log_root());
     let current = &defaults.doh[0].bootstrap;
     let legacy: Vec<Vec<IpAddr>> = [
         &["192.144.59.14", "186.246.49.127"][..],
@@ -582,6 +610,36 @@ mod tests {
         ];
         upgrade_builtin_defaults(&mut config);
         assert_eq!(config.doh[0].bootstrap.len(), 4);
+    }
+
+    #[test]
+    fn stock_log_roots_gain_the_cli_log_directory_and_custom_lists_are_kept() {
+        let stock: Vec<PathBuf> = [
+            "/a/Antigravity/logs",
+            "/a/Antigravity IDE/logs",
+            "/h/cli/log",
+        ]
+        .map(PathBuf::from)
+        .into();
+        let cli = PathBuf::from("/h/cli/log");
+        let mut old = stock[..2].to_vec();
+        upgrade_log_roots(&mut old, &stock, &cli);
+        assert_eq!(old, stock);
+        upgrade_log_roots(&mut old, &stock, &cli);
+        assert_eq!(old, stock, "already upgraded lists are unchanged");
+        let mut custom = vec![PathBuf::from("/custom/logs")];
+        upgrade_log_roots(&mut custom, &stock, &cli);
+        assert_eq!(custom, vec![PathBuf::from("/custom/logs")]);
+        let mut empty = Vec::new();
+        upgrade_log_roots(&mut empty, &stock, &cli);
+        assert!(empty.is_empty(), "an explicitly empty list stays empty");
+        assert!(Config::default()
+            .log_roots
+            .iter()
+            .any(|root| root.ends_with("log")
+                && root
+                    .parent()
+                    .is_some_and(|p| p.ends_with("antigravity-cli"))));
     }
 
     #[test]

@@ -92,6 +92,7 @@ pub fn executable(program: &str) -> io::Result<PathBuf> {
             "systemctl" => &["/bin/systemctl", "/usr/bin/systemctl"],
             "ip" => &["/sbin/ip", "/usr/sbin/ip", "/bin/ip", "/usr/bin/ip"],
             "resolvectl" => &["/usr/bin/resolvectl", "/bin/resolvectl"],
+            "ss" => &["/usr/bin/ss", "/bin/ss", "/usr/sbin/ss", "/sbin/ss"],
             "systemd-resolve" => &["/usr/bin/systemd-resolve", "/bin/systemd-resolve"],
             _ => {
                 return Err(io::Error::new(

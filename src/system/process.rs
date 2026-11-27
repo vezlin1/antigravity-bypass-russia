@@ -499,6 +499,225 @@ pub fn terminate_image_tree(
     Ok(())
 }
 
+/// Names of other programs bound to UDP `port` on `address` or on the
+/// wildcard address, as "name (PID n)". Used to say which program blocks
+/// the local DNS relay (AdGuard, VPN DNS filters, dnsmasq…). Best effort:
+/// an empty list means the owner could not be determined.
+pub fn udp_port_owners(address: std::net::Ipv4Addr, port: u16) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        windows_udp_owners(address, port)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        crate::system::command::output("ss", ["-H", "-l", "-u", "-n", "-p"])
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| parse_ss_owners(&String::from_utf8_lossy(&out.stdout), address, port))
+            .unwrap_or_default()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        let _ = (address, port);
+        Vec::new()
+    }
+}
+
+#[cfg(any(windows, target_os = "linux", test))]
+fn owner_label(name: &str, pid: u32) -> Option<String> {
+    let name: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' '))
+        .take(64)
+        .collect();
+    let name = name.trim();
+    (!name.is_empty()).then(|| format!("{name} (PID {pid})"))
+}
+
+#[cfg(windows)]
+fn windows_udp_owners(address: std::net::Ipv4Addr, port: u16) -> Vec<String> {
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        GetExtendedUdpTable, MIB_UDPROW_OWNER_PID, UDP_TABLE_OWNER_PID,
+    };
+    use windows_sys::Win32::Networking::WinSock::AF_INET;
+    let mut size = 0u32;
+    unsafe {
+        GetExtendedUdpTable(
+            std::ptr::null_mut(),
+            &mut size,
+            0,
+            AF_INET as u32,
+            UDP_TABLE_OWNER_PID,
+            0,
+        )
+    };
+    if size == 0 {
+        return Vec::new();
+    }
+    // u32 storage keeps the table aligned for its u32 fields.
+    let mut buffer = vec![0u32; (size as usize).div_ceil(4) + 1];
+    size = (buffer.len() * 4) as u32;
+    if unsafe {
+        GetExtendedUdpTable(
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            0,
+            AF_INET as u32,
+            UDP_TABLE_OWNER_PID,
+            0,
+        )
+    } != 0
+    {
+        return Vec::new();
+    }
+    let count = buffer[0] as usize;
+    let rows = unsafe {
+        std::slice::from_raw_parts(
+            buffer.as_ptr().add(1).cast::<MIB_UDPROW_OWNER_PID>(),
+            count.min((buffer.len() - 1) * 4 / std::mem::size_of::<MIB_UDPROW_OWNER_PID>()),
+        )
+    };
+    let pids: Vec<u32> = rows
+        .iter()
+        .filter(|row| {
+            let local = std::net::Ipv4Addr::from(u32::from_be(row.dwLocalAddr));
+            u16::from_be(row.dwLocalPort as u16) == port
+                && (local == address || local.is_unspecified())
+                && row.dwOwningPid != std::process::id()
+        })
+        .map(|row| row.dwOwningPid)
+        .collect();
+    if pids.is_empty() {
+        return Vec::new();
+    }
+    let processes = snapshot().unwrap_or_default();
+    let mut owners = Vec::new();
+    for pid in pids {
+        let name = processes
+            .iter()
+            .find(|process| process.pid == pid)
+            .and_then(|process| process.executable.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "неизвестная программа".into());
+        if let Some(label) = owner_label(&name, pid).or_else(|| Some(format!("PID {pid}"))) {
+            if !owners.contains(&label) {
+                owners.push(label);
+            }
+        }
+    }
+    owners
+}
+
+/// Parses `ss -H -l -u -n -p` lines such as
+/// `UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:* users:(("systemd-resolve",pid=612,fd=13))`.
+#[cfg(any(target_os = "linux", test))]
+fn parse_ss_owners(text: &str, address: std::net::Ipv4Addr, port: u16) -> Vec<String> {
+    let mut owners = Vec::new();
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(local) = fields.nth(3) else {
+            continue;
+        };
+        let Some((host, local_port)) = local.rsplit_once(':') else {
+            continue;
+        };
+        if local_port.parse::<u16>().ok() != Some(port) {
+            continue;
+        }
+        let host = host.split('%').next().unwrap_or_default();
+        let matches = host == "*"
+            || host
+                .parse::<std::net::Ipv4Addr>()
+                .is_ok_and(|ip| ip == address || ip.is_unspecified());
+        if !matches {
+            continue;
+        }
+        let Some(users) = line.split_once("users:((").map(|(_, rest)| rest) else {
+            continue;
+        };
+        for user in users.split("),(") {
+            let mut parts = user.split(',');
+            let name = parts.next().unwrap_or_default().trim_matches('"');
+            let pid = parts
+                .find_map(|part| part.strip_prefix("pid="))
+                .and_then(|pid| pid.trim_end_matches(')').parse::<u32>().ok());
+            if let Some(label) = pid
+                .filter(|pid| *pid != std::process::id())
+                .and_then(|pid| owner_label(name, pid))
+            {
+                if !owners.contains(&label) {
+                    owners.push(label);
+                }
+            }
+        }
+    }
+    owners
+}
+
+#[cfg(test)]
+mod port_owner_tests {
+    use super::*;
+
+    #[test]
+    fn ss_output_reports_programs_on_the_relay_or_wildcard_address() {
+        let text = "UNCONN 0 0 127.0.0.53%lo:53 0.0.0.0:* users:((\"systemd-resolve\",pid=612,fd=13))\n\
+                    UNCONN 0 0 0.0.0.0:53 0.0.0.0:* users:((\"dnsmasq\",pid=900,fd=4),(\"dnsmasq\",pid=901,fd=4))\n\
+                    UNCONN 0 0 127.0.0.55:5353 0.0.0.0:* users:((\"avahi\",pid=7,fd=1))\n\
+                    UNCONN 0 0 [::]:53 [::]:* users:((\"v6only\",pid=8,fd=1))\n\
+                    garbage\n";
+        assert_eq!(
+            parse_ss_owners(text, "127.0.0.55".parse().unwrap(), 53),
+            vec!["dnsmasq (PID 900)", "dnsmasq (PID 901)"]
+        );
+        assert_eq!(
+            parse_ss_owners(text, "127.0.0.53".parse().unwrap(), 53),
+            vec![
+                "systemd-resolve (PID 612)",
+                "dnsmasq (PID 900)",
+                "dnsmasq (PID 901)"
+            ]
+        );
+        assert_eq!(
+            owner_label("Ad\u{7}Guard\nSvc.exe", 5).unwrap(),
+            "AdGuardSvc.exe (PID 5)"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_reports_the_process_that_holds_a_udp_port() {
+        // Another process must own the port: our own PID is excluded on purpose.
+        let mut child = crate::system::powershell::command()
+            .unwrap()
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$u = New-Object System.Net.Sockets.UdpClient(New-Object System.Net.IPEndPoint([System.Net.IPAddress]::Parse('127.0.0.77'), 0)); \
+                 Write-Output $u.Client.LocalEndPoint.Port; [Console]::Out.Flush(); Start-Sleep -Seconds 20",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.as_mut().unwrap()),
+            &mut line,
+        )
+        .unwrap();
+        let port: u16 = line.trim().parse().unwrap();
+        let owners = udp_port_owners("127.0.0.77".parse().unwrap(), port);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            owners
+                .iter()
+                .any(|owner| owner.ends_with(&format!("(PID {})", child.id()))),
+            "{owners:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tree_tests {
     use super::*;

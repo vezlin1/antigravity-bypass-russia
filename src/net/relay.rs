@@ -715,6 +715,58 @@ pub fn run() -> Result<(), String> {
     }
 }
 
+/// How often the relay re-reads `hosts` and the rank file for verified pins.
+const PIN_REFRESH: Duration = Duration::from_secs(5);
+
+type Pins = Arc<Vec<(String, Ipv4Addr)>>;
+
+static PIN_CACHE: Mutex<Option<(Instant, Pins)>> = Mutex::new(None);
+
+/// Verified addresses for Agent hosts: the current `hosts` pin (it may have
+/// been replaced after a failed health check), else the rank leader.
+/// A raw DoH answer is never verified: providers can return dead proxies
+/// (e.g. 185.4.64.180 in #59, #62–#64), and when `hosts` is write-protected
+/// (#56) the relay answer is the only one clients see.
+fn verified_pins() -> Pins {
+    let mut cache = PIN_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((loaded, pins)) = cache.as_ref() {
+        if loaded.elapsed() < PIN_REFRESH {
+            return pins.clone();
+        }
+    }
+    let pins = Arc::new(merge_pins(
+        super::hosts::owned_entries().unwrap_or_default(),
+        super::rank::leader_addresses(),
+    ));
+    *cache = Some((Instant::now(), pins.clone()));
+    pins
+}
+
+fn merge_pins(
+    owned: Vec<(String, Ipv4Addr)>,
+    ranked: Vec<(String, Ipv4Addr)>,
+) -> Vec<(String, Ipv4Addr)> {
+    let mut pins: Vec<(String, Ipv4Addr)> = Vec::new();
+    for (host, ip) in owned.into_iter().chain(ranked) {
+        let host = super::route_health::host_name(&host);
+        if super::provider::NRPT_AGENT.contains(&host.as_str())
+            && !pins.iter().any(|(known, _)| *known == host)
+        {
+            pins.push((host, ip));
+        }
+    }
+    pins
+}
+
+fn pinned_answer(query: &[u8], pins: &[(String, Ipv4Addr)]) -> Option<Vec<u8>> {
+    if question_type(query) != Some(1) {
+        return None;
+    }
+    let name = super::route_health::host_name(&question_name(query)?);
+    let (_, ip) = pins.iter().find(|(host, _)| *host == name)?;
+    crate::net::client::address_response(query, &[*ip])
+}
+
 fn answered_locally(qtype: Option<u16>) -> bool {
     // AAAA: pinned proxies are IPv4. SVCB/HTTPS (64/65): macOS asks for them on
     // every lookup, and waiting on upstream for them delays each connection.
@@ -731,6 +783,14 @@ fn relay(query: &[u8], policy: RoutePolicy) -> Option<Vec<u8>> {
     }
     if answered_locally(question_type(query)) {
         return Some(nodata_response(query));
+    }
+    if let Some(reply) = pinned_answer(query, &verified_pins()) {
+        log_line(&format!(
+            "{:<12} {}",
+            "pinned",
+            question_name(query).unwrap_or_default()
+        ));
+        return Some(reply);
     }
 
     let if_index = match policy {
@@ -842,6 +902,49 @@ fn probe_local_dns() -> std::io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_hosts_get_verified_pins_and_other_queries_fall_through() {
+        use crate::net::client::{address_response, answer_addrs, build_query};
+        let hosts_pin = Ipv4Addr::new(45, 131, 64, 204);
+        let replaced_leader = Ipv4Addr::new(5, 175, 161, 40);
+        let daily_leader = Ipv4Addr::new(31, 31, 207, 68);
+        let pins = merge_pins(
+            vec![
+                ("CLOUDCODE-PA.GOOGLEAPIS.COM".into(), hosts_pin),
+                ("unrelated.test".into(), Ipv4Addr::new(192, 0, 2, 1)),
+            ],
+            vec![
+                ("cloudcode-pa.googleapis.com".into(), replaced_leader),
+                ("daily-cloudcode-pa.googleapis.com".into(), daily_leader),
+            ],
+        );
+        // The hosts pin wins over a stale rank leader; non-Agent hosts are ignored.
+        assert_eq!(
+            pins,
+            vec![
+                ("cloudcode-pa.googleapis.com".to_string(), hosts_pin),
+                (
+                    "daily-cloudcode-pa.googleapis.com".to_string(),
+                    daily_leader
+                ),
+            ]
+        );
+
+        let query = build_query("cloudcode-pa.googleapis.com.", 0x1234);
+        let reply = pinned_answer(&query, &pins).unwrap();
+        assert_eq!(answer_addrs(&reply), vec![std::net::IpAddr::V4(hosts_pin)]);
+        assert_eq!(reply[..2], [0x12, 0x34]);
+        assert_eq!(reply, address_response(&query, &[hosts_pin]).unwrap());
+
+        // Unranked Agent host (skipped primary), other names and AAAA use the normal path.
+        assert!(pinned_answer(&build_query("aicode.googleapis.com", 1), &pins).is_none());
+        assert!(pinned_answer(&build_query("unrelated.test", 1), &pins).is_none());
+        let mut aaaa = build_query("cloudcode-pa.googleapis.com", 1);
+        let qtype = aaaa.len() - 4;
+        aaaa[qtype..qtype + 2].copy_from_slice(&28u16.to_be_bytes());
+        assert!(pinned_answer(&aaaa, &pins).is_none());
+    }
 
     #[test]
     fn route_bursts_are_waited_out_but_not_forever() {

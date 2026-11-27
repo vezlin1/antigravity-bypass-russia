@@ -117,6 +117,15 @@ pub fn rank_path() -> PathBuf {
     relay::log_dir().join("proxy_rank.conf")
 }
 
+/// The fastest verified address of every ranked host (the same leader that
+/// `apply_hosts` pins), for the relay to answer with.
+pub(super) fn leader_addresses() -> Vec<(String, Ipv4Addr)> {
+    load()
+        .into_iter()
+        .filter_map(|entry| entry.ips.first().map(|&(ip, _)| (entry.host, ip)))
+        .collect()
+}
+
 #[cfg(windows)]
 pub(super) fn saved_addresses(host: &str) -> Vec<Ipv4Addr> {
     load()
@@ -170,6 +179,7 @@ pub(super) fn discover_agent(
     let geohide_seeds = geohide_proxy_seeds(&resolver_pool::load()?);
     let mut host_candidates = Vec::new();
     let mut addresses = std::collections::BTreeSet::new();
+    let mut any_provider_answered = false;
     for (index, name) in NRPT_AGENT.iter().enumerate() {
         let host = name.trim_start_matches('.').to_string();
         progress(Working(&format!(
@@ -178,7 +188,8 @@ pub(super) fn discover_agent(
             NRPT_AGENT.len(),
             super::server_label(&host)
         )));
-        let mut candidates = resolvers::candidate_addrs(&host, if_index)?;
+        let (mut candidates, answered) = resolvers::candidate_addrs_report(&host, if_index)?;
+        any_provider_answered |= answered;
         if let Some(old) = previous.iter().find(|h| h.host == host) {
             for (ip, _) in &old.ips {
                 let a = IpAddr::V4(*ip);
@@ -279,8 +290,21 @@ pub(super) fn discover_agent(
         },
     );
     ranked.extend(recovered);
+    providers_silent_error(any_provider_answered, &failures)?;
     Ok(Discovery { ranked, failures })
 }
+
+/// No DNS provider answered for any Agent host and some hosts have no route:
+/// say so explicitly instead of a generic route failure (#60).
+fn providers_silent_error(any_answered: bool, failures: &[HostFailure]) -> Result<(), String> {
+    if any_answered || failures.is_empty() {
+        return Ok(());
+    }
+    Err(DOH_UNREACHABLE.into())
+}
+
+pub(crate) const DOH_UNREACHABLE: &str =
+    "Ни один DNS-провайдер обхода (DoH) не ответил из этой сети, поэтому адреса серверов Google получить не удалось";
 
 const RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -731,6 +755,23 @@ mod tests {
             recover_pin(active, false, || None).unwrap_or(active),
             active
         );
+    }
+
+    #[test]
+    fn silent_dns_providers_are_reported_only_when_a_route_is_missing() {
+        let failure = || HostFailure {
+            host: PRIMARY_CLOUD_CODE.into(),
+            attempted: 0,
+            stage: FailureStage::NoAddresses,
+        };
+        assert_eq!(
+            providers_silent_error(false, &[failure()]).unwrap_err(),
+            DOH_UNREACHABLE
+        );
+        // Previous ranks or proxy seeds still verified every host: no error.
+        assert!(providers_silent_error(false, &[]).is_ok());
+        // A provider answered: the usual route failure explains the problem.
+        assert!(providers_silent_error(true, &[failure()]).is_ok());
     }
 
     #[test]

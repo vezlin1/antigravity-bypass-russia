@@ -232,9 +232,13 @@ fn event(line: &str, now: i64, offset: time::UtcOffset) -> Option<Event> {
     {
         return None;
     }
+    // Antigravity CLI reports failed model requests as "agent executor error:
+    // generating and executing: …" and "Print mode: run ended with error …".
     let rpc = message.contains("streamgeneratecontent")
         || message.contains("cascade")
-        || message.contains("language server");
+        || message.contains("language server")
+        || message.contains("agent executor error")
+        || message.contains("run ended with error");
     let error = message.contains("error")
         || message.contains("failed")
         || message.contains("permission_denied")
@@ -284,7 +288,8 @@ fn supported(path: &Path) -> bool {
     (name.ends_with(".log") || name.contains(".log."))
         && (name.contains("language_server")
             || name.contains("language-server")
-            || name.contains("antigravity"))
+            || name.contains("antigravity")
+            || name.starts_with("cli-"))
 }
 
 fn discover(roots: &[PathBuf], deadline: Instant) -> (Vec<(SystemTime, PathBuf)>, bool) {
@@ -448,6 +453,15 @@ mod tests {
             parse("2026-09-26T11:59:00Z [error] Cascade: unexpected EOF"),
             Some(State::RequestFailed)
         );
+        // Antigravity CLI 1.5.x (cli-*.log, glog format), as in #50 and #52.
+        for cli in [
+            "E0926 11:59:00.994766     692 errorreport.go:307] agent executor error: generating and executing: FAILED_PRECONDITION (code 400): User location is not supported for the API use.",
+            "E0926 11:59:01.021467       1 session.go:286] Print mode: run ended with error and no response: FAILED_PRECONDITION (code 400): User location is not supported for the API use.",
+        ] {
+            assert_eq!(parse(cli), Some(State::RegionBlocked), "{cli}");
+        }
+        assert!(supported(Path::new("cli-20261118_002205.log")));
+        assert!(!supported(Path::new("client-notes.txt")));
         for s in [
             "StreamGenerateContent ResponseID: old",
             "2026-09-26T11:00:00Z StreamGenerateContent ResponseID: old",

@@ -264,6 +264,8 @@ pub fn classify_error(
         "relay_no_agent_answer"
     } else if has(&["a-ответ для браузерных"]) {
         "relay_no_browser_answer"
+    } else if has(&["dns-провайдер обхода (doh) не ответил"]) {
+        "doh_unreachable"
     } else if has(&["dns не вернул адресов"]) {
         "route_no_addresses"
     } else if has(&["нет tcp-подключения"]) {

@@ -612,6 +612,15 @@ pub fn collect() -> Value {
         let health_port = map.get("relay_health_port").cloned().unwrap_or(Value::Null);
         if let Some(service) = map.get_mut("service") {
             finalize_service_check(service, &mut dns_port, &health_port);
+            if service["foreign_dns_on_port_53"] == true {
+                let owners = system::process::udp_port_owners(
+                    net::relay::LISTEN_IP.parse().unwrap(),
+                    net::relay::LISTEN_PORT,
+                );
+                if let Some(service) = service.as_object_mut() {
+                    service.insert("port_53_owners".into(), json!(owners));
+                }
+            }
         }
         if map.contains_key("relay_dns_port") {
             map.insert("relay_dns_port".into(), dns_port);

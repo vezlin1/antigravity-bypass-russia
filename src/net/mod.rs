@@ -98,6 +98,16 @@ fn assemble_dns_rules(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn port_53_message_names_the_owner_when_known() {
+        let plain = super::port_53_busy_message(&[]);
+        assert!(plain.ends_with("DNS-фильтр)"), "{plain}");
+        let named = super::port_53_busy_message(&["AdGuardSvc.exe (PID 4120)".into()]);
+        assert!(named.ends_with(": AdGuardSvc.exe (PID 4120)"), "{named}");
+        let error = crate::diagnostics::attempt::classify_error("network", &named, None, None);
+        assert_eq!(error.reason, "port_53_busy");
+    }
+
+    #[test]
     fn network_writers_are_exclusive_and_unlock_without_deleting_the_lock_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("network-update.lock");
@@ -751,10 +761,12 @@ fn apply_dns_rules_with(
         let startup = update.start().and_then(|()| {
             if !wait_for_ready(Duration::from_secs(4), relay_ready) {
                 if foreign_dns_on_port_53() {
-                    return Err(
-                        "Локальный UDP-порт 53 занят другой программой (VPN, AdGuard или DNS-фильтр)"
-                            .into(),
-                    );
+                    return Err(port_53_busy_message(
+                        &crate::system::process::udp_port_owners(
+                            LISTEN_IP.parse().unwrap(),
+                            LISTEN_PORT,
+                        ),
+                    ));
                 }
                 return Err("DNS-релей не подтвердил готовность за 4с".into());
             }
@@ -1139,6 +1151,15 @@ fn is_hosts_access_denied(error: &str) -> bool {
         || lower.contains("access is denied")
         || lower.contains("permission denied")
         || lower.contains("os error 5)")
+}
+
+fn port_53_busy_message(owners: &[String]) -> String {
+    let base = "Локальный UDP-порт 53 занят другой программой (VPN, AdGuard или DNS-фильтр)";
+    if owners.is_empty() {
+        base.into()
+    } else {
+        format!("{base}: {}", owners.join(", "))
+    }
 }
 
 /// Checks whether a foreign DNS server (e.g. AdGuard or a VPN DNS filter) is

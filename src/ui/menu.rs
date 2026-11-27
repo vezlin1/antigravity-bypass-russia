@@ -180,6 +180,16 @@ const ADVICE_DIAGNOSTICS: &str =
 
 /// What to do about a failure, from its cause. `None` when the cause already
 /// tells the user what to do.
+#[cfg(windows)]
+const HOSTS_DAMAGED_ADVICE: &str = "выберите пункт 1 ещё раз — повреждённый блок исправится автоматически. Если ошибка повторится, сделайте резервную копию C:\\Windows\\System32\\drivers\\etc\\hosts, откройте его в Блокноте от имени администратора, удалите строки с ANTIGRAVITY-BYPASS-RUSSIA и старые записи googleapis.com между ними, затем повторите.";
+#[cfg(not(windows))]
+const HOSTS_DAMAGED_ADVICE: &str = "выберите пункт 1 ещё раз — повреждённый блок исправится автоматически. Если ошибка повторится, сделайте резервную копию /etc/hosts, откройте его через sudo (например, sudo nano /etc/hosts), удалите строки с ANTIGRAVITY-BYPASS-RUSSIA и старые записи googleapis.com между ними, затем повторите.";
+
+#[cfg(windows)]
+const HOSTS_DENIED_ADVICE: &str = "файл C:\\Windows\\System32\\drivers\\etc\\hosts заблокирован защитой антивируса или атрибутом «только чтение». Отключите защиту файла hosts в антивирусе (или добавьте его в исключения) и повторите.";
+#[cfg(not(windows))]
+const HOSTS_DENIED_ADVICE: &str = "нет прав на запись в /etc/hosts. Запустите утилиту через sudo; если файл защищён (атрибут chattr +i или профиль безопасности), снимите защиту и повторите.";
+
 fn advice_for(cause: &str) -> Option<&'static str> {
     let text = cause.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|word| text.contains(word));
@@ -201,7 +211,7 @@ fn advice_for(cause: &str) -> Option<&'static str> {
             "закройте Antigravity (приложение, IDE и CLI) и повторите."
         } else if has(&["повреждены границы блока hosts", "нет конца блока hosts"])
         {
-            "выберите пункт 1 ещё раз — повреждённый блок исправится автоматически. Если ошибка повторится, сделайте резервную копию файла hosts, откройте его от имени администратора, удалите строки с ANTIGRAVITY-BYPASS-RUSSIA и старые записи googleapis.com между ними, затем повторите."
+            HOSTS_DAMAGED_ADVICE
         } else if has(&["hosts"])
             && (has(&[
                 "os error 5)",
@@ -211,7 +221,7 @@ fn advice_for(cause: &str) -> Option<&'static str> {
                 "permission denied",
             ]))
         {
-            "файл C:\\Windows\\System32\\drivers\\etc\\hosts заблокирован защитой антивируса или атрибутом «только чтение». Отключите защиту файла hosts в антивирусе (или добавьте его в исключения) и повторите."
+            HOSTS_DENIED_ADVICE
         } else if has(&[
             "os error 5)",
             "os error 13)",
@@ -232,6 +242,8 @@ fn advice_for(cause: &str) -> Option<&'static str> {
             "проверьте, что папка существует. Если Antigravity установлен в другом месте, укажите путь в пункте 4."
         } else if has(&["не поддерживается", "integrity"]) {
             "эта версия Antigravity пока не поддерживается. Скачайте свежую версию утилиты на странице релизов."
+        } else if has(&["dns-провайдер обхода (doh) не ответил"]) {
+            "DNS-провайдеры, через которые работает обход, недоступны из этой сети: обычно их блокирует интернет-провайдер, роутер или антивирус. Подключитесь к другой сети (например, к раздаче с телефона) или включите VPN и повторите."
         } else if has(&[
             "выход в интернет",
             "network is unreachable",
@@ -280,12 +292,20 @@ mod problem_tests {
                 "свежую версию",
             ),
             ("Локальный UDP-порт 53 недоступен", "AdGuard"),
-            ("Повреждены границы блока hosts; файл сохранён", "резервную копию"),
             (
-                "Атомарная замена C:\\Windows\\System32\\drivers\\etc\\hosts не удалась: Отказано в доступе.",
-                "drivers\\etc\\hosts",
+                "Повреждены границы блока hosts; файл сохранён",
+                "резервную копию",
+            ),
+            (
+                "Атомарная замена hosts не удалась: Отказано в доступе.",
+                if cfg!(windows) {
+                    "drivers\\etc\\hosts"
+                } else {
+                    "/etc/hosts"
+                },
             ),
             ("Нет проверенного маршрута для daily", "серверы Google"),
+            (crate::net::rank::DOH_UNREACHABLE, "другой сети"),
         ] {
             assert!(advice_for(cause).unwrap().contains(expected), "{cause}");
         }
