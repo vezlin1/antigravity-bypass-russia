@@ -295,6 +295,7 @@ fn archive_bundle_capture(
     }
     macos_app::check_write_access(if target_exists { path } else { captured })?;
     macos_app::archive_legacy(path, directory)
+        .map(|_| ())
         .map_err(|error| format!("Не удалось вынести журнал восстановления из приложения: {error}"))
 }
 

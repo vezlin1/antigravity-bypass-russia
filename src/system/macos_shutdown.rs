@@ -7,9 +7,9 @@ use std::{
 };
 
 #[cfg(target_os = "macos")]
-pub use native::{close_application, running_applications};
-#[cfg(target_os = "macos")]
 pub(crate) use native::launching_app_name;
+#[cfg(target_os = "macos")]
+pub use native::{close_application, running_applications};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Process {
@@ -506,7 +506,14 @@ mod native {
             if let Ok(Some(process)) = inspect(pid) {
                 if let Some(name) = bundle(&process.executable).and_then(Path::file_stem) {
                     let name = name.to_str()?;
-                    return Some(if name == "Terminal" { "Терминал" } else { name }.into());
+                    return Some(
+                        if name == "Terminal" {
+                            "Терминал"
+                        } else {
+                            name
+                        }
+                        .into(),
+                    );
                 }
             }
         }

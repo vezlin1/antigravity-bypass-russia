@@ -346,17 +346,9 @@ fn print_patch_result(
             true
         }
         Err(error) => {
-            let action = if cfg!(target_os = "macos")
-                && (error.starts_with("Gatekeeper заблокировал запуск")
-                    || error.starts_with("Пробный запуск Antigravity не удался"))
-            {
-                "не удалось настроить"
-            } else {
-                "файл не изменён"
-            };
             print_problem(
                 6,
-                &format!("{label}: {action}"),
+                &format!("{label}: файл не изменён"),
                 &format!("{error} — {}", t.path.display()),
                 None,
             );
@@ -371,64 +363,19 @@ fn print_patch_result(
     }
 }
 
+/// macOS may refuse to open an app whose bundle files were changed. No trial
+/// launch is made: the user decides and can undo the change with item 6.
 #[cfg(target_os = "macos")]
-fn verify_patched_apps(
-    results: &mut [(
+fn app_bundle_changed(
+    results: &[(
         FoundTarget,
         Result<crate::core::patcher::PatchOutcome, String>,
     )],
-    mut attempt: Option<&mut AttemptRecorder>,
-) {
-    use crate::core::patcher::PatchOutcome;
-    use crate::system::macos_app::{self, LaunchCheck};
-    use std::collections::BTreeMap;
-
-    let mut apps = BTreeMap::<_, Vec<_>>::new();
-    for (index, (target, result)) in results.iter().enumerate() {
-        if !matches!(result, Ok(PatchOutcome::Changed(_))) {
-            continue;
-        }
-        if let Ok(path) = macos_app::resolved_file(&target.path) {
-            if let Some(app) = macos_app::bundle(&path) {
-                apps.entry(app.to_path_buf()).or_default().push(index);
-            }
-        }
-    }
-    for (app, indices) in apps {
-        let failure = match macos_app::check_launch(&app) {
-            LaunchCheck::Started => continue,
-            LaunchCheck::Rejected(pid) => {
-                format!("Gatekeeper заблокировал запуск Antigravity (PID {pid}).")
-            }
-            LaunchCheck::Failed(reason) => {
-                format!("Пробный запуск Antigravity не удался. {reason}.")
-            }
-            LaunchCheck::Unconfirmed(error) => {
-                if let Some(recorder) = attempt.as_deref_mut() {
-                    recorder.record_error("verify_app", &error, None, Some(&app));
-                }
-                crate::net::relay::log_event(&format!(
-                    "Проверка запуска {}: {error}",
-                    app.display()
-                ));
-                eprintln!(
-                    "      {} Не удалось подтвердить запуск Antigravity. {error}",
-                    mark(Tone::Warn)
-                );
-                continue;
-            }
-        };
-        for index in indices {
-            let (target, result) = &mut results[index];
-            let restored = restore_target(target);
-            crate::diagnostics::attempt::note_staging_rollback(restored.is_ok());
-            let detail = match restored {
-                Ok(_) => "Исходный файл восстановлен. Если приложение всё ещё не открывается, выполните откат (пункт 6).".into(),
-                Err(error) => format!("Автоматический откат не выполнен ({error}). Закройте Antigravity и повторите откат (пункт 6)."),
-            };
-            *result = Err(format!("{failure} {detail}"));
-        }
-    }
+) -> bool {
+    results.iter().any(|(target, result)| {
+        matches!(result, Ok(crate::core::patcher::PatchOutcome::Changed(_)))
+            && crate::system::macos_app::bundle(&target.path).is_some()
+    })
 }
 
 /// Runs `action` on every file under one step and lists the results below it.
@@ -450,14 +397,10 @@ fn run_file_step(
         .collect();
     // Changed JS needs cache invalidation even when another file failed.
     let cache = clear_ide_v8_caches();
-    #[cfg(target_os = "macos")]
-    let results = {
-        let mut results = results;
-        verify_patched_apps(&mut results, attempt.as_deref_mut());
-        results
-    };
     progress.finish(results.iter().all(|(_, result)| result.is_ok()) && cache.is_ok());
     drop(progress);
+    #[cfg(target_os = "macos")]
+    let bundle_changed = app_bundle_changed(&results);
     let mut ok = true;
     for (target, result) in results {
         if let Err(error) = &result {
@@ -466,6 +409,16 @@ fn run_file_step(
             }
         }
         ok &= print_patch_result(&target, result);
+    }
+    #[cfg(target_os = "macos")]
+    if bundle_changed {
+        println!(
+            "      {}",
+            paint(
+                Tone::Muted,
+                "Если macOS сообщит, что Antigravity «повреждено» и его нельзя открыть, выберите пункт 6 — исходные файлы вернутся."
+            )
+        );
     }
     if let Err(error) = cache {
         if let Some(recorder) = attempt {

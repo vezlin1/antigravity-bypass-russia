@@ -79,9 +79,13 @@ pub(crate) fn migrate_app_backup(path: &Path) -> Result<(), String> {
         }
     }
     copy_legacy_directory(&source, &destination)?;
-    macos_app::archive_legacy(path, &source).map_err(|error| {
+    let archive = macos_app::archive_legacy(path, &source).map_err(|error| {
         format!("Копия старого backup сохранена, не удалось убрать его из приложения: {error}")
-    })
+    })?;
+    // Every file was verified byte-for-byte in Application Support: the
+    // archived source is only a duplicate of hundreds of megabytes.
+    let _ = fs::remove_dir_all(archive);
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

@@ -3,10 +3,10 @@
   "checked_at": "2026-11-25",
   "current": {
     "app": {
-      "version": "2.35.2",
-      "url": "https://storage.googleapis.com/antigravity-public/antigravity-hub/2.35.2-4585983447007232/linux-x64/Antigravity.tar.gz",
-      "sha256": "2d33db282b1e9b3c7582c140dab9e86848f1b37a05bfa4a1dff7f44de1bf304f",
-      "asar_sha256": "e057115571cf5085406d20f2427a5afac272b712ec84332c7157da0113d4b2d0"
+      "version": "2.36.0",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-hub/2.36.0-5596661662220288/linux-x64/Antigravity.tar.gz",
+      "sha256": "6fe418f08e760c0b7f2975df9daef6eb6cbc47c65161251349e0ce255c608fb6",
+      "asar_sha256": "d2bc25eab00f2ff6f14395e45f13347eef605af5a63f28db7edbfd2ab42a7571"
     },
     "ide": {
       "version": "2.8.0",
@@ -38,10 +38,10 @@
   },
   "previous": {
     "app": {
-      "version": "2.34.0",
-      "url": "https://storage.googleapis.com/antigravity-public/antigravity-hub/2.34.0-5887025308631040/linux-x64/Antigravity.tar.gz",
-      "sha256": "478c68f86c9ef61a502185a39e9ceec66b1276a6a53b191a19b0d9ce869836db",
-      "asar_sha256": "8934adef0622c9271c92eea950a71848764a66f7b10023ccbd82e54b959adb0e"
+      "version": "2.35.2",
+      "url": "https://storage.googleapis.com/antigravity-public/antigravity-hub/2.35.2-4585983447007232/linux-x64/Antigravity.tar.gz",
+      "sha256": "2d33db282b1e9b3c7582c140dab9e86848f1b37a05bfa4a1dff7f44de1bf304f",
+      "asar_sha256": "e057115571cf5085406d20f2427a5afac272b712ec84332c7157da0113d4b2d0"
     },
     "ide": {
       "version": "2.7.0",

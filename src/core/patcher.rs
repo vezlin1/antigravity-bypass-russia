@@ -1106,7 +1106,18 @@ pub fn patch_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     let target = &resolve_target(target)?;
     let result = patch_target_locked(target);
     forget_cached_states();
+    #[cfg(target_os = "macos")]
+    prune_bundle_transactions(target);
     result
+}
+
+/// Finished write journals next to the app are no longer needed; pending ones
+/// stay for crash recovery (see `macos_app::prune_transactions`).
+#[cfg(target_os = "macos")]
+fn prune_bundle_transactions(target: &FoundTarget) {
+    if let Some(app) = crate::system::macos_app::bundle(&target.path) {
+        crate::system::macos_app::prune_transactions(app);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1221,6 +1232,8 @@ pub fn restore_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     let target = &resolve_target(target)?;
     let result = restore_target_locked(target);
     forget_cached_states();
+    #[cfg(target_os = "macos")]
+    prune_bundle_transactions(target);
     result
 }
 

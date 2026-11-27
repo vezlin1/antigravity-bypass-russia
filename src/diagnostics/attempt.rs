@@ -253,12 +253,6 @@ pub fn classify_error(
 
     let reason = if is_app_management_eperm(path, cause) {
         "app_management_blocked"
-    } else if has(&["gatekeeper заблокировал запуск"]) {
-        "gatekeeper_rejected"
-    } else if has(&["пробный запуск antigravity не удался"]) {
-        "app_launch_failed"
-    } else if step == "verify_app" {
-        "app_launch_unverified"
     } else if has(&["integrity"]) {
         "asar_integrity"
     } else if has(&["старый или смешанный патч", "старый патч диагностической"])

@@ -136,7 +136,7 @@ impl Drop for ChildGuard {
     }
 }
 
-pub(super) fn capture(command: &mut Command, budget: Duration) -> io::Result<Output> {
+fn capture(command: &mut Command, budget: Duration) -> io::Result<Output> {
     // Temporary files avoid stdout/stderr pipe deadlocks and reader threads
     // retained by a grandchild after a timeout.
     let mut stdout = tempfile::tempfile()?;
