@@ -2,6 +2,7 @@
 //! The old file is claimed before publication; failed/interrupted transactions
 //! retain it. Unix recovery copies also retain writes through old open FDs.
 use std::{
+    ffi::OsStr,
     fs,
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -154,22 +155,59 @@ fn restore_claim(path: &Path, captured: &Path, file: &fs::File) -> Result<(), St
 }
 
 fn mark_finished(directory: &Path, status: &[u8]) -> Result<(), String> {
-    let mut marker = fs::File::create(directory.join("COMMITTED")).map_err(|e| e.to_string())?;
+    let marker = directory.join("COMMITTED");
+    #[cfg(target_os = "macos")]
+    let marker = fs::File::create_new(marker);
+    #[cfg(not(target_os = "macos"))]
+    let marker = fs::File::create(marker);
+    let mut marker = marker.map_err(|e| e.to_string())?;
     marker.write_all(status).map_err(|e| e.to_string())?;
     marker.sync_all().map_err(|e| e.to_string())
 }
 
+fn file_marker(path: &Path) -> &OsStr {
+    path.file_name().unwrap_or_default()
+}
+
 pub(super) fn recover_pending(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(app) = super::macos_app::bundle(path) {
+        let directory = super::macos_app::transactions(app);
+        let relative = path.strip_prefix(app).map_err(|error| error.to_string())?;
+        if super::macos_app::transaction_directory_exists(&directory)? {
+            recover_from(
+                path,
+                &directory,
+                relative.as_os_str().as_encoded_bytes(),
+                false,
+            )?;
+        }
+    }
+    recover_from(
+        path,
+        parent(path),
+        file_marker(path).to_string_lossy().as_bytes(),
+        true,
+    )
+}
+
+fn recover_from(
+    path: &Path,
+    directory: &Path,
+    expected_marker: &[u8],
+    adjacent: bool,
+) -> Result<(), String> {
     let exists = match fs::symlink_metadata(path) {
         Ok(_) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
         Err(e) => return Err(e.to_string()),
     };
-    let entries = match fs::read_dir(parent(path)) {
+    let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.to_string()),
     };
+    let _ = adjacent;
     let mut pending = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
@@ -182,29 +220,35 @@ pub(super) fn recover_pending(path: &Path) -> Result<(), String> {
             continue;
         }
         let dir = entry.path();
-        if dir.join("COMMITTED").exists() {
-            continue;
-        }
         let pending_marker = dir.join("PENDING");
         if !fs::symlink_metadata(&pending_marker)
             .is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
-            || fs::read(&pending_marker).ok().as_deref()
-                != Some(
-                    path.file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .as_bytes(),
-                )
+            || fs::read(&pending_marker).ok().as_deref() != Some(expected_marker)
         {
             continue;
         }
         let captured = dir.join("captured");
         if fs::symlink_metadata(&captured).is_ok_and(|m| m.is_file() && !m.file_type().is_symlink())
         {
+            if dir.join("COMMITTED").exists() {
+                #[cfg(target_os = "macos")]
+                if adjacent {
+                    archive_bundle_capture(path, &dir, &captured, exists)?;
+                }
+                continue;
+            }
             if exists {
                 // Finish interrupted publication without touching the existing
                 // destination; later user deletion must not revive old bytes.
+                #[cfg(target_os = "macos")]
+                if adjacent {
+                    super::macos_app::check_write_access(path)?;
+                }
                 mark_finished(&dir, b"destination preserved")?;
+                #[cfg(target_os = "macos")]
+                if adjacent {
+                    archive_bundle_capture(path, &dir, &captured, exists)?;
+                }
             } else {
                 pending.push(captured);
             }
@@ -214,6 +258,10 @@ pub(super) fn recover_pending(path: &Path) -> Result<(), String> {
         return Err("Несколько незавершённых записей: сохранённые файлы требуют проверки".into());
     }
     if let Some(captured) = pending.pop() {
+        #[cfg(target_os = "macos")]
+        if adjacent {
+            super::macos_app::check_write_access(&captured)?;
+        }
         match fs::hard_link(&captured, path) {
             Ok(()) => (),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
@@ -224,12 +272,30 @@ pub(super) fn recover_pending(path: &Path) -> Result<(), String> {
                 ))
             }
         }
-        mark_finished(
-            captured.parent().ok_or("Нет каталога восстановления")?,
-            b"recovered",
-        )?;
+        let dir = captured.parent().ok_or("Нет каталога восстановления")?;
+        mark_finished(dir, b"recovered")?;
+        #[cfg(target_os = "macos")]
+        if adjacent {
+            archive_bundle_capture(path, dir, &captured, true)?;
+        }
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn archive_bundle_capture(
+    path: &Path,
+    directory: &Path,
+    captured: &Path,
+    target_exists: bool,
+) -> Result<(), String> {
+    use super::macos_app;
+    if macos_app::bundle(path).is_none() {
+        return Ok(());
+    }
+    macos_app::check_write_access(if target_exists { path } else { captured })?;
+    macos_app::archive_legacy(path, directory)
+        .map_err(|error| format!("Не удалось вынести журнал восстановления из приложения: {error}"))
 }
 
 pub(super) fn replace(
@@ -255,9 +321,23 @@ fn replace_with(
     mut hook: impl FnMut(Stage),
 ) -> Result<(), String> {
     recover_pending(path)?;
+    let name = file_marker(path).to_string_lossy();
+    let (staging, marker) = (parent(path).to_path_buf(), name.as_bytes());
+    #[cfg(target_os = "macos")]
+    let (staging, marker) = if let Some(app) = super::macos_app::bundle(path) {
+        (
+            super::macos_app::create_transactions(app, path)?,
+            path.strip_prefix(app)
+                .map_err(|error| error.to_string())?
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+    } else {
+        (staging, marker)
+    };
     // Complete expensive preparation before claiming the target pathname.
     let replacement = after
-        .map(|data| super::fs_utils::prepared_file(path, data))
+        .map(|data| super::fs_utils::prepared_file_in(path, data, &staging))
         .transpose()?;
     hook(Stage::Prepared);
     let Some(expected) = expected else {
@@ -277,21 +357,14 @@ fn replace_with(
     }
     let transaction = tempfile::Builder::new()
         .prefix(&prefix(path))
-        .tempdir_in(parent(path))
+        .tempdir_in(&staging)
         .map_err(|e| e.to_string())?;
-    let mut marker =
+    let mut pending =
         fs::File::create(transaction.path().join("PENDING")).map_err(|e| e.to_string())?;
     super::fs_utils::inherit_directory_owner(transaction.path())?;
-    marker
-        .write_all(
-            path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .as_bytes(),
-        )
-        .map_err(|e| e.to_string())?;
-    marker.sync_all().map_err(|e| e.to_string())?;
-    drop(marker);
+    pending.write_all(marker).map_err(|e| e.to_string())?;
+    pending.sync_all().map_err(|e| e.to_string())?;
+    drop(pending);
     let dir: PathBuf = transaction.keep();
     let captured = dir.join("captured");
     if let Err(error) = claim(&source, path, &captured) {
@@ -435,6 +508,38 @@ mod tests {
         fs::write(&path, b"new version").unwrap();
         recover_pending(&path).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"new version");
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundle_recovery_stages_outside_and_accepts_the_previous_layout() {
+        for legacy in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let app = directory.path().join("IDE.app");
+            let path = app.join("Contents/Resources/language_server");
+            let parent = path.parent().unwrap();
+            fs::create_dir_all(parent).unwrap();
+            fs::write(&path, b"original").unwrap();
+            if legacy {
+                let stage = parent.join(".language_server.ag-transaction-legacy");
+                fs::create_dir(&stage).unwrap();
+                fs::write(stage.join("PENDING"), b"language_server").unwrap();
+                fs::rename(&path, stage.join("captured")).unwrap();
+            } else {
+                let interrupted = std::panic::catch_unwind(|| {
+                    replace_with(&path, Some(b"original"), Some(b"patched"), |stage| {
+                        if stage == Stage::Claimed {
+                            assert_eq!(fs::read_dir(parent).unwrap().count(), 0);
+                            panic!("simulated interruption");
+                        }
+                    })
+                });
+                assert!(interrupted.is_err());
+            }
+            assert!(!path.exists());
+            recover_pending(&path).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"original");
+            assert_eq!(fs::read_dir(parent).unwrap().count(), 1);
+        }
     }
     #[test]
     fn successful_replace_and_delete_are_exact() {

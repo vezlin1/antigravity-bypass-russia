@@ -23,13 +23,99 @@ struct Record {
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn directory(path: &Path) -> PathBuf {
+fn adjacent_directory(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".ag-backups");
     path.with_file_name(name)
 }
-fn record_path(path: &Path) -> PathBuf {
-    directory(path).join("current.json")
+
+fn directory(path: &Path) -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    if let Some(directory) = super::macos_app::backup_directory(path)? {
+        return Ok(directory);
+    }
+    Ok(adjacent_directory(path))
+}
+
+fn record_path(path: &Path) -> Result<PathBuf, String> {
+    Ok(directory(path)?.join("current.json"))
+}
+
+fn ensure_directory(path: &Path, dir: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if super::macos_app::bundle(path).is_some() {
+        super::macos_app::create_backup_parents(dir)?;
+    }
+    let _ = path;
+    super::fs_utils::create_private_directory(dir)
+}
+
+/// Import journals produced by releases which stored backups inside the app.
+/// Keep the source until every file is safely present in Application Support.
+#[cfg(target_os = "macos")]
+pub(crate) fn migrate_app_backup(path: &Path) -> Result<(), String> {
+    use super::macos_app;
+    if macos_app::bundle(path).is_none() {
+        return Ok(());
+    }
+    let source = adjacent_directory(path);
+    match fs::symlink_metadata(&source) {
+        Ok(metadata) if metadata.is_dir() => (),
+        Ok(_) => return Err("Старый каталог backup не является обычным каталогом".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("Старый каталог backup: {error}")),
+    }
+    macos_app::check_write_access(path)?;
+    recover_pending(&source.join("current.json"))?;
+    let destination = directory(path)?;
+    macos_app::create_backup_parents(&destination)?;
+    match macos_app::rename_exclusive(&source, &destination) {
+        Ok(()) => return Ok(()),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::EXDEV | libc::EEXIST)) => (),
+        Err(error) => {
+            return Err(format!(
+                "Не удалось вынести старый backup из приложения: {error}"
+            ))
+        }
+    }
+    copy_legacy_directory(&source, &destination)?;
+    macos_app::archive_legacy(path, &source).map_err(|error| {
+        format!("Копия старого backup сохранена, не удалось убрать его из приложения: {error}")
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn copy_legacy_directory(source: &Path, destination: &Path) -> Result<(), String> {
+    super::fs_utils::create_private_directory(destination)?;
+    for entry in fs::read_dir(source).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let kind = entry.file_type().map_err(|error| error.to_string())?;
+        let copy = destination.join(entry.file_name());
+        if kind.is_dir() {
+            copy_legacy_directory(&entry.path(), &copy)?;
+        } else if kind.is_file() {
+            let bytes = fs::read(entry.path()).map_err(|error| error.to_string())?;
+            match fs::symlink_metadata(&copy) {
+                Ok(metadata)
+                    if metadata.is_file() && fs::read(&copy).ok().as_deref() == Some(&bytes) =>
+                {
+                    ()
+                }
+                Ok(_) => {
+                    return Err("Старый и новый backup различаются; обе копии сохранены".into())
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    guarded_write_file(&copy, None, Some(&bytes))?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        } else {
+            return Err(
+                "Старый backup содержит ссылку или специальный файл; перенос отменён".into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn apply(
@@ -66,9 +152,10 @@ fn apply_impl(
     // `current` equals `before`: hash those bytes once for every comparison
     // and record field below (a 100 MB executable takes noticeable time).
     let before_hash = digest(before.unwrap_or_default());
-    let dir = directory(path);
-    super::fs_utils::create_private_directory(&dir)?;
-    let old_bytes = read_optional(&record_path(path))?;
+    let dir = directory(path)?;
+    ensure_directory(path, &dir)?;
+    let record_path = dir.join("current.json");
+    let old_bytes = read_optional(&record_path)?;
     let old_record = old_bytes
         .as_ref()
         .map(|bytes| parse_record(bytes))
@@ -116,7 +203,7 @@ fn apply_impl(
     };
     // A crash before replacement is recoverable: restore accepts either hash.
     guarded_write_file(
-        &record_path(path),
+        &record_path,
         old_bytes.as_deref(),
         Some(&serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?),
     )?;
@@ -135,13 +222,13 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
 }
 
 fn load_record(path: &Path) -> Result<Option<Record>, String> {
-    read_optional(&record_path(path))?
+    read_optional(&record_path(path)?)?
         .map(|bytes| parse_record(&bytes))
         .transpose()
 }
 
 fn original_bytes(path: &Path, record: &Record) -> Result<Vec<u8>, String> {
-    let bytes = fs::read(directory(path).join(format!("{}.bin", record.original)))
+    let bytes = fs::read(directory(path)?.join(format!("{}.bin", record.original)))
         .map_err(|e| format!("Backup недоступен: {e}"))?;
     if digest(&bytes) != record.original {
         return Err("Хеш backup не совпадает; откат отменён".into());
@@ -167,7 +254,7 @@ pub fn recorded_modified_hash(path: &Path) -> Result<Option<String>, String> {
 }
 
 fn save_snapshot(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let snapshot = directory(path).join(format!("{}.applied.bin", digest(bytes)));
+    let snapshot = directory(path)?.join(format!("{}.applied.bin", digest(bytes)));
     match read_optional(&snapshot)? {
         Some(existing) if existing == bytes => Ok(()),
         Some(_) => Err("Повреждена копия применённых настроек".into()),
@@ -186,7 +273,7 @@ pub fn read_modified(path: &Path) -> Result<Option<Vec<Vec<u8>>>, String> {
     }
     let mut snapshots = Vec::new();
     for hash in std::iter::once(&record.modified).chain(record.previous.iter()) {
-        let bytes = fs::read(directory(path).join(format!("{hash}.applied.bin")))
+        let bytes = fs::read(directory(path)?.join(format!("{hash}.applied.bin")))
             .map_err(|e| format!("Копия применённых настроек недоступна: {e}"))?;
         if digest(&bytes) != *hash {
             return Err("Повреждена копия применённых настроек".into());
@@ -208,7 +295,7 @@ pub fn verified_original(path: &Path, expected: &[u8]) -> Result<Option<Vec<u8>>
 }
 
 fn archive_record(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let archive = directory(path).join(format!("{}.record.json", digest(bytes)));
+    let archive = directory(path)?.join(format!("{}.record.json", digest(bytes)));
     match read_optional(&archive)? {
         Some(existing) if existing == bytes => Ok(()),
         Some(_) => Err("Архив журнала повреждён".into()),
@@ -218,7 +305,8 @@ fn archive_record(path: &Path, bytes: &[u8]) -> Result<(), String> {
 
 /// Retire a restored/superseded journal while retaining all exact backups.
 pub fn retire(path: &Path, expected: Option<&[u8]>) -> Result<(), String> {
-    let Some(record_bytes) = read_optional(&record_path(path))? else {
+    let record_path = record_path(path)?;
+    let Some(record_bytes) = read_optional(&record_path)? else {
         return Ok(());
     };
     parse_record(&record_bytes)?;
@@ -228,7 +316,7 @@ pub fn retire(path: &Path, expected: Option<&[u8]>) -> Result<(), String> {
     if read_optional(path)?.as_deref() != expected {
         return Err("Файл обновлён во время завершения отката; журнал сохранён".into());
     }
-    guarded_write_file(&record_path(path), Some(&record_bytes), None)
+    guarded_write_file(&record_path, Some(&record_bytes), None)
 }
 
 fn parse_record(bytes: &[u8]) -> Result<Record, String> {
@@ -245,11 +333,11 @@ fn parse_record(bytes: &[u8]) -> Result<Record, String> {
     Ok(record)
 }
 pub fn has_record(path: &Path) -> bool {
-    record_path(path).is_file()
+    record_path(path).is_ok_and(|record| record.is_file())
 }
 
 pub fn verify_recorded_file(path: &Path) -> Result<bool, String> {
-    let Some(bytes) = read_optional(&record_path(path))? else {
+    let Some(bytes) = read_optional(&record_path(path)?)? else {
         return Ok(false);
     };
     let record = parse_record(&bytes)?;
@@ -276,8 +364,8 @@ pub fn archive_legacy(path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
     if read_optional(path)?.as_deref() != Some(bytes) {
         return Err("Настройки изменились; очистка отменена".into());
     }
-    let dir = directory(path);
-    super::fs_utils::create_private_directory(&dir)?;
+    let dir = directory(path)?;
+    ensure_directory(path, &dir)?;
     let backup = dir.join(format!("legacy-{}.bin", digest(bytes)));
     if !backup.exists() {
         guarded_write_file(&backup, None, Some(bytes))?;
@@ -293,7 +381,7 @@ pub fn restore(path: &Path) -> Result<bool, String> {
 }
 
 fn restore_with(path: &Path, before_commit: impl FnOnce()) -> Result<bool, String> {
-    let Some(bytes) = read_optional(&record_path(path))? else {
+    let Some(bytes) = read_optional(&record_path(path)?)? else {
         return Ok(false);
     };
     let record = parse_record(&bytes)?;
@@ -328,7 +416,9 @@ mod tests {
         let p = d.path().join("app.exe");
         fs::write(&p, b"stock").unwrap();
         apply(&p, Some(b"stock"), b"patched", "cli").unwrap();
-        let backup = directory(&p).join(format!("{}.bin", digest(b"stock")));
+        let backup = directory(&p)
+            .unwrap()
+            .join(format!("{}.bin", digest(b"stock")));
         assert_eq!(fs::read(&backup).unwrap(), b"stock");
         assert!(restore(&p).unwrap());
         assert_eq!(fs::read(&p).unwrap(), b"stock");
@@ -344,13 +434,13 @@ mod tests {
         let p = d.path().join("app.exe");
         fs::write(&p, b"stock v1").unwrap();
         apply(&p, Some(b"stock v1"), b"patched v1", "cli").unwrap();
-        let record = fs::read(record_path(&p)).unwrap();
+        let record = fs::read(record_path(&p).unwrap()).unwrap();
         assert!(restore_with(&p, || {
             fs::write(&p, b"stock v2").unwrap();
         })
         .is_err());
         assert_eq!(fs::read(&p).unwrap(), b"stock v2");
-        assert_eq!(fs::read(record_path(&p)).unwrap(), record);
+        assert_eq!(fs::read(record_path(&p).unwrap()).unwrap(), record);
         assert_eq!(read_original(&p).unwrap(), Some(Some(b"stock v1".to_vec())));
     }
     #[test]
@@ -371,15 +461,25 @@ mod tests {
         let p = d.path().join("app");
         fs::write(&p, b"v1").unwrap();
         apply(&p, Some(b"v1"), b"patched v1", "cli").unwrap();
-        let record = fs::read(record_path(&p)).unwrap();
+        let record = fs::read(record_path(&p).unwrap()).unwrap();
         fs::write(&p, b"v2").unwrap();
         apply(&p, Some(b"v2"), b"patched v2", "cli").unwrap();
         assert_eq!(
-            fs::read(directory(&p).join(format!("{}.record.json", digest(&record)))).unwrap(),
+            fs::read(
+                directory(&p)
+                    .unwrap()
+                    .join(format!("{}.record.json", digest(&record)))
+            )
+            .unwrap(),
             record
         );
         assert_eq!(
-            fs::read(directory(&p).join(format!("{}.bin", digest(b"v1")))).unwrap(),
+            fs::read(
+                directory(&p)
+                    .unwrap()
+                    .join(format!("{}.bin", digest(b"v1")))
+            )
+            .unwrap(),
             b"v1"
         );
         restore(&p).unwrap();
@@ -397,9 +497,13 @@ mod tests {
             Some(vec![b"second".to_vec(), b"first".to_vec()])
         );
         let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(record_path(&p)).unwrap()).unwrap();
+            serde_json::from_slice(&fs::read(record_path(&p).unwrap()).unwrap()).unwrap();
         value.as_object_mut().unwrap().remove("snapshots");
-        fs::write(record_path(&p), serde_json::to_vec(&value).unwrap()).unwrap();
+        fs::write(
+            record_path(&p).unwrap(),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
         assert_eq!(read_modified(&p).unwrap(), Some(Vec::new()));
         assert_eq!(read_original(&p).unwrap(), Some(None));
         restore(&p).unwrap();
@@ -428,10 +532,10 @@ mod tests {
         assert!(!has_record(&p));
         apply(&p, Some(b"partial"), b"old recorded bytes", "v1").unwrap();
         fs::write(&p, b"other partial").unwrap();
-        let record = fs::read(record_path(&p)).unwrap();
+        let record = fs::read(record_path(&p).unwrap()).unwrap();
         assert!(apply_continuing(&p, b"other partial", b"complete", "v2").is_err());
         assert_eq!(fs::read(&p).unwrap(), b"other partial");
-        assert_eq!(fs::read(record_path(&p)).unwrap(), record);
+        assert_eq!(fs::read(record_path(&p).unwrap()).unwrap(), record);
     }
 
     #[test]
@@ -443,7 +547,7 @@ mod tests {
         apply_continuing(&p, b"partial", b"complete", "v2").unwrap();
         fs::write(&p, b"partial").unwrap();
         apply_continuing(&p, b"partial", b"complete", "v2").unwrap();
-        let record = parse_record(&fs::read(record_path(&p)).unwrap()).unwrap();
+        let record = parse_record(&fs::read(record_path(&p).unwrap()).unwrap()).unwrap();
         assert_eq!(record.original, digest(b"stock"));
         assert_eq!(record.previous, Some(digest(b"partial")));
         restore(&p).unwrap();
@@ -471,7 +575,9 @@ mod tests {
         assert!(apply(&p, Some(b"stale"), b"patched", "test").is_err());
         apply(&p, Some(b"original"), b"patched", "test").unwrap();
         fs::write(
-            directory(&p).join(format!("{}.bin", digest(b"original"))),
+            directory(&p)
+                .unwrap()
+                .join(format!("{}.bin", digest(b"original"))),
             b"wrong",
         )
         .unwrap();

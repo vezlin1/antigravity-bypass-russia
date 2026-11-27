@@ -958,8 +958,10 @@ fn prepare_for_write(path: &Path, data: Vec<u8>, kind: TargetKind) -> Result<Vec
     #[cfg(target_os = "macos")]
     if matches!(kind, TargetKind::LanguageServer | TargetKind::AgyCli) {
         use std::io::Write;
+        // This file is read back after signing. Only the final replacement
+        // needs to share a volume with the target.
         let mut temp =
-            tempfile::NamedTempFile::new_in(path.parent().unwrap()).map_err(|e| e.to_string())?;
+            tempfile::NamedTempFile::new_in("/private/tmp").map_err(|e| e.to_string())?;
         temp.write_all(&data).map_err(|e| e.to_string())?;
         let status = crate::system::command::output(
             "codesign",
@@ -1100,9 +1102,19 @@ fn verified_legacy_cli_backup(path: &Path, current: &[u8]) -> Option<Vec<u8>> {
 pub fn patch_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     let _guard = operation_guard();
     forget_cached_states();
+    #[cfg(target_os = "macos")]
+    let target = &resolve_target(target)?;
     let result = patch_target_locked(target);
     forget_cached_states();
     result
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_target(target: &FoundTarget) -> Result<FoundTarget, String> {
+    let mut target = target.clone();
+    target.path =
+        crate::system::macos_app::resolved_file(&target.path).map_err(|error| error.to_string())?;
+    Ok(target)
 }
 
 /// The outcome when a plan has nothing to change.
@@ -1119,6 +1131,8 @@ fn unchanged_outcome(existing: usize, kind: TargetKind) -> Result<PatchOutcome, 
 fn patch_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
     crate::system::fs_utils::recover_pending(&target.path)?;
     ensure_not_symlink(&target.path)?;
+    #[cfg(target_os = "macos")]
+    journal::migrate_app_backup(&target.path)?;
     let mut before = fs::read(&target.path).map_err(|e| e.to_string())?;
     let (legacy_x64_error, mut p) = match scan(&before, target.kind, Mode::Apply) {
         Scan::LegacyX64V1 => (
@@ -1145,6 +1159,8 @@ fn patch_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
     let mut require_continuation = false;
     if legacy_x64_error.is_some() || partial_cli {
         ensure_file_closed(&target.path)?;
+        #[cfg(target_os = "macos")]
+        crate::system::macos_app::check_write_access(&target.path)?;
         if journal::has_record(&target.path) {
             let original = journal::verified_original(&target.path, &before)?
                 .ok_or("Backup старого патча исчез; файл не изменён")?;
@@ -1187,6 +1203,8 @@ fn patch_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
         return unchanged_outcome(p.existing, target.kind);
     }
     ensure_file_closed(&target.path)?;
+    #[cfg(target_os = "macos")]
+    crate::system::macos_app::check_write_access(&target.path)?;
     let after = prepare_for_write(&target.path, p.data.into_owned(), target.kind)?;
     if require_continuation {
         journal::apply_continuing(&target.path, &before, &after, &p.profile)?;
@@ -1199,6 +1217,8 @@ fn patch_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
 pub fn restore_target(target: &FoundTarget) -> Result<PatchOutcome, String> {
     let _guard = operation_guard();
     forget_cached_states();
+    #[cfg(target_os = "macos")]
+    let target = &resolve_target(target)?;
     let result = restore_target_locked(target);
     forget_cached_states();
     result
@@ -1208,6 +1228,8 @@ fn restore_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
     crate::system::fs_utils::recover_pending(&target.path)?;
     ensure_not_symlink(&target.path)?;
     ensure_file_closed(&target.path)?;
+    #[cfg(target_os = "macos")]
+    journal::migrate_app_backup(&target.path)?;
     let before = fs::read(&target.path).map_err(|e| e.to_string())?;
     let current_state = state_for_data(&before, target.kind);
     if current_state == BinaryState::Stock {
@@ -1215,6 +1237,10 @@ fn restore_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
         // executable. Retire the old record while keeping historical backups.
         journal::retire(&target.path, Some(&before))?;
         return Ok(PatchOutcome::AlreadyStock);
+    }
+    #[cfg(target_os = "macos")]
+    if journal::has_record(&target.path) {
+        crate::system::macos_app::check_write_access(&target.path)?;
     }
     if target.kind == TargetKind::AgyCli
         && journal::has_record(&target.path)
@@ -1245,6 +1271,8 @@ fn restore_target_locked(target: &FoundTarget) -> Result<PatchOutcome, String> {
             let old_cli_matches =
                 target.kind == TargetKind::AgyCli && legacy_cli_backup_matches(&original, &before);
             if current_matches || old_cli_matches {
+                #[cfg(target_os = "macos")]
+                crate::system::macos_app::check_write_access(&target.path)?;
                 crate::system::fs_utils::guarded_write_file(
                     &target.path,
                     Some(&before),

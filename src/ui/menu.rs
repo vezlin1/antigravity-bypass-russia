@@ -158,6 +158,11 @@ fn print_problem(indent: usize, message: &str, cause: &str, advice: Option<&str>
     if !readable.is_empty() {
         eprintln!("{pad}  {} {readable}", paint(Tone::Muted, "Причина:"));
     }
+    #[cfg(target_os = "macos")]
+    if cause.starts_with("Защита «Управление приложениями»") {
+        print_app_management_hint();
+        return;
+    }
     if let Some(advice) = advice.or_else(|| advice_for(cause)) {
         eprintln!("{pad}  {} {advice}", paint(Tone::Accent, "Что сделать:"));
     }
@@ -341,18 +346,87 @@ fn print_patch_result(
             true
         }
         Err(error) => {
+            let action = if cfg!(target_os = "macos")
+                && (error.starts_with("Gatekeeper заблокировал запуск")
+                    || error.starts_with("Пробный запуск Antigravity не удался"))
+            {
+                "не удалось настроить"
+            } else {
+                "файл не изменён"
+            };
             print_problem(
                 6,
-                &format!("{label}: файл не изменён"),
+                &format!("{label}: {action}"),
                 &format!("{error} — {}", t.path.display()),
                 None,
             );
-            if cfg!(target_os = "macos") && app_management_blocked(&t.path, &error) {
-                for line in APP_MANAGEMENT_HINT {
-                    eprintln!("        {}", paint(Tone::Warn, line));
-                }
+            #[cfg(target_os = "macos")]
+            if app_management_blocked(&t.path, &error)
+                && !error.starts_with("Защита «Управление приложениями»")
+            {
+                print_app_management_hint();
             }
             false
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn verify_patched_apps(
+    results: &mut [(
+        FoundTarget,
+        Result<crate::core::patcher::PatchOutcome, String>,
+    )],
+    mut attempt: Option<&mut AttemptRecorder>,
+) {
+    use crate::core::patcher::PatchOutcome;
+    use crate::system::macos_app::{self, LaunchCheck};
+    use std::collections::BTreeMap;
+
+    let mut apps = BTreeMap::<_, Vec<_>>::new();
+    for (index, (target, result)) in results.iter().enumerate() {
+        if !matches!(result, Ok(PatchOutcome::Changed(_))) {
+            continue;
+        }
+        if let Ok(path) = macos_app::resolved_file(&target.path) {
+            if let Some(app) = macos_app::bundle(&path) {
+                apps.entry(app.to_path_buf()).or_default().push(index);
+            }
+        }
+    }
+    for (app, indices) in apps {
+        let failure = match macos_app::check_launch(&app) {
+            LaunchCheck::Started => continue,
+            LaunchCheck::Rejected(pid) => {
+                format!("Gatekeeper заблокировал запуск Antigravity (PID {pid}).")
+            }
+            LaunchCheck::Failed(reason) => {
+                format!("Пробный запуск Antigravity не удался. {reason}.")
+            }
+            LaunchCheck::Unconfirmed(error) => {
+                if let Some(recorder) = attempt.as_deref_mut() {
+                    recorder.record_error("verify_app", &error, None, Some(&app));
+                }
+                crate::net::relay::log_event(&format!(
+                    "Проверка запуска {}: {error}",
+                    app.display()
+                ));
+                eprintln!(
+                    "      {} Не удалось подтвердить запуск Antigravity. {error}",
+                    mark(Tone::Warn)
+                );
+                continue;
+            }
+        };
+        for index in indices {
+            let (target, result) = &mut results[index];
+            let restored = restore_target(target);
+            crate::diagnostics::attempt::note_staging_rollback(restored.is_ok());
+            let detail = match restored {
+                Ok(_) => "Исходный файл восстановлен. Если приложение всё ещё не открывается, выполните откат (пункт 6).".into(),
+                Err(error) => format!("Автоматический откат не выполнен ({error}). Закройте Antigravity и повторите откат (пункт 6)."),
+            };
+            *result = Err(format!("{failure} {detail}"));
         }
     }
 }
@@ -376,6 +450,12 @@ fn run_file_step(
         .collect();
     // Changed JS needs cache invalidation even when another file failed.
     let cache = clear_ide_v8_caches();
+    #[cfg(target_os = "macos")]
+    let results = {
+        let mut results = results;
+        verify_patched_apps(&mut results, attempt.as_deref_mut());
+        results
+    };
     progress.finish(results.iter().all(|(_, result)| result.is_ok()) && cache.is_ok());
     drop(progress);
     let mut ok = true;
@@ -397,16 +477,24 @@ fn run_file_step(
     ok
 }
 
-const APP_MANAGEMENT_HINT: &[&str] = &[
-    "macOS запретила изменять файлы внутри приложения (защита «Управление приложениями»).",
-    "1. Закройте Antigravity.",
-    "2. Системные настройки → Конфиденциальность и безопасность → Управление приложениями:",
-    "   включите Терминал (или iTerm, из которого запускаете утилиту).",
-    "3. Полностью закройте терминал (⌘Q), откройте его снова и повторите операцию.",
-];
+#[cfg(target_os = "macos")]
+fn print_app_management_hint() {
+    let app = crate::system::macos_shutdown::launching_app_name().map_or_else(
+        || "приложение, из которого запустили утилиту (Терминал, iTerm или другое)".into(),
+        |name| format!("«{name}»"),
+    );
+    for line in [
+        "Закройте Antigravity.",
+        "Откройте Системные настройки → Конфиденциальность и безопасность → Управление приложениями.",
+        &format!("Включите {app}, полностью закройте его (⌘Q) и запустите утилиту снова."),
+    ] {
+        eprintln!("        {}", paint(Tone::Warn, line));
+    }
+}
 
 /// App Management denies writes inside signed bundles with EPERM, even to root;
 /// a missing Unix permission is EACCES (os error 13) and needs no such hint.
+#[cfg(any(target_os = "macos", test))]
 fn app_management_blocked(path: &Path, error: &str) -> bool {
     error.contains("(os error 1)")
         && path

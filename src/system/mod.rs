@@ -5,6 +5,8 @@ pub mod fs_utils;
 mod guarded_io;
 pub mod journal;
 pub mod lock;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos_app;
 #[cfg(any(target_os = "macos", test))]
 pub mod macos_shutdown;
 #[cfg(windows)]

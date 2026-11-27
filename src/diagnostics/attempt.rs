@@ -20,9 +20,11 @@ const MAX_ERRORS: usize = 16;
 
 thread_local! {
     static STAGING_ROLLBACK: Cell<Option<bool>> = const { Cell::new(None) };
+    #[cfg(target_os = "macos")]
+    static XATTR_ERRORS: std::cell::RefCell<Vec<StepError>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Called by staged network/route updates when an automatic rollback executes.
+/// Called by staged updates when an automatic rollback executes.
 /// `Some(false)` takes precedence over `Some(true)` if multiple rollbacks ran.
 pub fn note_staging_rollback(ok: bool) {
     STAGING_ROLLBACK.with(|slot| {
@@ -36,6 +38,27 @@ pub fn note_staging_rollback(ok: bool) {
 
 fn take_staging_rollback() -> Option<bool> {
     STAGING_ROLLBACK.with(|slot| slot.replace(None))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn note_xattr_error(path: &Path, error: &std::io::Error) {
+    let file_name = safe_file_name(path);
+    net::relay::log_event(&format!(
+        "Не удалось удалить com.apple.quarantine с {}: {error}",
+        file_name.as_deref().unwrap_or("временного файла"),
+    ));
+    XATTR_ERRORS.with_borrow_mut(|errors| {
+        if errors.len() < MAX_ERRORS {
+            errors.push(StepError {
+                step: "post_write".into(),
+                reason: "xattr_failed".into(),
+                component: None,
+                file_name,
+                host: None,
+                os_error: error.raw_os_error(),
+            });
+        }
+    });
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +117,8 @@ pub struct AttemptRecorder {
 impl AttemptRecorder {
     pub fn start(operation: Operation) -> Self {
         let _ = take_staging_rollback();
+        #[cfg(target_os = "macos")]
+        XATTR_ERRORS.with_borrow_mut(Vec::clear);
         Self {
             operation,
             errors: Vec::new(),
@@ -143,6 +168,11 @@ impl AttemptRecorder {
 
     pub fn finish(mut self, outcome: AttemptOutcome) {
         self.absorb_staging_rollback();
+        #[cfg(target_os = "macos")]
+        XATTR_ERRORS.with_borrow_mut(|errors| {
+            let remaining = MAX_ERRORS.saturating_sub(self.errors.len());
+            self.errors.extend(errors.drain(..).take(remaining));
+        });
         let record = AttemptRecord {
             schema_version: 1,
             bypass_version: env!("CARGO_PKG_VERSION").into(),
@@ -204,10 +234,11 @@ fn extract_known_host(cause: &str) -> Option<String> {
 
 fn is_app_management_eperm(path: Option<&Path>, cause: &str) -> bool {
     extract_os_error(cause) == Some(1)
-        && path.is_some_and(|p| {
-            p.ancestors()
-                .any(|dir| dir.extension().is_some_and(|ext| ext == "app"))
-        })
+        && (cause.starts_with("Защита «Управление приложениями»")
+            || path.is_some_and(|p| {
+                p.ancestors()
+                    .any(|dir| dir.extension().is_some_and(|ext| ext == "app"))
+            }))
 }
 
 pub fn classify_error(
@@ -222,6 +253,12 @@ pub fn classify_error(
 
     let reason = if is_app_management_eperm(path, cause) {
         "app_management_blocked"
+    } else if has(&["gatekeeper заблокировал запуск"]) {
+        "gatekeeper_rejected"
+    } else if has(&["пробный запуск antigravity не удался"]) {
+        "app_launch_failed"
+    } else if step == "verify_app" {
+        "app_launch_unverified"
     } else if has(&["integrity"]) {
         "asar_integrity"
     } else if has(&["старый или смешанный патч", "старый патч диагностической"])

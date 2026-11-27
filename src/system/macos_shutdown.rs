@@ -8,6 +8,8 @@ use std::{
 
 #[cfg(target_os = "macos")]
 pub use native::{close_application, running_applications};
+#[cfg(target_os = "macos")]
+pub(crate) use native::launching_app_name;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Process {
@@ -489,6 +491,26 @@ mod native {
             started,
             executable,
         }))
+    }
+
+    /// Best-effort display name for permission guidance. TCC itself remains
+    /// authoritative about which process is responsible for the request.
+    pub(crate) fn launching_app_name() -> Option<String> {
+        use crate::system::macos_app::bundle;
+        let mut pid = std::process::id();
+        for _ in 0..32 {
+            pid = parent_pid(pid).ok()?;
+            if pid <= 1 {
+                break;
+            }
+            if let Ok(Some(process)) = inspect(pid) {
+                if let Some(name) = bundle(&process.executable).and_then(Path::file_stem) {
+                    let name = name.to_str()?;
+                    return Some(if name == "Terminal" { "Терминал" } else { name }.into());
+                }
+            }
+        }
+        None
     }
 
     fn snapshot() -> Result<Vec<Process>, String> {

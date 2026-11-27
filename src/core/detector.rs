@@ -515,6 +515,10 @@ fn unavailable_cli_search_root(error: &std::io::Error) -> bool {
 /// Restore claimed files before target discovery, including an explicit path
 /// whose filename disappeared when the previous process was interrupted.
 pub fn recover_targets_in_path(root: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    if let Some(app) = crate::system::macos_app::bundle(root).filter(|app| *app != root) {
+        recover_bundle_transactions(app, root)?;
+    }
     match std::fs::symlink_metadata(root) {
         Ok(metadata) if metadata.file_type().is_symlink() => Ok(()),
         Ok(metadata) if metadata.is_dir() => recover_directory(root, 0, 8, None, false),
@@ -522,6 +526,50 @@ pub fn recover_targets_in_path(root: &Path) -> Result<(), String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => recover_explicit_file(root),
         Err(error) => Err(format!("{}: {error}", root.display())),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn recover_bundle_transactions(app: &Path, root: &Path) -> Result<(), String> {
+    use crate::system::macos_app;
+    let directory = macos_app::transactions(app);
+    if !macos_app::transaction_directory_exists(&directory)? {
+        return Ok(());
+    }
+    let root = std::fs::canonicalize(root)
+        .or_else(|_| macos_app::resolved_file(root))
+        .map_err(|error| error.to_string())?;
+    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry
+            .file_type()
+            .map_err(|error| error.to_string())?
+            .is_dir()
+        {
+            continue;
+        }
+        let dir = entry.path();
+        let marker = dir.join("PENDING");
+        let captured = dir.join("captured");
+        if dir.join("COMMITTED").exists() || !regular_file(&marker) || !regular_file(&captured) {
+            continue;
+        }
+        let marker = std::fs::read(marker).map_err(|error| error.to_string())?;
+        let Some(path) =
+            macos_app::pending_target(app, &marker).filter(|path| path.starts_with(&root))
+        else {
+            continue;
+        };
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(&format!(".{name}.ag-transaction-"))
+            && recovery_kind(&name, &captured).is_some()
+        {
+            crate::system::fs_utils::recover_pending(&path)?;
+        }
+    }
+    Ok(())
 }
 
 fn recover_explicit_file(path: &Path) -> Result<(), String> {
@@ -562,6 +610,10 @@ fn recover_directory(
     if std::fs::symlink_metadata(directory).is_ok_and(|metadata| metadata.file_type().is_symlink())
     {
         return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    if !cli_only && crate::system::macos_app::bundle(directory) == Some(directory) {
+        recover_bundle_transactions(directory, directory)?;
     }
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -1120,6 +1172,25 @@ mod detection_tests {
             assert_eq!(targets.len(), 1);
             assert_eq!(targets[0].kind, TargetKind::AgyCli);
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn interrupted_bundle_file_is_discovered_from_the_external_transaction() {
+        let root = tempfile::tempdir().unwrap();
+        let app = root.path().join("Antigravity.app");
+        let path = app.join("Contents/Resources/bin/agy");
+        let original = cli_fixture(true, false);
+        let source = pending_fixture(&path, &original);
+        let external = crate::system::macos_app::transactions(&app);
+        std::fs::create_dir(&external).unwrap();
+        let stage = external.join(source.file_name().unwrap());
+        std::fs::rename(&source, &stage).unwrap();
+        std::fs::write(stage.join("PENDING"), b"Contents/Resources/bin/agy").unwrap();
+        assert!(find_targets_in_path(&app).is_empty());
+        recover_targets_in_path(&app).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(find_targets_in_path(&app).len(), 1);
     }
 
     #[test]

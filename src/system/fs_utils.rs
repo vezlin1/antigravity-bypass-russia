@@ -19,8 +19,16 @@ pub fn robust_write_file(path: &Path, data: &[u8]) -> Result<(), String> {
 
 pub(super) fn prepared_file(path: &Path, data: &[u8]) -> Result<tempfile::NamedTempFile, String> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .map_err(|e| format!("Временный файл в {}: {e}", parent.display()))?;
+    prepared_file_in(path, data, parent)
+}
+
+pub(super) fn prepared_file_in(
+    path: &Path,
+    data: &[u8],
+    directory: &Path,
+) -> Result<tempfile::NamedTempFile, String> {
+    let mut temp = tempfile::NamedTempFile::new_in(directory)
+        .map_err(|e| format!("Временный файл в {}: {e}", directory.display()))?;
     temp.write_all(data).map_err(|e| e.to_string())?;
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -40,6 +48,7 @@ pub(super) fn prepared_file(path: &Path, data: &[u8]) -> Result<tempfile::NamedT
             // inherits its parent's owner, while NamedTempFile keeps mode 0600.
             #[cfg(unix)]
             {
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
                 let metadata = fs::metadata(parent).map_err(|e| e.to_string())?;
                 match_owner(temp.as_file(), &metadata)?;
             }
@@ -154,20 +163,35 @@ pub fn post_write_hook(path: &Path) -> Result<(), String> {
                 ));
             }
         }
-        let _ = crate::system::command::output("xattr", ["-d", "com.apple.quarantine", path_str]);
-
-        // Clear quarantine recursively without re-signing the entire .app with --deep
-        let mut curr = path.parent();
-        while let Some(p) = curr {
-            if p.extension().and_then(|e| e.to_str()) == Some("app") {
-                let app_str = p.to_str().unwrap_or_default();
-                let _ = crate::system::command::output("xattr", ["-cr", app_str]);
-                break;
-            }
-            curr = p.parent();
+        if let Err(error) = remove_quarantine(path) {
+            crate::diagnostics::attempt::note_xattr_error(path, &error);
         }
     }
     #[cfg(not(target_os = "macos"))]
     let _ = path;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn remove_quarantine(path: &Path) -> std::io::Result<()> {
+    use std::{ffi::CString, io, os::unix::ffi::OsStrExt};
+    let path = CString::new(path.as_os_str().as_bytes())?;
+    // MACL and provenance are owned by macOS. Touch only this staged file's
+    // quarantine attribute, and treat an absent attribute as success.
+    if unsafe {
+        libc::removexattr(
+            path.as_ptr(),
+            c"com.apple.quarantine".as_ptr(),
+            libc::XATTR_NOFOLLOW,
+        )
+    } == 0
+    {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ENOATTR) {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
