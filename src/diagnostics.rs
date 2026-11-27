@@ -399,10 +399,9 @@ fn fingerprint(path: &Path) -> Option<String> {
 fn service_summary() -> Value {
     let installed = fingerprint(&system::service::installed_exe());
     let current = std::env::current_exe().ok().and_then(|p| fingerprint(&p));
-    let same = installed
-        .as_ref()
-        .zip(current.as_ref())
-        .map(|(a, b)| a == b);
+    // On macOS the installed copy is re-signed, so the hashes above differ
+    // even for the same version; use the recorded source instead.
+    let same = system::service::installed_matches_current();
     let registered = system::service::registered_state();
     let running = system::service::running_state();
     json!({

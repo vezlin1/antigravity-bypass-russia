@@ -209,7 +209,51 @@ pub fn installed_matches_current() -> Option<bool> {
     if !installed.is_file() || !current.is_file() {
         return None;
     }
-    Some(same_file_bytes(&installed, &current))
+    #[cfg(target_os = "macos")]
+    {
+        installed_from_source(&installed, &current)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Some(same_file_bytes(&installed, &current))
+    }
+}
+
+/// macOS re-signs the installed service copy (ad-hoc `codesign`), so its bytes
+/// never equal the running executable. Record which source produced the
+/// installed bytes instead of comparing the two files.
+#[cfg(any(target_os = "macos", test))]
+fn source_record_path(installed: &Path) -> PathBuf {
+    installed.with_file_name("service-source.sha256")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn file_sha256(path: &Path) -> std::io::Result<String> {
+    fs::read(path).map(|bytes| super::journal::digest(&bytes))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn record_installed_source(installed: &Path, source: &Path) -> Result<(), String> {
+    let line = format!(
+        "{} {}\n",
+        file_sha256(source).map_err(|e| e.to_string())?,
+        file_sha256(installed).map_err(|e| e.to_string())?
+    );
+    super::fs_utils::robust_write_file(&source_record_path(installed), line.as_bytes())
+}
+
+/// `Some(true)` when the installed copy was produced from `source`. `None`
+/// when that is unknown: no record yet (installed by an older version) or the
+/// installed bytes changed since (e.g. a previous binary was restored).
+#[cfg(any(target_os = "macos", test))]
+fn installed_from_source(installed: &Path, source: &Path) -> Option<bool> {
+    let record = fs::read_to_string(source_record_path(installed)).ok()?;
+    let mut fields = record.split_whitespace();
+    let (recorded_source, recorded_installed) = (fields.next()?, fields.next()?);
+    if file_sha256(installed).ok()? != recorded_installed {
+        return None;
+    }
+    Some(file_sha256(source).ok()? == recorded_source)
 }
 
 fn xml_text(value: &str) -> String {
@@ -508,6 +552,31 @@ fn finish_prepared_service_binary(staged: &Path) -> Result<(), String> {
 mod binary_update_tests {
     use super::*;
 
+    #[test]
+    fn re_signed_service_copy_is_matched_by_its_recorded_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("antigravity-bypass-macos");
+        let installed = temp.path().join(EXE_NAME);
+        fs::write(&source, b"engine v1").unwrap();
+        // codesign changes the bytes of the installed copy.
+        fs::write(&installed, b"engine v1 + ad-hoc signature").unwrap();
+        assert_eq!(
+            installed_from_source(&installed, &source),
+            None,
+            "no record yet"
+        );
+
+        record_installed_source(&installed, &source).unwrap();
+        assert_eq!(installed_from_source(&installed, &source), Some(true));
+
+        fs::write(&source, b"engine v2").unwrap();
+        assert_eq!(installed_from_source(&installed, &source), Some(false));
+
+        // A restored older service binary invalidates the record.
+        fs::write(&installed, b"engine v0 + signature").unwrap();
+        assert_eq!(installed_from_source(&installed, &source), None);
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn staged_service_signature_remains_valid_after_replacement() {
@@ -740,7 +809,12 @@ pub fn enable(reuse_registration: bool, replacement_attempted: &mut bool) -> Res
         .map_err(|e| format!("Не удалось определить путь к текущему exe: {}", e))?;
     let dst = installed_exe();
 
-    if !dst.exists() || !same_file_bytes(&src, &dst) {
+    // On macOS the installed copy is re-signed: compare with the recorded source.
+    #[cfg(target_os = "macos")]
+    let up_to_date = dst.exists() && installed_from_source(&dst, &src) == Some(true);
+    #[cfg(not(target_os = "macos"))]
+    let up_to_date = dst.exists() && same_file_bytes(&src, &dst);
+    if !up_to_date {
         let staged = prepare_service_binary(&src, &dst)?;
         finish_prepared_service_binary(&staged)?;
         *replacement_attempted = true;
@@ -785,6 +859,14 @@ pub fn enable(reuse_registration: bool, replacement_attempted: &mut bool) -> Res
                 e
             )
         })?;
+        // Without the record the next run only reinstalls the same binary
+        // and the dashboard shows no version warning: not a setup failure.
+        #[cfg(target_os = "macos")]
+        if let Err(error) = record_installed_source(&dst, &src) {
+            crate::net::relay::log_event(&format!(
+                "Не удалось записать версию DNS-службы: {error}"
+            ));
+        }
     }
 
     *replacement_attempted = true;
