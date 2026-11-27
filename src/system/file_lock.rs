@@ -153,7 +153,8 @@ fn owned_application(executable: &std::path::Path, paths: &[PathBuf]) -> bool {
             .replace('/', "\\")
             .to_ascii_lowercase()
     };
-    if (name.starts_with("language_server") || name == "agy.exe" || name.starts_with("agy-"))
+    if (name.starts_with("language_server")
+        || (name != "antigravity.exe" && crate::core::detector::is_agy_cli_name(&name)))
         && name.ends_with(".exe")
     {
         return paths.iter().any(|p| normalize(p) == normalize(executable));

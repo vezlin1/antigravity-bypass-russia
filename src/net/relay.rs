@@ -338,14 +338,30 @@ fn quiet_after(
     }
 }
 
+#[cfg(any(windows, test))]
+fn pin_retry_delay(consecutive_errors: u32) -> Duration {
+    match consecutive_errors {
+        0 => Duration::from_secs(10),
+        1 => Duration::from_secs(30),
+        2 => Duration::from_secs(60),
+        3 => Duration::from_secs(120),
+        _ => Duration::from_secs(300),
+    }
+}
+
 #[cfg(windows)]
 fn refresh_system_network(notifications: &mpsc::Receiver<()>, subscribed: bool) {
-    const RETRY: Duration = Duration::from_secs(10);
     const POLL: Duration = Duration::from_secs(30);
     let mut retry = true;
+    let mut pin_error: Option<String> = None;
+    let mut consecutive_pin_errors: u32 = 0;
     let mut follow_error = None;
     loop {
-        let delay = if retry { RETRY } else { POLL };
+        let delay = if retry {
+            pin_retry_delay(consecutive_pin_errors)
+        } else {
+            POLL
+        };
         let changed = match notifications.recv_timeout(delay) {
             Ok(()) => true,
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -356,14 +372,27 @@ fn refresh_system_network(notifications: &mpsc::Receiver<()>, subscribed: bool) 
         }
         // VPN clients commonly update several routes in succession. Wait for
         // the burst to end so the checks below run once, on the new network.
-        if changed && !wait_for_quiet(notifications) {
-            return;
+        if changed {
+            if !wait_for_quiet(notifications) {
+                return;
+            }
+            consecutive_pin_errors = 0;
+            // Clear internal resolver caches only on an actual route change,
+            // never on repeated error retries when the network is unchanged.
+            resolvers::invalidate_network_caches();
         }
-        resolvers::invalidate_network_caches();
         retry = match super::rank::refresh_system_pins(|| notifications.try_recv().is_err()) {
-            Ok(ready) => !ready,
+            Ok(ready) => {
+                pin_error = None;
+                consecutive_pin_errors = 0;
+                !ready
+            }
             Err(error) => {
-                log_event(&format!("Обновление резервных адресов отложено: {error}"));
+                consecutive_pin_errors = consecutive_pin_errors.saturating_add(1);
+                if pin_error.as_deref() != Some(error.as_str()) {
+                    log_event(&format!("Обновление резервных адресов отложено: {error}"));
+                    pin_error = Some(error);
+                }
                 true
             }
         };

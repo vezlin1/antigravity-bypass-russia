@@ -250,17 +250,25 @@ pub(super) fn windows_ipv4_route(address: std::net::Ipv4Addr) -> Option<u32> {
 }
 
 #[cfg(windows)]
+fn is_non_overlay_vpn_iface(index: u32) -> bool {
+    is_vpn_iface(index)
+        && if_entry_meta(index).is_some_and(|(_, descr)| {
+            let descr = descr.to_ascii_lowercase();
+            !["tailscale", "zerotier", "hyper-v", "virtualbox", "vmware"]
+                .iter()
+                .any(|overlay| descr.contains(overlay))
+        })
+}
+
+#[cfg(windows)]
+pub(super) fn windows_route_is_vpn(address: std::net::Ipv4Addr) -> bool {
+    windows_ipv4_route(address).is_some_and(is_non_overlay_vpn_iface)
+}
+
+#[cfg(windows)]
 pub(super) fn windows_vpn_route() -> Option<u32> {
     // Look at the default internet path, rather than an installed adapter name.
-    windows_ipv4_route([1, 1, 1, 1].into()).filter(|&index| {
-        is_vpn_iface(index)
-            && if_entry_meta(index).is_some_and(|(_, descr)| {
-                let descr = descr.to_ascii_lowercase();
-                !["tailscale", "zerotier", "hyper-v", "virtualbox", "vmware"]
-                    .iter()
-                    .any(|overlay| descr.contains(overlay))
-            })
-    })
+    windows_ipv4_route([1, 1, 1, 1].into()).filter(|&index| is_non_overlay_vpn_iface(index))
 }
 
 /// Physical default route (skips VPN adapters). Used for pinning Xbox-DNS /32 routes.

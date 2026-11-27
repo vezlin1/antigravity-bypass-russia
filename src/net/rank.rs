@@ -136,6 +136,29 @@ pub(super) fn geohide_proxy_seeds(pool: &[Provider]) -> &'static [&'static str] 
     }
 }
 
+/// A direct Google IP is only a usable bypass candidate when its route
+/// actually traverses a VPN tunnel (full or split-tunnel). Without a VPN,
+/// direct Google IPs answer `HEAD /` quickly with HTTP 404 and would outrank
+/// proxies while failing regional checks.
+fn address_allowed_for_ranking(address: IpAddr, is_vpn_route: impl Fn(Ipv4Addr) -> bool) -> bool {
+    match address {
+        IpAddr::V4(ip) => !resolvers::looks_google(&address) || is_vpn_route(ip),
+        IpAddr::V6(_) => false,
+    }
+}
+
+fn address_routed_via_vpn(ip: Ipv4Addr) -> bool {
+    #[cfg(windows)]
+    {
+        super::egress::windows_route_is_vpn(ip)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = ip;
+        false
+    }
+}
+
 pub(super) fn discover_agent(
     if_index: u32,
     policy: routes::RoutePolicy,
@@ -174,9 +197,11 @@ pub(super) fn discover_agent(
         }
         // Test the same physical path that will be used after pinning. Custom
         // DoH answers can introduce proxy IPs absent from the built-in routes.
+        // Never allow non-VPN direct Google IPs (including stale ones from an
+        // old rank file) to outrank real proxies.
         let candidates: Vec<_> = candidates
             .into_iter()
-            .filter(IpAddr::is_ipv4)
+            .filter(|ip| address_allowed_for_ranking(*ip, address_routed_via_vpn))
             .take(32)
             .collect();
         addresses.extend(candidates.iter().filter_map(|ip| match ip {
@@ -228,7 +253,9 @@ pub(super) fn discover_agent(
             let fresh: Vec<_> = resolvers::candidate_addrs(host, if_index)
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|ip| ip.is_ipv4() && !known.contains(ip))
+                .filter(|ip| {
+                    address_allowed_for_ranking(*ip, address_routed_via_vpn) && !known.contains(ip)
+                })
                 .collect();
             let new_routes: Vec<_> = fresh
                 .iter()
@@ -345,8 +372,12 @@ fn system_addresses(host: &str) -> Vec<IpAddr> {
         .into_iter()
         .flatten()
         .map(|address| address.ip())
-        .filter(IpAddr::is_ipv4)
-        .filter(|address| resolvers::looks_google(address))
+        .filter(|address| match address {
+            IpAddr::V4(ip) => {
+                resolvers::looks_google(address) && super::egress::windows_route_is_vpn(*ip)
+            }
+            IpAddr::V6(_) => false,
+        })
         .take(MAX_FALLBACKS)
         .collect()
 }
@@ -413,7 +444,7 @@ fn replacement_pin(host: &str, current: Ipv4Addr, ranked: &[RankedHost]) -> Opti
     let mut seen = std::collections::HashSet::from([IpAddr::V4(current)]);
     let candidates: Vec<_> = known
         .chain(fresh)
-        .filter(IpAddr::is_ipv4)
+        .filter(|ip| address_allowed_for_ranking(*ip, address_routed_via_vpn))
         .filter(|ip| seen.insert(*ip))
         .take(12)
         .collect();
@@ -445,6 +476,7 @@ fn recover_pin(
     }
 }
 
+#[cfg(not(windows))]
 pub(super) fn apply_ranked(
     ranked: &[RankedHost],
     skip_primary: bool,
@@ -457,6 +489,27 @@ pub(super) fn apply_ranked(
         save(ranked)?;
         apply_hosts(ranked)
     })
+}
+
+/// Persists routes and ranking without touching `hosts`, so callers can
+/// evaluate whether NRPT + relay can safely absorb a `hosts` permission denial.
+#[cfg(windows)]
+pub(super) fn save_ranked_without_hosts(
+    ranked: &[RankedHost],
+    skip_primary: bool,
+    policy: routes::RoutePolicy,
+) -> Result<(), String> {
+    apply_complete_ranking(ranked, skip_primary, || {
+        if policy == routes::RoutePolicy::Physical {
+            routes::sync_physical_hosts(&ranked_ips(ranked))?;
+        }
+        save(ranked)
+    })
+}
+
+#[cfg(windows)]
+pub(super) fn apply_ranked_hosts(ranked: &[RankedHost]) -> Result<(), String> {
+    apply_hosts(ranked)
 }
 
 // An incomplete scan must never replace a previously working hosts block or
@@ -599,6 +652,10 @@ fn load() -> Vec<RankedHost> {
     let Ok(text) = fs::read_to_string(rank_path()) else {
         return Vec::new();
     };
+    parse_ranked(&text, address_routed_via_vpn)
+}
+
+fn parse_ranked(text: &str, is_vpn_route: impl Fn(Ipv4Addr) -> bool) -> Vec<RankedHost> {
     let mut ranked: Vec<RankedHost> = Vec::new();
     for line in text.lines() {
         let line = line.trim();
@@ -610,6 +667,9 @@ fn load() -> Vec<RankedHost> {
         let Some(ip) = parts.next().and_then(|s| s.parse::<Ipv4Addr>().ok()) else {
             continue;
         };
+        if !address_allowed_for_ranking(IpAddr::V4(ip), &is_vpn_route) {
+            continue;
+        }
         let ms = parts
             .next()
             .and_then(|s| s.parse::<u128>().ok())
@@ -631,6 +691,29 @@ fn load() -> Vec<RankedHost> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_google_ips_are_rejected_without_vpn_route_and_allowed_through_split_tunnel() {
+        let google: IpAddr = "172.217.114.4".parse().unwrap();
+        let proxy: IpAddr = "45.131.64.204".parse().unwrap();
+        let ipv6: IpAddr = "2001:4860:4860::8888".parse().unwrap();
+
+        assert!(!address_allowed_for_ranking(google, |_| false));
+        assert!(address_allowed_for_ranking(google, |ip| ip == Ipv4Addr::new(172, 217, 114, 4)));
+        assert!(!address_allowed_for_ranking(google, |ip| ip == Ipv4Addr::new(1, 1, 1, 1)));
+        assert!(address_allowed_for_ranking(proxy, |_| false));
+        assert!(!address_allowed_for_ranking(ipv6, |_| true));
+
+        let stale = "# antigravity-proxy-rank 1\ncloudcode-pa.googleapis.com 172.217.114.4 183\ncloudcode-pa.googleapis.com 45.131.64.204 220\n";
+        let without_vpn = parse_ranked(stale, |_| false);
+        assert_eq!(without_vpn.len(), 1);
+        assert_eq!(
+            without_vpn[0].ips,
+            vec![(Ipv4Addr::new(45, 131, 64, 204), 220)]
+        );
+        let with_split_vpn = parse_ranked(stale, |ip| ip == Ipv4Addr::new(172, 217, 114, 4));
+        assert_eq!(with_split_vpn[0].ips.len(), 2);
+    }
 
     #[test]
     fn network_change_keeps_working_pins_and_only_accepts_verified_replacements() {

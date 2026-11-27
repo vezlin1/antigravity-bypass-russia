@@ -771,6 +771,162 @@ fn state_for_data(data: &[u8], kind: TargetKind) -> BinaryState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchCounts {
+    pub matches: Option<usize>,
+    pub core: Option<usize>,
+    pub login: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetInspection {
+    pub state: BinaryState,
+    pub profile: Option<&'static str>,
+    pub reason: Option<&'static str>,
+    pub counts: Option<MatchCounts>,
+}
+
+fn known_profile(name: &str) -> Option<&'static str> {
+    match name {
+        "core-x64-v1" => Some("core-x64-v1"),
+        "core-arm64-v1" => Some("core-arm64-v1"),
+        "agy-arm64-v1" => Some("agy-arm64-v1"),
+        "agy-arm64-v2" => Some("agy-arm64-v2"),
+        "agy-x64-long-v1" => Some("agy-x64-long-v1"),
+        "agy-x64-long-v2" => Some("agy-x64-long-v2"),
+        "agy-x64-cli-hub-v3" => Some("agy-x64-cli-hub-v3"),
+        "agy-x64-backend-v4" => Some("agy-x64-backend-v4"),
+        "ide-reset-tier-v1" => Some("ide-reset-tier-v1"),
+        "asar-ide-reset-tier-v1" => Some("asar-ide-reset-tier-v1"),
+        _ => None,
+    }
+}
+
+fn parse_leading_usize(text: &str) -> Option<usize> {
+    let digits: String = text
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+fn classify_scan_error(error: &str) -> (Option<&'static str>, &'static str, Option<MatchCounts>) {
+    if let Some(rest) = error.strip_prefix("Версия не поддерживается профилем ")
+    {
+        let (profile_str, detail) = rest.split_once(':').unwrap_or((rest, ""));
+        let profile = known_profile(profile_str.trim());
+        let counts = if let Some(after_core) = detail.trim().strip_prefix("core ") {
+            let core = parse_leading_usize(after_core);
+            let login = after_core
+                .split_once("login ")
+                .and_then(|(_, right)| parse_leading_usize(right));
+            Some(MatchCounts {
+                matches: None,
+                core,
+                login,
+            })
+        } else {
+            detail
+                .trim()
+                .strip_prefix("совпадений ")
+                .map(|after_matches| MatchCounts {
+                    matches: parse_leading_usize(after_matches),
+                    core: None,
+                    login: None,
+                })
+        };
+        return (profile, "profile_mismatch", counts);
+    }
+    if error.starts_with("Неподдерживаемый executable") {
+        (None, "unsupported_executable", None)
+    } else if error.starts_with("Нет профиля") {
+        (None, "unsupported_architecture", None)
+    } else if error.starts_with("Неоднозначная") {
+        (None, "ambiguous_signature", None)
+    } else if error.contains("переходы")
+        || error.contains("Переходы")
+        || error.contains("не ведёт в проверенную")
+    {
+        (None, "invalid_branches", None)
+    } else if error.contains("agy-x64-long-v1") {
+        (Some("agy-x64-long-v1"), "legacy_x64_v1", None)
+    } else if error.contains("диагностической функции") {
+        (Some("agy-x64-backend-v4"), "legacy_x64_diagnostic", None)
+    } else if error.contains("integrity") {
+        (Some("asar-ide-reset-tier-v1"), "asar_integrity", None)
+    } else if error.contains("ASAR") {
+        (Some("asar-ide-reset-tier-v1"), "asar_invalid", None)
+    } else if error.contains("UTF-8") {
+        (Some("ide-reset-tier-v1"), "invalid_utf8", None)
+    } else if error.contains("секц") || error.contains("Секц") {
+        (None, "invalid_section", None)
+    } else {
+        (None, "scan_error", None)
+    }
+}
+
+/// Structured, allowlisted inspection for support reports: explains why a file
+/// is `Unknown` or `PartiallyPatched` without exporting raw error strings.
+pub fn inspect_target(target: &FoundTarget) -> TargetInspection {
+    let data = match fs::read(&target.path) {
+        Ok(data) => data,
+        Err(error) => {
+            let reason = match error.kind() {
+                std::io::ErrorKind::NotFound => "not_found",
+                std::io::ErrorKind::PermissionDenied => "permission_denied",
+                _ => "read_failed",
+            };
+            return TargetInspection {
+                state: BinaryState::Unknown,
+                profile: None,
+                reason: Some(reason),
+                counts: None,
+            };
+        }
+    };
+    inspect_data(&data, target.kind)
+}
+
+pub(crate) fn inspect_data(data: &[u8], kind: TargetKind) -> TargetInspection {
+    match scan(data, kind, Mode::Count) {
+        Scan::LegacyX64V1 => TargetInspection {
+            state: BinaryState::PartiallyPatched,
+            profile: Some("agy-x64-long-v1"),
+            reason: Some("legacy_x64_v1"),
+            counts: None,
+        },
+        Scan::LegacyX64Diagnostic => TargetInspection {
+            state: BinaryState::PartiallyPatched,
+            profile: Some("agy-x64-backend-v4"),
+            reason: Some("legacy_x64_diagnostic"),
+            counts: None,
+        },
+        Scan::Plan(Ok(p)) => {
+            let state = state_from_counts(p.changes, p.existing);
+            TargetInspection {
+                state,
+                profile: known_profile(&p.profile),
+                reason: (state == BinaryState::Unknown).then_some("no_pattern_match"),
+                counts: (state == BinaryState::Unknown).then_some(MatchCounts {
+                    matches: Some(p.changes + p.existing),
+                    core: None,
+                    login: None,
+                }),
+            }
+        }
+        Scan::Plan(Err(error)) => {
+            let (profile, reason, counts) = classify_scan_error(&error);
+            TargetInspection {
+                state: BinaryState::Unknown,
+                profile,
+                reason: Some(reason),
+                counts,
+            }
+        }
+    }
+}
+
 fn ensure_file_closed(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {

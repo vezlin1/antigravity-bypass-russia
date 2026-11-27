@@ -203,6 +203,15 @@ fn same_file_bytes(a: &Path, b: &Path) -> bool {
     }
 }
 
+pub fn installed_matches_current() -> Option<bool> {
+    let installed = installed_exe();
+    let current = std::env::current_exe().ok()?;
+    if !installed.is_file() || !current.is_file() {
+        return None;
+    }
+    Some(same_file_bytes(&installed, &current))
+}
+
 fn xml_text(value: &str) -> String {
     value
         .replace('&', "&amp;")

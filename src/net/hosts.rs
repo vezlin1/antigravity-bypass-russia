@@ -24,10 +24,26 @@ pub fn hosts_path() -> PathBuf {
 }
 
 pub fn write_entries(entries: &[(String, Ipv4Addr)]) -> Result<(), String> {
-    write_entries_at(&hosts_path(), entries)
+    let path = hosts_path();
+    if write_entries_at(&path, entries)? {
+        log_repair(&path);
+    }
+    Ok(())
 }
 
-fn write_entries_at(p: &Path, entries: &[(String, Ipv4Addr)]) -> Result<(), String> {
+fn log_repair(path: &Path) {
+    super::relay::log_event(&format!(
+        "Блок hosts был повреждён и восстановлен; прежний файл сохранён в {}",
+        backup_path(path).display()
+    ));
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    path.with_file_name("hosts.antigravity-bypass.bak")
+}
+
+/// Returns whether damaged block boundaries were repaired (a backup was saved).
+fn write_entries_at(p: &Path, entries: &[(String, Ipv4Addr)]) -> Result<bool, String> {
     // Windows hosts can contain legacy-encoded comments. Only our ASCII block
     // needs parsing; decoding the complete file would reject or change user bytes.
     let original = match fs::read(p) {
@@ -36,7 +52,7 @@ fn write_entries_at(p: &Path, entries: &[(String, Ipv4Addr)]) -> Result<(), Stri
         Err(e) => return Err(format!("Чтение hosts: {e}")),
     };
 
-    let stripped = strip_block(&original)?;
+    let (stripped, repaired) = strip_or_repair(p, &original)?;
     let mut block = String::new();
     block.push_str(START_MARK);
     block.push('\n');
@@ -51,27 +67,88 @@ fn write_entries_at(p: &Path, entries: &[(String, Ipv4Addr)]) -> Result<(), Stri
     let mut combined = block.into_bytes();
     combined.extend_from_slice(&stripped);
     if combined == original {
-        return Ok(());
+        return Ok(false);
     }
 
-    safe_write_hosts(p, &original, &combined)
+    safe_write_hosts(p, &original, &combined)?;
+    Ok(repaired)
 }
 
 pub fn remove_entries() -> Result<(), String> {
-    remove_entries_at(&hosts_path())
+    let path = hosts_path();
+    if remove_entries_at(&path)? {
+        log_repair(&path);
+    }
+    Ok(())
 }
 
-fn remove_entries_at(p: &Path) -> Result<(), String> {
+/// Returns whether damaged block boundaries were repaired (a backup was saved).
+fn remove_entries_at(p: &Path) -> Result<bool, String> {
     let original = match fs::read(p) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(format!("Чтение hosts: {e}")),
     };
-    let stripped = strip_block(&original)?;
+    let (stripped, repaired) = strip_or_repair(p, &original)?;
     if stripped != original {
         safe_write_hosts(p, &original, &stripped)?;
     }
-    Ok(())
+    Ok(repaired)
+}
+
+/// Strips our block. If its boundaries are damaged (a lone, repeated or
+/// unterminated marker, e.g. after an interrupted edit or a manual change),
+/// repairs conservatively: drops marker lines and only those lines inside a
+/// marked region that look like our pins (an IP followed by Google hosts).
+/// Every other line is kept byte-for-byte. The original file is saved next
+/// to `hosts` first; without that backup nothing is written.
+fn strip_or_repair(path: &Path, original: &[u8]) -> Result<(Vec<u8>, bool), String> {
+    let error = match strip_block(original) {
+        Ok(stripped) => return Ok((stripped, false)),
+        Err(error) => error,
+    };
+    let repaired = repair_block(original);
+    fs::write(backup_path(path), original)
+        .map_err(|e| format!("{error}; резервную копию hosts сохранить не удалось: {e}"))?;
+    Ok((repaired, true))
+}
+
+fn repair_block(text: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut in_block = false;
+    for line in text.split_inclusive(|byte| *byte == b'\n') {
+        let trimmed = line.trim_ascii();
+        if trimmed == START_MARK.as_bytes() {
+            in_block = true;
+        } else if trimmed == END_MARK.as_bytes() {
+            in_block = false;
+        } else if !(in_block && is_google_pin_line(trimmed)) {
+            result.extend_from_slice(line);
+        }
+    }
+    result
+}
+
+fn is_google_pin_line(line: &[u8]) -> bool {
+    let Ok(line) = std::str::from_utf8(line) else {
+        return false;
+    };
+    let mut fields = line.split_ascii_whitespace();
+    if fields
+        .next()
+        .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+        .is_none()
+    {
+        return false;
+    }
+    let mut hosts = fields.peekable();
+    hosts.peek().is_some()
+        && hosts.all(|host| {
+            let host = super::route_health::host_name(host);
+            ["googleapis.com", "google.com"]
+                .iter()
+                .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+        })
 }
 
 pub fn owned_entries() -> Result<Vec<(String, Ipv4Addr)>, String> {
@@ -80,6 +157,53 @@ pub fn owned_entries() -> Result<Vec<(String, Ipv4Addr)>, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
         Err(e) => Err(format!("Чтение hosts: {e}")),
     }
+}
+
+/// Hosts from `required` that already appear anywhere in `hosts` (active lines).
+/// Used when `hosts` cannot be written due to antivirus/permissions: Windows
+/// gives `hosts` precedence over NRPT, so NRPT fallback is safe only when none
+/// of the required Agent hosts are already pinned in `hosts`.
+#[cfg(any(windows, test))]
+pub fn conflicting_entries(required: &[&str]) -> Result<Vec<String>, String> {
+    conflicting_entries_at(&hosts_path(), required)
+}
+
+#[cfg(any(windows, test))]
+fn conflicting_entries_at(path: &Path, required: &[&str]) -> Result<Vec<String>, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("Чтение hosts: {e}")),
+    };
+    let mut found = Vec::new();
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let mut fields = line
+            .split(|byte| *byte == b'#')
+            .next()
+            .unwrap_or_default()
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty());
+        let Some(ip_bytes) = fields.next() else {
+            continue;
+        };
+        if std::str::from_utf8(ip_bytes)
+            .ok()
+            .and_then(|s| s.parse::<std::net::IpAddr>().ok())
+            .is_none()
+        {
+            continue;
+        }
+        for host_bytes in fields {
+            let Ok(host) = std::str::from_utf8(host_bytes) else {
+                continue;
+            };
+            let normalized = super::route_health::host_name(host);
+            if required.iter().any(|want| *want == normalized) && !found.contains(&normalized) {
+                found.push(normalized);
+            }
+        }
+    }
+    Ok(found)
 }
 
 fn parse_owned_entries(text: &[u8]) -> Result<Vec<(String, Ipv4Addr)>, String> {
@@ -234,28 +358,65 @@ mod tests {
     }
 
     #[test]
-    fn damaged_boundaries_in_legacy_hosts_do_not_authorize_writes() {
+    fn damaged_boundaries_are_repaired_with_backup_and_keep_user_lines() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hosts");
-        for marker in [START_MARK, END_MARK] {
-            let bytes = [
-                b"# \xcf\xf0\xee\xe2\xe5\xf0\xea\xe0\r\n".as_slice(),
-                marker.as_bytes(),
-            ]
-            .concat();
-            fs::write(&path, &bytes).unwrap();
-            assert!(write_entries_at(
-                &path,
-                &[(
-                    "cloudcode-pa.googleapis.com".into(),
-                    "192.0.2.1".parse().unwrap()
-                )]
-            )
-            .is_err());
-            assert!(remove_entries_at(&path).is_err());
+        let user = b"# \xcf\xf0\xee\xe2\xe5\xf0\xea\xe0\r\n127.0.0.1 localhost\r\n".as_slice();
+        let entries = [(
+            "cloudcode-pa.googleapis.com".to_string(),
+            "192.0.2.1".parse().unwrap(),
+        )];
+        let nested = format!(
+            "{START_MARK}\n5.175.161.3 aicode.googleapis.com\n{START_MARK}\n\
+             172.217.114.4 CLOUDCODE-PA.GOOGLEAPIS.COM\n{END_MARK}\n"
+        );
+        let unterminated =
+            format!("{START_MARK}\n45.131.64.204 daily-cloudcode-pa.googleapis.com\n");
+        let damaged = [
+            // Lone markers (interrupted edit).
+            [user, START_MARK.as_bytes()].concat(),
+            [user, END_MARK.as_bytes(), b"\n"].concat(),
+            // Repeated START with stale pins (issue #58).
+            [nested.as_bytes(), user].concat(),
+            // Unterminated block followed by a user line.
+            [user, unterminated.as_bytes(), b"10.0.0.5 nas.local\r\n"].concat(),
+        ];
+        for bytes in damaged {
             assert!(parse_owned_entries(&bytes).is_err());
-            assert_eq!(fs::read(&path).unwrap(), bytes);
+            fs::write(&path, &bytes).unwrap();
+            assert!(write_entries_at(&path, &entries).unwrap());
+            assert_eq!(fs::read(backup_path(&path)).unwrap(), bytes);
+            let applied = fs::read(&path).unwrap();
+            assert_eq!(parse_owned_entries(&applied).unwrap(), entries);
+            let text = String::from_utf8_lossy(&applied);
+            for stale in ["172.217.114.4", "5.175.161.3", "45.131.64.204"] {
+                assert!(!text.contains(stale), "{stale}");
+            }
+            assert!(applied.windows(user.len()).any(|window| window == user));
+            assert_eq!(
+                bytes.ends_with(b"nas.local\r\n"),
+                text.contains("10.0.0.5 nas.local")
+            );
+
+            fs::write(&path, &bytes).unwrap();
+            assert!(remove_entries_at(&path).unwrap());
+            let removed = fs::read(&path).unwrap();
+            assert!(parse_owned_entries(&removed).unwrap().is_empty());
+            assert!(!String::from_utf8_lossy(&removed).contains("ANTIGRAVITY-BYPASS-RUSSIA"));
         }
+    }
+
+    #[test]
+    fn damaged_boundaries_without_backup_are_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts");
+        let bytes = format!("127.0.0.1 localhost\n{END_MARK}\n");
+        fs::write(&path, &bytes).unwrap();
+        // A directory in place of the backup file makes the backup fail.
+        fs::create_dir(backup_path(&path)).unwrap();
+        let error = remove_entries_at(&path).unwrap_err();
+        assert!(error.contains("резервную копию"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), bytes);
     }
 
     #[cfg(windows)]
@@ -297,6 +458,111 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"user addition");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn readonly_hosts_is_updated_and_restores_readonly_on_success_and_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts");
+        let original = "127.0.0.1 localhost\r\n";
+        fs::write(&path, original).unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&path, perms).unwrap();
+
+        let entries = vec![(
+            "daily-cloudcode-pa.googleapis.com".into(),
+            "45.131.64.204".parse().unwrap(),
+        )];
+        write_entries_at(&path, &entries).unwrap();
+        assert!(fs::metadata(&path).unwrap().permissions().readonly());
+        assert_eq!(
+            parse_owned_entries(&fs::read(&path).unwrap()).unwrap(),
+            entries
+        );
+
+        // Stale expectation fails before writing and still preserves readonly.
+        assert!(safe_write_hosts(&path, b"wrong", b"replacement").is_err());
+        assert!(fs::metadata(&path).unwrap().permissions().readonly());
+
+        // Cleanup tempdir cleanly.
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(false);
+        fs::set_permissions(&path, perms).unwrap();
+    }
+
+    #[test]
+    fn conflicting_entries_detects_active_agent_pins_and_ignores_comments() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts");
+        fs::write(
+            &path,
+            "# 1.2.3.4 daily-cloudcode-pa.googleapis.com\n127.0.0.1 localhost\n",
+        )
+        .unwrap();
+        assert!(
+            conflicting_entries_at(&path, &["daily-cloudcode-pa.googleapis.com"])
+                .unwrap()
+                .is_empty()
+        );
+
+        fs::write(
+            &path,
+            "127.0.0.1 localhost\n5.175.161.3 AICODE.GOOGLEAPIS.COM # stale\n",
+        )
+        .unwrap();
+        assert_eq!(
+            conflicting_entries_at(
+                &path,
+                &["daily-cloudcode-pa.googleapis.com", "aicode.googleapis.com"]
+            )
+            .unwrap(),
+            vec!["aicode.googleapis.com"]
+        );
+    }
+}
+
+#[cfg(windows)]
+struct ReadOnlyGuard<'a> {
+    path: &'a Path,
+    was_readonly: bool,
+    cleared: bool,
+}
+
+#[cfg(windows)]
+impl<'a> ReadOnlyGuard<'a> {
+    fn acquire(path: &'a Path) -> Self {
+        let was_readonly = fs::metadata(path)
+            .map(|meta| meta.permissions().readonly())
+            .unwrap_or(false);
+        let cleared = if was_readonly {
+            fs::metadata(path).ok().is_some_and(|meta| {
+                let mut perms = meta.permissions();
+                perms.set_readonly(false);
+                fs::set_permissions(path, perms).is_ok()
+            })
+        } else {
+            false
+        };
+        Self {
+            path,
+            was_readonly,
+            cleared,
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ReadOnlyGuard<'_> {
+    fn drop(&mut self) {
+        if self.cleared {
+            if let Ok(meta) = fs::metadata(self.path) {
+                let mut perms = meta.permissions();
+                perms.set_readonly(true);
+                let _ = fs::set_permissions(self.path, perms);
+            }
+        }
+    }
 }
 
 fn safe_write_hosts(path: &Path, _expected: &[u8], data: &[u8]) -> Result<(), String> {
@@ -308,11 +574,21 @@ fn safe_write_hosts(path: &Path, _expected: &[u8], data: &[u8]) -> Result<(), St
     if current != _expected {
         return Err("hosts изменён другой программой; повторите операцию".into());
     }
+    #[cfg(windows)]
+    let readonly = ReadOnlyGuard::acquire(path);
     let result = crate::system::fs_utils::robust_write_file(path, data);
     #[cfg(windows)]
     if let Err(atomic_error) = result {
-        return write_hosts_in_place(path, _expected, data)
-            .map_err(|e| format!("{atomic_error}. Обновление hosts на месте: {e}"));
+        return write_hosts_in_place(path, _expected, data).map_err(|e| {
+            let note = if readonly.was_readonly && !readonly.cleared {
+                " (обнаружен атрибут «только чтение», снять не удалось)"
+            } else if readonly.was_readonly {
+                " (на файле был атрибут «только чтение»)"
+            } else {
+                ""
+            };
+            format!("{atomic_error}. Обновление hosts на месте: {e}{note}")
+        });
     }
     result
 }

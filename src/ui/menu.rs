@@ -4,6 +4,7 @@ use crate::core::detector::{
 };
 use crate::core::patcher::{patch_target, restore_target};
 use crate::core::v8_cache::clear_ide_v8_caches;
+use crate::diagnostics::attempt::{AttemptOutcome, AttemptRecorder, Operation};
 use crate::net::{apply_dns_rules, remove_dns_rules, NetworkSetup, SetupProgress, SetupStage};
 use crate::system::env::{display_path, expand_env_vars};
 use crate::ui::dashboard::{banner, print_dashboard};
@@ -198,6 +199,19 @@ fn advice_for(cause: &str) -> Option<&'static str> {
             "being used by another process",
         ]) {
             "закройте Antigravity (приложение, IDE и CLI) и повторите."
+        } else if has(&["повреждены границы блока hosts", "нет конца блока hosts"])
+        {
+            "выберите пункт 1 ещё раз — повреждённый блок исправится автоматически. Если ошибка повторится, сделайте резервную копию файла hosts, откройте его от имени администратора, удалите строки с ANTIGRAVITY-BYPASS-RUSSIA и старые записи googleapis.com между ними, затем повторите."
+        } else if has(&["hosts"])
+            && (has(&[
+                "os error 5)",
+                "os error 13)",
+                "отказано в доступе",
+                "access is denied",
+                "permission denied",
+            ]))
+        {
+            "файл C:\\Windows\\System32\\drivers\\etc\\hosts заблокирован защитой антивируса или атрибутом «только чтение». Отключите защиту файла hosts в антивирусе (или добавьте его в исключения) и повторите."
         } else if has(&[
             "os error 5)",
             "os error 13)",
@@ -266,6 +280,11 @@ mod problem_tests {
                 "свежую версию",
             ),
             ("Локальный UDP-порт 53 недоступен", "AdGuard"),
+            ("Повреждены границы блока hosts; файл сохранён", "резервную копию"),
+            (
+                "Атомарная замена C:\\Windows\\System32\\drivers\\etc\\hosts не удалась: Отказано в доступе.",
+                "drivers\\etc\\hosts",
+            ),
             ("Нет проверенного маршрута для daily", "серверы Google"),
         ] {
             assert!(advice_for(cause).unwrap().contains(expected), "{cause}");
@@ -324,6 +343,7 @@ fn run_file_step(
     (running, done): (&str, &str),
     targets: Vec<FoundTarget>,
     action: fn(&FoundTarget) -> Result<crate::core::patcher::PatchOutcome, String>,
+    mut attempt: Option<&mut AttemptRecorder>,
 ) -> bool {
     let progress = Progress::new();
     progress.stage(steps, running, done);
@@ -340,9 +360,17 @@ fn run_file_step(
     drop(progress);
     let mut ok = true;
     for (target, result) in results {
+        if let Err(error) = &result {
+            if let Some(recorder) = attempt.as_deref_mut() {
+                recorder.record_error("patch_files", error, Some(target.kind), Some(&target.path));
+            }
+        }
         ok &= print_patch_result(&target, result);
     }
     if let Err(error) = cache {
+        if let Some(recorder) = attempt {
+            recorder.record_error("clear_cache", &error, None, None);
+        }
         print_problem(6, "Не удалось очистить кэш Antigravity", &error, None);
         ok = false;
     }
@@ -391,13 +419,15 @@ mod app_management_tests {
         ));
     }
 }
-fn patch_root(root: &Path) -> bool {
+fn patch_root(root: &Path, attempt: &mut AttemptRecorder) -> bool {
     if let Err(error) = recover_targets_in_path(root) {
+        attempt.record_error("recover", &error, None, Some(root));
         operation_error("Не удалось восстановить прерванную запись", &error);
         return false;
     }
     let targets = find_targets_in_path(root);
     if targets.is_empty() {
+        attempt.record_reason("discover", "no_targets");
         print_problem(
             2,
             "Файлы Antigravity не найдены",
@@ -406,17 +436,27 @@ fn patch_root(root: &Path) -> bool {
         );
         return false;
     }
-    patch_targets(targets, &Steps::unnumbered()).succeeded()
+    patch_targets(targets, &Steps::unnumbered(), Some(attempt)).succeeded()
 }
 
 const FILES_STEP: (&str, &str) = ("Настраиваем файлы Antigravity", "Файлы Antigravity");
 
-fn patch_targets(targets: Vec<FoundTarget>, steps: &Steps) -> FileSetupOutcome {
+fn patch_targets(
+    targets: Vec<FoundTarget>,
+    steps: &Steps,
+    mut attempt: Option<&mut AttemptRecorder>,
+) -> FileSetupOutcome {
     let paths: Vec<_> = targets.iter().map(|target| target.path.clone()).collect();
-    if !ensure_application_closed(&paths, "настроить файлы") {
+    if !ensure_application_closed(&paths, "настроить файлы", attempt.as_deref_mut()) {
         return FileSetupOutcome::Stopped;
     }
-    FileSetupOutcome::Completed(run_file_step(steps, FILES_STEP, targets, patch_target))
+    FileSetupOutcome::Completed(run_file_step(
+        steps,
+        FILES_STEP,
+        targets,
+        patch_target,
+        attempt,
+    ))
 }
 fn apply_endpoints() -> Result<(), String> {
     let mut errors = Vec::new();
@@ -490,22 +530,37 @@ fn configure_network(steps: &Steps) -> Result<NetworkSetup, String> {
     result
 }
 
-fn apply_connection(steps: &Steps, summary: &mut Summary) -> SetupStatus {
-    match configure_connection_with(|| configure_network(steps), apply_endpoints) {
+fn apply_connection(
+    steps: &Steps,
+    summary: &mut Summary,
+    attempt: &mut AttemptRecorder,
+) -> SetupStatus {
+    let mut failed_step = "network";
+    let result = configure_connection_with(
+        || configure_network(steps),
+        || {
+            failed_step = "endpoints";
+            apply_endpoints()
+        },
+    );
+    match result {
         Ok(setup) => network_result(&setup, summary),
         Err(error) => {
+            attempt.record_error(failed_step, &error, None, None);
             operation_error("Подключение не настроено", &error);
             SetupStatus::Failed
         }
     }
 }
-fn patch_installations(steps: &Steps) -> FileSetupOutcome {
+fn patch_installations(steps: &Steps, attempt: &mut AttemptRecorder) -> FileSetupOutcome {
     if let Err(error) = recover_installations() {
+        attempt.record_error("recover", &error, None, None);
         operation_error("Не удалось восстановить прерванную запись", &error);
         return FileSetupOutcome::Stopped;
     }
     let installs = find_installations();
     if installs.is_empty() {
+        attempt.record_reason("discover", "no_installations");
         print_problem(
             2,
             "Antigravity не найден",
@@ -516,6 +571,7 @@ fn patch_installations(steps: &Steps) -> FileSetupOutcome {
     }
     let targets = find_installation_targets(&installs);
     if targets.is_empty() {
+        attempt.record_reason("discover", "no_targets");
         print_problem(
             2,
             "Файлы Antigravity не найдены",
@@ -524,7 +580,7 @@ fn patch_installations(steps: &Steps) -> FileSetupOutcome {
         );
         return FileSetupOutcome::Stopped;
     }
-    patch_targets(targets, steps)
+    patch_targets(targets, steps, Some(attempt))
 }
 fn show_result(ok: bool) {
     if ok {
@@ -565,8 +621,20 @@ fn network_result(setup: &NetworkSetup, summary: &mut Summary) -> SetupStatus {
             summary.notes.push(hint);
         }
     }
+    if setup.hosts_write_blocked {
+        summary.notes.push(
+            "Файл C:\\Windows\\System32\\drivers\\etc\\hosts защищён от записи (антивирус или права). \
+             Обход работает через системный DNS (NRPT); при включении VPN может понадобиться добавить hosts в исключения антивируса."
+                .into(),
+        );
+    }
     if setup.browser_dns_confirmed {
-        SetupStatus::Complete
+        summary.notes.push(BROWSER_MAY_NEED_DOH_OFF.into());
+        if setup.hosts_write_blocked {
+            SetupStatus::Limited
+        } else {
+            SetupStatus::Complete
+        }
     } else {
         summary.notes.push(BROWSER_UNCHECKED.into());
         SetupStatus::Limited
@@ -574,7 +642,10 @@ fn network_result(setup: &NetworkSetup, summary: &mut Summary) -> SetupStatus {
 }
 
 const BROWSER_UNCHECKED: &str =
-    "Доступ к Gemini и AI Studio в браузере проверить не удалось. На Antigravity это не влияет.";
+    "Веб-версии Gemini и AI Studio могут не работать. На Antigravity это не влияет.";
+
+const BROWSER_MAY_NEED_DOH_OFF: &str =
+    "Веб-версии Gemini и AI Studio могут не работать, если в браузере включён «Безопасный DNS» (DoH); приложение Gemini Desktop не поддерживается.";
 
 #[cfg(windows)]
 const BROWSER_VPN: &str =
@@ -589,14 +660,25 @@ const BROWSER_FOLLOWS_VPN: &str =
      На Antigravity это не влияет.";
 
 #[cfg(windows)]
-fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupStatus {
+fn apply_connection_and_launch(
+    steps: &Steps,
+    summary: &mut Summary,
+    attempt: &mut AttemptRecorder,
+) -> SetupStatus {
     use crate::net::windows_connect;
     use crate::system::windows_connect_launch::{
         launch_desktop, remove_retired_browser_profile, DesktopLaunch,
     };
 
     remove_retired_browser_profile();
-    let setup = configure_connection_with(|| configure_network(steps), apply_endpoints);
+    let mut failed_step = "network";
+    let setup = configure_connection_with(
+        || configure_network(steps),
+        || {
+            failed_step = "endpoints";
+            apply_endpoints()
+        },
+    );
     let browser_dns = setup
         .as_ref()
         .is_ok_and(|setup| setup.browser_dns_confirmed);
@@ -607,6 +689,7 @@ fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupSta
             network_result(setup, summary);
         }
         Err(error) if try_app => {
+            attempt.record_error(failed_step, error, None, None);
             crate::net::relay::log_event(&format!("Настройка DNS: {error}"));
             summary.notes.push(
                 "Обычная настройка не удалась из-за VPN, поэтому используется резервный канал."
@@ -614,6 +697,7 @@ fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupSta
             );
         }
         Err(error) => {
+            attempt.record_error(failed_step, error, None, None);
             operation_error("Подключение не настроено", error);
             return SetupStatus::Failed;
         }
@@ -665,7 +749,8 @@ fn apply_connection_and_launch(steps: &Steps, summary: &mut Summary) -> SetupSta
     };
     progress.finish(antigravity_ok);
     drop(progress);
-    if setup.is_ok() && antigravity_ok && (browser_dns || follows_vpn) {
+    let hosts_blocked = setup.as_ref().is_ok_and(|setup| setup.hosts_write_blocked);
+    if setup.is_ok() && antigravity_ok && !hosts_blocked && (browser_dns || follows_vpn) {
         SetupStatus::Complete
     } else if setup.is_ok() || antigravity_ok {
         SetupStatus::Limited
@@ -725,11 +810,13 @@ fn finish_setup(status: SetupStatus, started: Instant, verdicts: Verdicts, summa
 
 pub fn handle_unlock_all() -> bool {
     let started = Instant::now();
+    let mut attempt = AttemptRecorder::start(Operation::Unlock);
     clear_screen();
     banner();
     style::screen_title("ВКЛЮЧЕНИЕ ОБХОДА");
     let mut summary = Summary::default();
-    if !check_vpn_before_setup() {
+    if !check_vpn_before_setup(&mut attempt) {
+        attempt.finish(AttemptOutcome::Failed);
         finish_setup(SetupStatus::Failed, started, UNLOCK_VERDICTS, &summary);
         pause();
         return false;
@@ -740,13 +827,14 @@ pub fn handle_unlock_all() -> bool {
     let launch = false;
     let steps = Steps::new(if launch { 5 } else { 4 });
     let mut status = SetupStatus::Failed;
-    let outcome = continue_setup(patch_installations(&steps), || {
+    let files_outcome = patch_installations(&steps, &mut attempt);
+    let outcome = continue_setup(files_outcome, || {
         #[cfg(windows)]
         if launch {
-            status = apply_connection_and_launch(&steps, &mut summary);
+            status = apply_connection_and_launch(&steps, &mut summary, &mut attempt);
             return status.succeeded();
         }
-        status = apply_connection(&steps, &mut summary);
+        status = apply_connection(&steps, &mut summary, &mut attempt);
         status.succeeded()
     });
     let ok = outcome.succeeded();
@@ -757,16 +845,32 @@ pub fn handle_unlock_all() -> bool {
             "Не все файлы Antigravity удалось настроить — подробности выше.".into(),
         );
     }
+    let attempt_outcome = if files_outcome == FileSetupOutcome::Stopped {
+        AttemptOutcome::Stopped
+    } else {
+        match status {
+            SetupStatus::Complete => AttemptOutcome::Complete,
+            SetupStatus::Limited => AttemptOutcome::Limited,
+            SetupStatus::Failed => AttemptOutcome::Failed,
+        }
+    };
+    attempt.finish(attempt_outcome);
     finish_setup(status, started, UNLOCK_VERDICTS, &summary);
     pause();
     ok
 }
 pub fn handle_patch_files_only() -> bool {
+    let mut attempt = AttemptRecorder::start(Operation::PatchFiles);
     let ok = if let Some(path) = crate::system::env::args().nth(2) {
-        patch_root(&expand_env_vars(&path))
+        patch_root(&expand_env_vars(&path), &mut attempt)
     } else {
-        patch_installations(&Steps::unnumbered()).succeeded()
+        patch_installations(&Steps::unnumbered(), &mut attempt).succeeded()
     };
+    attempt.finish(if ok {
+        AttemptOutcome::Complete
+    } else {
+        AttemptOutcome::Failed
+    });
     show_result(ok);
     pause();
     ok
@@ -778,22 +882,32 @@ pub fn handle_dns_only() -> bool {
         "Подключение не настроено",
     );
     let started = Instant::now();
+    let mut attempt = AttemptRecorder::start(Operation::Dns);
     let mut summary = Summary::default();
-    if !check_vpn_before_setup() {
+    if !check_vpn_before_setup(&mut attempt) {
+        attempt.finish(AttemptOutcome::Failed);
         finish_setup(SetupStatus::Failed, started, VERDICTS, &summary);
         pause();
         return false;
     }
     summary.next = Some("перезапустите Antigravity, чтобы он подхватил новые настройки.");
-    let status = apply_connection(&Steps::new(3), &mut summary);
+    let status = apply_connection(&Steps::new(3), &mut summary, &mut attempt);
+    attempt.finish(match status {
+        SetupStatus::Complete => AttemptOutcome::Complete,
+        SetupStatus::Limited => AttemptOutcome::Limited,
+        SetupStatus::Failed => AttemptOutcome::Failed,
+    });
     finish_setup(status, started, VERDICTS, &summary);
     pause();
     status.succeeded()
 }
 
-fn check_vpn_before_setup() -> bool {
+fn check_vpn_before_setup(attempt: &mut AttemptRecorder) -> bool {
     #[cfg(windows)]
-    if crate::net::windows_connect::vpn_present() {
+    let vpn_active = crate::net::windows_connect::vpn_present();
+    #[cfg(not(windows))]
+    let vpn_active = crate::net::egress::detect().is_some_and(|egress| egress.vpn_active);
+    if vpn_active {
         println!(
             "  {} Включён VPN. Он может помешать настройке.",
             mark(Tone::Warn)
@@ -803,6 +917,7 @@ fn check_vpn_before_setup() -> bool {
     match crate::net::preflight() {
         Ok(()) => true,
         Err(message) => {
+            attempt.record_error("preflight", &message, None, None);
             crate::net::relay::log_event(&message);
             print_problem(2, "Включение обхода приостановлено", &message, None);
             false
@@ -893,7 +1008,7 @@ fn add_manual_path() {
         "  Путь сохранён, пункты [1] и [6] будут его учитывать: {}",
         display_path(&root)
     );
-    show_result(patch_targets(targets, &Steps::unnumbered()).succeeded());
+    show_result(patch_targets(targets, &Steps::unnumbered(), None).succeeded());
     pause();
 }
 
@@ -971,10 +1086,16 @@ fn remove_manual_path(saved: &[std::path::PathBuf]) {
 /// Restores the given files after the application is closed.
 fn restore_targets(targets: Vec<FoundTarget>) -> bool {
     let paths: Vec<_> = targets.iter().map(|target| target.path.clone()).collect();
-    if !ensure_application_closed(&paths, "вернуть исходные файлы") {
+    if !ensure_application_closed(&paths, "вернуть исходные файлы", None) {
         return false;
     }
-    run_file_step(&Steps::unnumbered(), RESTORE_STEP, targets, restore_target)
+    run_file_step(
+        &Steps::unnumbered(),
+        RESTORE_STEP,
+        targets,
+        restore_target,
+        None,
+    )
 }
 
 fn print_found_targets(root: &Path, targets: &[FoundTarget]) {
@@ -1066,7 +1187,9 @@ fn program_name(executable: &str) -> String {
     let lower = name.to_lowercase();
     if lower.starts_with("language_server") {
         "служебный процесс Antigravity".into()
-    } else if lower == "agy" || lower.starts_with("agy-") || lower.contains("antigravity-cli") {
+    } else if (lower != "antigravity" && crate::core::detector::is_agy_cli_name(&lower))
+        || lower.contains("antigravity-cli")
+    {
         "Antigravity CLI".into()
     } else if lower.contains("antigravity") && lower.contains("ide") {
         "Antigravity IDE".into()
@@ -1103,9 +1226,10 @@ mod holder_tests {
                 "Antigravity IDE.exe (PID 1)".into(),
                 "agy.exe (PID 2)".into(),
                 "agy.exe (PID 3)".into(),
+                "agy-desktop-rtc (PID 5)".into(),
                 "Code.exe (PID 4)".into(),
             ]),
-            "Antigravity IDE, Antigravity CLI (2 процесса), Code"
+            "Antigravity IDE, Antigravity CLI (2 процесса), agy-desktop-rtc, Code"
         );
         assert_eq!(
             [1, 2, 5, 11, 21, 22, 112].map(processes_word),
@@ -1122,7 +1246,11 @@ mod holder_tests {
     }
 }
 
-fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool {
+fn ensure_application_closed(
+    paths: &[std::path::PathBuf],
+    action: &str,
+    mut attempt: Option<&mut AttemptRecorder>,
+) -> bool {
     let running = crate::system::file_lock::running_applications(paths).and_then(|mut running| {
         running.extend(crate::system::file_lock::holders(paths)?);
         running.sort();
@@ -1149,6 +1277,9 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
             );
             println!("    Несохранённые изменения будут потеряны — сохраните работу.\n");
             if crate::system::env::args().len() > 1 {
+                if let Some(recorder) = attempt.as_deref_mut() {
+                    recorder.record_reason("close_app", "application_open");
+                }
                 print_problem(
                     2,
                     "Antigravity открыт",
@@ -1164,6 +1295,9 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
             style::menu_item("0", "Отмена", Tone::Plain);
             println!();
             if choose(&["1", "0"]) == "0" {
+                if let Some(recorder) = attempt.as_deref_mut() {
+                    recorder.record_reason("close_app", "user_cancelled");
+                }
                 println!("  Отменено, ничего не изменено.");
                 return false;
             }
@@ -1177,6 +1311,9 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
                 crate::system::file_lock::close_application(paths)
             };
             if let Err(error) = closed {
+                if let Some(recorder) = attempt.as_deref_mut() {
+                    recorder.record_error("close_app", &error, None, None);
+                }
                 #[cfg(any(windows, unix))]
                 let message = "Не удалось закрыть Antigravity";
                 #[cfg(not(any(windows, unix)))]
@@ -1194,6 +1331,9 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
             println!("  {} Antigravity закрыт\n", mark(Tone::Ok));
         }
         Err(error) => {
+            if let Some(recorder) = attempt {
+                recorder.record_error("close_app", &error, None, None);
+            }
             operation_error("Не удалось проверить, закрыто ли приложение", &error);
             print_error_details();
             pause();
@@ -1206,17 +1346,22 @@ fn ensure_application_closed(paths: &[std::path::PathBuf], action: &str) -> bool
 
 pub fn handle_rollback() -> bool {
     let started = Instant::now();
+    let mut attempt = AttemptRecorder::start(Operation::Rollback);
     let explicit_root = crate::system::env::args()
         .nth(2)
         .map(|path| expand_env_vars(&path));
     let installs = if let Some(root) = &explicit_root {
         if let Err(error) = recover_targets_in_path(root) {
+            attempt.record_error("recover", &error, None, Some(root));
+            attempt.finish(AttemptOutcome::Failed);
             operation_error("Не удалось восстановить прерванную запись", &error);
             return false;
         }
         vec![root.clone()]
     } else {
         if let Err(error) = recover_installations() {
+            attempt.record_error("recover", &error, None, None);
+            attempt.finish(AttemptOutcome::Failed);
             operation_error("Не удалось восстановить прерванную запись", &error);
             return false;
         }
@@ -1227,12 +1372,14 @@ pub fn handle_rollback() -> bool {
     clear_screen();
     banner();
     style::screen_title("ОТКЛЮЧЕНИЕ ОБХОДА");
-    if !ensure_application_closed(&paths, "отключить обход") {
+    if !ensure_application_closed(&paths, "отключить обход", Some(&mut attempt)) {
+        attempt.finish(AttemptOutcome::Stopped);
         return false;
     }
     let steps = Steps::new(2);
     let mut ok = true;
     if let Some(root) = explicit_root.filter(|_| targets.is_empty()) {
+        attempt.record_reason("discover", "no_targets");
         print_problem(
             2,
             "Файлы Antigravity не найдены",
@@ -1242,7 +1389,13 @@ pub fn handle_rollback() -> bool {
         ok = false;
     }
     if !targets.is_empty() {
-        ok &= run_file_step(&steps, RESTORE_STEP, targets, restore_target);
+        ok &= run_file_step(
+            &steps,
+            RESTORE_STEP,
+            targets,
+            restore_target,
+            Some(&mut attempt),
+        );
     }
     let progress = Progress::new();
     progress.stage(&steps, "Отключаем обход в системе", "Настройки системы");
@@ -1251,6 +1404,7 @@ pub fn handle_rollback() -> bool {
         progress.finish(false);
         drop(progress);
         for error in endpoint_errors {
+            attempt.record_error("endpoints", &error, None, None);
             print_problem(6, "Не удалось вернуть настройки Antigravity", &error, None);
         }
         print_problem(
@@ -1259,6 +1413,7 @@ pub fn handle_rollback() -> bool {
             "без прежних настроек Antigravity потерял бы связь",
             Some("закройте Antigravity и выберите пункт 6 ещё раз."),
         );
+        attempt.finish(AttemptOutcome::Failed);
         finish_setup(
             SetupStatus::Failed,
             started,
@@ -1270,10 +1425,14 @@ pub fn handle_rollback() -> bool {
     }
     let mut problems = Vec::new();
     match remove_dns_rules() {
-        Err(error) => problems.push(("Не удалось вернуть настройки подключения", error)),
+        Err(error) => {
+            attempt.record_error("network", &error, None, None);
+            problems.push(("Не удалось вернуть настройки подключения", error));
+        }
         Ok(()) => {
             #[cfg(windows)]
             if let Err(error) = crate::net::windows_connect::disable() {
+                attempt.record_error("network", &error, None, None);
                 problems.push(("Не удалось отключить резервный канал", error));
             }
             #[cfg(windows)]
@@ -1300,6 +1459,11 @@ pub fn handle_rollback() -> bool {
     } else {
         SetupStatus::Failed
     };
+    attempt.finish(if ok {
+        AttemptOutcome::Complete
+    } else {
+        AttemptOutcome::Failed
+    });
     finish_setup(status, started, ROLLBACK_VERDICTS, &summary);
     pause();
     ok

@@ -42,8 +42,14 @@ pub fn print_dashboard() {
         Tone::Muted
     };
     let network = network_status(rules, running.as_ref().ok().copied(), hosts_count);
+    let matches_current = if matches!(running, Ok(true)) {
+        crate::system::service::installed_matches_current()
+    } else {
+        None
+    };
     let service = service_status(
         running.ok(),
+        matches_current,
         network.0 != Tone::Muted,
         crate::net::relay::read_stats(),
         crate::net::web_rules_status(),
@@ -69,6 +75,7 @@ pub fn print_dashboard() {
 /// followed a VPN change.
 fn service_status(
     running: Option<bool>,
+    matches_current: Option<bool>,
     bypass_on: bool,
     stats: Option<crate::net::relay::ServiceStats>,
     web: Option<(bool, Option<u64>)>,
@@ -78,6 +85,9 @@ fn service_status(
         None => (Tone::Warn, "Не удалось проверить".into()),
         Some(false) if bypass_on => (Tone::Warn, "Не запущена — выберите пункт 1".into()),
         Some(false) => (Tone::Muted, "Выключена".into()),
+        Some(true) if matches_current == Some(false) => {
+            (Tone::Warn, "Работает (устаревшая версия — пункт 1)".into())
+        }
         Some(true) => {
             let mut parts = vec!["Работает".to_owned()];
             if let Some(stats) = stats {
@@ -166,6 +176,7 @@ mod tests {
         assert_eq!(
             service_status(
                 Some(true),
+                Some(true),
                 true,
                 stats.clone(),
                 Some((true, Some(now - 300_000))),
@@ -177,18 +188,25 @@ mod tests {
             )
         );
         assert_eq!(
-            service_status(Some(true), true, None, Some((false, None)), now),
+            service_status(Some(true), None, true, None, Some((false, None)), now),
             (Tone::Ok, "Работает".into())
         );
         assert_eq!(
-            service_status(Some(false), true, stats.clone(), None, now).0,
+            service_status(Some(true), Some(false), true, stats.clone(), None, now),
+            (Tone::Warn, "Работает (устаревшая версия — пункт 1)".into())
+        );
+        assert_eq!(
+            service_status(Some(false), None, true, stats.clone(), None, now).0,
             Tone::Warn
         );
         assert_eq!(
-            service_status(Some(false), false, stats, None, now),
+            service_status(Some(false), None, false, stats, None, now),
             (Tone::Muted, "Выключена".into())
         );
-        assert_eq!(service_status(None, true, None, None, now).0, Tone::Warn);
+        assert_eq!(
+            service_status(None, None, true, None, None, now).0,
+            Tone::Warn
+        );
     }
 
     #[test]

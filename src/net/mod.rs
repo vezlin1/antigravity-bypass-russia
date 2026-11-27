@@ -452,6 +452,9 @@ pub struct NetworkSetup {
     pub message: String,
     pub local_relay_running: bool,
     pub hosts_fallback: bool,
+    /// `hosts` could not be written (e.g. antivirus protection), so setup relies
+    /// on NRPT + local DNS relay instead of `hosts` pins.
+    pub hosts_write_blocked: bool,
     pub system_routes: bool,
     pub browser_dns_confirmed: bool,
     /// The regular Cloud Code endpoint failed verification; clients must use daily.
@@ -747,6 +750,12 @@ fn apply_dns_rules_with(
         let mut browser_missing = Vec::new();
         let startup = update.start().and_then(|()| {
             if !wait_for_ready(Duration::from_secs(4), relay_ready) {
+                if foreign_dns_on_port_53() {
+                    return Err(
+                        "Локальный UDP-порт 53 занят другой программой (VPN, AdGuard или DNS-фильтр)"
+                            .into(),
+                    );
+                }
                 return Err("DNS-релей не подтвердил готовность за 4с".into());
             }
             let answers = relay_answers(skip_primary, relay_returns_address);
@@ -777,7 +786,14 @@ fn apply_dns_rules_with(
         Ok((ranked, skip_primary, relay_error, browser_missing))
     });
     let (ranked, skip_primary, relay_error, browser_missing) =
-        relay_update::finish_staging(staged, || update.map_or(Ok(()), |update| update.rollback()))?;
+        relay_update::finish_staging(staged, || match update {
+            Some(update) => {
+                let result = update.rollback();
+                crate::diagnostics::attempt::note_staging_rollback(result.is_ok());
+                result
+            }
+            None => Ok(()),
+        })?;
     if skip_primary {
         compatibility_notes.push(format!(
             "{PRIMARY_CLOUD_CODE}: недоступен из этой сети, клиенты переключаются на daily"
@@ -888,13 +904,41 @@ fn apply_dns_rules_with(
         (inventory, plan)
     };
     progress(Stage(SetupStage::Saving));
-    crate::net::rank::apply_ranked(&ranked, skip_primary, policy)?;
+    #[cfg(not(windows))]
+    let hosts_write_blocked = {
+        crate::net::rank::apply_ranked(&ranked, skip_primary, policy)?;
+        false
+    };
+    #[cfg(windows)]
+    let deferred_hosts_error: Option<String> = {
+        crate::net::rank::save_ranked_without_hosts(&ranked, skip_primary, policy)?;
+        match crate::net::rank::apply_ranked_hosts(&ranked) {
+            Ok(()) => None,
+            Err(hosts_error) => {
+                let required_agents: Vec<&str> = NRPT_AGENT
+                    .iter()
+                    .copied()
+                    .filter(|host| !skip_primary || *host != PRIMARY_CLOUD_CODE)
+                    .collect();
+                let access_denied = is_hosts_access_denied(&hosts_error);
+                let no_stale_pins = relay_ok
+                    && access_denied
+                    && hosts::conflicting_entries(&required_agents)
+                        .is_ok_and(|conflicts| conflicts.is_empty());
+                if no_stale_pins {
+                    Some(hosts_error)
+                } else {
+                    return Err(hosts_error);
+                }
+            }
+        }
+    };
 
     // Keep verified agent addresses installed by apply_ranked. A VPN enabled
     // later may intercept loopback DNS even while the relay remains healthy.
 
     #[cfg(target_os = "windows")]
-    let browser_dns_confirmed = {
+    let (browser_dns_confirmed, hosts_write_blocked) = {
         progress(Working("записываем настройки Windows"));
         let plan = nrpt::apply_compatible_rules(&plan, NRPT_TAG, "Antigravity DNS")?;
         followed_rules.via_relay = relay_ok;
@@ -933,6 +977,9 @@ fn apply_dns_rules_with(
         hosts_fallback = !coverage.agent_hosts.is_empty();
         flush_dns_cache()?;
         if hosts_fallback {
+            if let Some(hosts_error) = deferred_hosts_error {
+                return Err(hosts_error);
+            }
             progress(Working("проверяем запасной список адресов"));
             compatibility::verify_agent_pins(&coverage.agent_hosts, &ranked)?;
             compatibility_notes.push(format!(
@@ -940,8 +987,22 @@ fn apply_dns_rules_with(
                 coverage.agent_hosts.join(", ")
             ));
         }
+        let hosts_write_blocked = if let Some(hosts_error) = deferred_hosts_error {
+            relay::log_event(&format!(
+                "Запись hosts пропущена (работает через NRPT и релей): {hosts_error}"
+            ));
+            compatibility_notes.push(
+                "Файл hosts защищён от записи — обход настроен через системный DNS (NRPT)".into(),
+            );
+            true
+        } else {
+            false
+        };
         compatibility_notes.extend(coverage.notes);
-        browser_dns_confirmed && coverage.browser_rules_effective
+        (
+            browser_dns_confirmed && coverage.browser_rules_effective,
+            hosts_write_blocked,
+        )
     };
 
     #[cfg(target_os = "macos")]
@@ -954,6 +1015,12 @@ fn apply_dns_rules_with(
     linux_dns::apply()?;
     #[cfg(not(windows))]
     flush_dns_cache()?;
+
+    let browser_dns_confirmed = if browser_dns_confirmed {
+        browser_web_reachable()
+    } else {
+        false
+    };
 
     let mut msg = if relay_ok {
         format!("Сеть настроена (релей {}:{})", LISTEN_IP, LISTEN_PORT)
@@ -978,6 +1045,7 @@ fn apply_dns_rules_with(
         message: msg,
         local_relay_running: relay_ok,
         hosts_fallback,
+        hosts_write_blocked,
         system_routes: policy != RoutePolicy::Physical,
         browser_dns_confirmed,
         primary_skipped: skip_primary,
@@ -1062,6 +1130,47 @@ pub fn apply_linux_dns_on_service_start() -> Result<(), String> {
         return Err("DNS-служба не подтвердила готовность; настройки DNS сохранены".into());
     }
     linux_dns::apply()
+}
+
+#[cfg(any(windows, test))]
+fn is_hosts_access_denied(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("отказано в доступе")
+        || lower.contains("access is denied")
+        || lower.contains("permission denied")
+        || lower.contains("os error 5)")
+}
+
+/// Checks whether a foreign DNS server (e.g. AdGuard or a VPN DNS filter) is
+/// already answering UDP port 53 on `LISTEN_IP` while our own health port is
+/// silent.
+fn foreign_dns_on_port_53() -> bool {
+    let query = client::build_query(PRIMARY_CLOUD_CODE, 0xA653);
+    client::query_raw_to(
+        &query,
+        std::net::SocketAddrV4::new(LISTEN_IP.parse().unwrap(), LISTEN_PORT),
+        0,
+        Duration::from_millis(600),
+    )
+    .is_ok_and(|reply| client::response_matches(&query, &reply))
+}
+
+/// Verifies that the main web surfaces resolve through a non-direct proxy and
+/// pass TLS/HTTP after DNS rules are active.
+fn browser_web_reachable() -> bool {
+    const WEB_HOSTS: [&str; 2] = ["gemini.google.com", "aistudio.google.com"];
+    thread::scope(|scope| {
+        let probes: Vec<_> = WEB_HOSTS
+            .into_iter()
+            .map(|host| scope.spawn(move || health::probe_host(host)))
+            .collect();
+        probes.into_iter().all(|handle| {
+            handle
+                .join()
+                .ok()
+                .is_some_and(|report| report.error.is_none() && !report.looks_like_google)
+        })
+    })
 }
 
 pub(crate) fn relay_ready(timeout: Duration) -> bool {

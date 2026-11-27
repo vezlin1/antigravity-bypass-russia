@@ -18,9 +18,26 @@ pub struct FoundTarget {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DiscoverySource {
+    Manual,
+    Standard,
+    Path,
+}
+
+impl DiscoverySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Standard => "standard",
+            Self::Path => "path",
+        }
+    }
+}
+
 pub(crate) fn is_agy_cli_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    matches!(
+    if matches!(
         name.as_str(),
         "agy"
             | "agy.exe"
@@ -28,10 +45,53 @@ pub(crate) fn is_agy_cli_name(name: &str) -> bool {
             | "antigravity.exe"
             | "antigravity-cli"
             | "antigravity-cli.exe"
-    ) || ((name.starts_with("agy-") || name.starts_with("antigravity-cli-"))
-        && Path::new(&name)
-            .extension()
-            .is_none_or(|extension| extension == "exe"))
+    ) {
+        return true;
+    }
+    let stem = name.strip_suffix(".exe").unwrap_or(&name);
+    if !Path::new(stem).extension().is_none_or(|extension| {
+        extension
+            .to_str()
+            .is_some_and(|ext| !ext.is_empty() && ext.chars().all(|c| c.is_ascii_digit()))
+    }) {
+        return false;
+    }
+    let Some(suffix) = stem
+        .strip_prefix("agy-")
+        .or_else(|| stem.strip_prefix("antigravity-cli-"))
+    else {
+        return false;
+    };
+    !suffix.is_empty() && suffix.split(['-', '_']).all(is_cli_suffix_token)
+}
+
+fn is_cli_suffix_token(token: &str) -> bool {
+    if matches!(
+        token,
+        "cli"
+            | "x64"
+            | "x86_64"
+            | "amd64"
+            | "arm"
+            | "arm64"
+            | "aarch64"
+            | "win"
+            | "win32"
+            | "win64"
+            | "windows"
+            | "mac"
+            | "macos"
+            | "darwin"
+            | "linux"
+            | "gnu"
+            | "musl"
+            | "universal"
+    ) {
+        return true;
+    }
+    let version = token.strip_prefix('v').unwrap_or(token);
+    version.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && version.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
 pub(super) const CLI_NAMES: [&str; 6] = [
@@ -113,6 +173,13 @@ fn is_already_contained(installs: &[PathBuf], candidate: &Path) -> bool {
 }
 
 pub fn find_installations() -> Vec<PathBuf> {
+    find_installations_with_sources()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect()
+}
+
+pub fn find_installations_with_sources() -> Vec<(PathBuf, DiscoverySource)> {
     find_installations_with(super::install_paths::saved())
 }
 
@@ -120,14 +187,15 @@ pub fn find_installations() -> Vec<PathBuf> {
 /// forgetting a saved path does not hide it from status and rollback.
 pub fn found_automatically(path: &Path) -> bool {
     let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    find_installations_with(Vec::new()).iter().any(|root| {
+    find_installations_with(Vec::new()).iter().any(|(root, _)| {
         let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
         path.starts_with(&root)
     })
 }
 
-fn find_installations_with(saved: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut installs: Vec<_> = saved.into_iter().filter(|path| path.exists()).collect();
+fn find_installations_with(saved: Vec<PathBuf>) -> Vec<(PathBuf, DiscoverySource)> {
+    let mut installs: Vec<PathBuf> = saved.into_iter().filter(|path| path.exists()).collect();
+    let manual_count = installs.len();
 
     #[cfg(target_os = "windows")]
     {
@@ -328,6 +396,7 @@ fn find_installations_with(saved: Vec<PathBuf>) -> Vec<PathBuf> {
         }
     }
 
+    let standard_end = installs.len();
     // Discover native CLI installations outside the fixed application folders.
     // Only inspect named executables; never recursively scan every PATH directory.
     for path in cli_files_in_dirs(&cli_search_dirs()) {
@@ -336,6 +405,19 @@ fn find_installations_with(saved: Vec<PathBuf>) -> Vec<PathBuf> {
         }
     }
     installs
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let source = if index < manual_count {
+                DiscoverySource::Manual
+            } else if index < standard_end {
+                DiscoverySource::Standard
+            } else {
+                DiscoverySource::Path
+            };
+            (path, source)
+        })
+        .collect()
 }
 
 fn cli_search_dirs() -> Vec<PathBuf> {
@@ -839,9 +921,13 @@ pub fn find_targets_in_path(root: &Path) -> Vec<FoundTarget> {
     }
 
     if let Some(asar) = find_asar_in_path(root) {
-        if !targets
-            .iter()
-            .any(|t: &FoundTarget| same_target_path(&t.path, &asar))
+        // The separate Antigravity app also ships resources/app.asar without IDE
+        // main-process code. Skip verified non-IDE archives while keeping
+        // unreadable/damaged archives visible for diagnostics.
+        if crate::core::asar::has_ide_entry(&asar) != Some(false)
+            && !targets
+                .iter()
+                .any(|t: &FoundTarget| same_target_path(&t.path, &asar))
         {
             let name = asar
                 .file_name()
@@ -1357,7 +1443,10 @@ mod detection_tests {
         std::fs::write(&cli, cli_fixture(true, false)).unwrap();
         for (name, contents) in [
             ("Antigravity.exe", cli_fixture(false, false)),
-            ("agy-fake.exe", cli_fixture(true, true)),
+            ("agy-x64.exe", cli_fixture(true, true)),
+            ("agy-desktop-rtc", cli_fixture(true, false)),
+            ("agy-desktop-rtc.exe", cli_fixture(true, false)),
+            ("agy-helper", cli_fixture(true, false)),
             ("agy-helper.js", cli_fixture(true, false)),
             ("agy-x64.exe.bak", cli_fixture(true, false)),
             ("antigravity.exe.old", cli_fixture(true, false)),
@@ -1377,6 +1466,40 @@ mod detection_tests {
             cli_files_in_dirs(&[nested]),
             vec![std::fs::canonicalize(cli).unwrap()]
         );
+    }
+
+    #[test]
+    fn cli_name_matcher_skips_desktop_helpers_and_keeps_cli_variants() {
+        for accepted in [
+            "agy",
+            "agy.exe",
+            "antigravity",
+            "antigravity.exe",
+            "antigravity-cli",
+            "antigravity-cli.exe",
+            "agy-x64.exe",
+            "agy-arm64",
+            "agy-darwin-arm64",
+            "agy-windows-x64.exe",
+            "agy-linux-amd64",
+            "agy-1.5.18",
+            "antigravity-cli-arm64",
+        ] {
+            assert!(is_agy_cli_name(accepted), "should accept {accepted}");
+        }
+        for rejected in [
+            "agy-desktop-rtc",
+            "agy-desktop-rtc.exe",
+            "agy-helper",
+            "agy-updater",
+            "agy-mcp",
+            "agy-desktop-rtc.bak",
+            "agy-x64.exe.bak",
+            "agy-x64.js",
+            "antigravity-cli-helper",
+        ] {
+            assert!(!is_agy_cli_name(rejected), "should reject {rejected}");
+        }
     }
 
     fn assert_official_fixture_discovery(variable: &str) {

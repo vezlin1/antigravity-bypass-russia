@@ -99,6 +99,9 @@ pub(super) fn with_probe_routes<T>(
             let rollback = restore_probe_routes(&path, previous, &changes, |script| {
                 powershell(script).map(|_| ())
             });
+            if !changes.is_empty() {
+                crate::diagnostics::attempt::note_staging_rollback(rollback.is_ok());
+            }
             return match rollback {
                 Ok(()) => Err(error),
                 Err(rollback_error) => Err(format!(

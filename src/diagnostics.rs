@@ -1,4 +1,5 @@
 //! Local, opt-in support reports. Export an allowlist, never raw configuration or logs.
+pub mod attempt;
 mod platform;
 
 use crate::{
@@ -212,9 +213,14 @@ fn version_text(value: &str) -> Option<String> {
 }
 
 fn installations() -> Value {
+    installations_for(detector::find_installations_with_sources())
+}
+
+fn installations_for(roots: Vec<(PathBuf, detector::DiscoverySource)>) -> Value {
+    const MAX_TARGET_INSPECT_BYTES: u64 = 256 * 1024 * 1024;
     let mut seen = BTreeSet::new();
     let mut result = Vec::new();
-    for root in detector::find_installations().into_iter().take(64) {
+    for (root, source) in roots.into_iter().take(64) {
         let mut versions = BTreeSet::new();
         for relative in [
             "package.json",
@@ -229,18 +235,29 @@ fn installations() -> Value {
                 }
             }
         }
+        // Read App/IDE version directly from app.asar so Antigravity App's
+        // version is preserved even when its non-IDE archive is not a patch target.
+        if let Some(asar) = detector::find_asar_in_path(&root) {
+            if let Some(v) = crate::core::asar::read_asar_package_version(&asar)
+                .as_deref()
+                .and_then(version_text)
+            {
+                versions.insert(v);
+            }
+        }
         let mut targets = Vec::new();
         for target in detector::find_targets_in_path(&root).into_iter().take(32) {
-            if !seen.insert(target.path.clone()) {
+            if target.kind == detector::TargetKind::IdeAsar
+                && crate::core::asar::has_ide_entry(&target.path) == Some(false)
+            {
+                continue;
+            }
+            let dedup_key = fs::canonicalize(&target.path).unwrap_or_else(|_| target.path.clone());
+            if !seen.insert(dedup_key) {
                 continue;
             }
             let size = fs::metadata(&target.path).ok().map(|m| m.len());
-            let inspected = size.is_some_and(|n| n <= 256 * 1024 * 1024);
-            let state = if inspected {
-                format!("{:?}", patcher::check_target_state(&target))
-            } else {
-                "not_inspected".into()
-            };
+            let inspected = size.is_some_and(|n| n <= MAX_TARGET_INSPECT_BYTES);
             if inspected && target.kind == detector::TargetKind::IdeAsar {
                 if let Some(v) = crate::core::asar::read_asar_package_version(&target.path)
                     .as_deref()
@@ -249,15 +266,67 @@ fn installations() -> Value {
                     versions.insert(v);
                 }
             }
-            targets.push(
-                json!({"component": format!("{:?}", target.kind), "size_bytes": size,
-                "architecture": binary_architecture(&target.path), "patch_state": state}),
+            let inspection = inspected.then(|| patcher::inspect_target(&target));
+            let state = match &inspection {
+                Some(info) => format!("{:?}", info.state),
+                None => "not_inspected".into(),
+            };
+            let needs_identity = matches!(
+                inspection.as_ref().map(|info| info.state),
+                None | Some(patcher::BinaryState::Unknown | patcher::BinaryState::PartiallyPatched)
             );
+            let mut entry = serde_json::Map::new();
+            entry.insert("component".into(), json!(format!("{:?}", target.kind)));
+            entry.insert("size_bytes".into(), json!(size));
+            entry.insert(
+                "architecture".into(),
+                json!(binary_architecture(&target.path)),
+            );
+            entry.insert("patch_state".into(), json!(state));
+            if needs_identity {
+                if let Some(name) = attempt::safe_file_name(&target.path) {
+                    entry.insert("file_name".into(), json!(name));
+                }
+                if inspected {
+                    if let Some(digest) =
+                        sha256_limited(&target.path, MAX_TARGET_INSPECT_BYTES as usize)
+                    {
+                        entry.insert("sha256".into(), json!(digest));
+                    }
+                }
+                if let Some(info) = &inspection {
+                    if let Some(profile) = info.profile {
+                        entry.insert("profile".into(), json!(profile));
+                    }
+                    if let Some(reason) = info.reason {
+                        entry.insert("reason".into(), json!(reason));
+                    }
+                    if let Some(counts) = info.counts {
+                        let mut count_map = serde_json::Map::new();
+                        if let Some(matches) = counts.matches {
+                            count_map.insert("matches".into(), json!(matches));
+                        }
+                        if let Some(core) = counts.core {
+                            count_map.insert("core".into(), json!(core));
+                        }
+                        if let Some(login) = counts.login {
+                            count_map.insert("login".into(), json!(login));
+                        }
+                        if !count_map.is_empty() {
+                            entry.insert("match_counts".into(), Value::Object(count_map));
+                        }
+                    }
+                }
+            }
+            targets.push(Value::Object(entry));
         }
         if !targets.is_empty() || !versions.is_empty() {
-            result.push(
-                json!({"installation": result.len() + 1, "versions": versions, "targets": targets}),
-            );
+            result.push(json!({
+                "installation": result.len() + 1,
+                "discovery_source": source.as_str(),
+                "versions": versions,
+                "targets": targets
+            }));
         }
     }
     json!({"status": "ok", "installations": result, "paths": "omitted", "discovery": "standard locations and PATH"})
@@ -305,13 +374,13 @@ fn binary_architecture(path: &Path) -> Option<&'static str> {
     }
 }
 
-fn fingerprint(path: &Path) -> Option<String> {
+fn sha256_limited(path: &Path, limit: usize) -> Option<String> {
     let mut file = File::open(path).ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
     }
     let mut hash = Sha256::new();
-    let mut remaining = 64 * 1024 * 1024usize;
+    let mut remaining = limit;
     let mut buffer = [0; 64 * 1024];
     loop {
         let n = file.read(&mut buffer).ok()?;
@@ -323,6 +392,10 @@ fn fingerprint(path: &Path) -> Option<String> {
     }
 }
 
+fn fingerprint(path: &Path) -> Option<String> {
+    sha256_limited(path, 64 * 1024 * 1024)
+}
+
 fn service_summary() -> Value {
     let installed = fingerprint(&system::service::installed_exe());
     let current = std::env::current_exe().ok().and_then(|p| fingerprint(&p));
@@ -332,11 +405,86 @@ fn service_summary() -> Value {
         .map(|(a, b)| a == b);
     let registered = system::service::registered_state();
     let running = system::service::running_state();
-    json!({"status": if registered.is_ok() && running.is_ok() { "ok" } else { "partial" },
-        "registered": registered.ok(), "process_detected": running.ok(),
-        "installed_binary_sha256": installed, "current_binary_sha256": current,
+    json!({
+        "status": "pending",
+        "query_status": if registered.is_ok() && running.is_ok() { "ok" } else { "partial" },
+        "registered": registered.ok(),
+        "process_detected": running.ok(),
+        "installed_binary_sha256": installed,
+        "current_binary_sha256": current,
         "installed_matches_current": same,
-        "note": "process detection alone does not confirm DNS readiness"})
+        "note": "process detection alone does not confirm DNS readiness"
+    })
+}
+
+fn has_non_public_answer(port_report: &Value) -> bool {
+    port_report["answers"].as_array().is_some_and(|answers| {
+        !answers.is_empty()
+            && answers.iter().all(|value| {
+                value
+                    .as_str()
+                    .and_then(|s| s.parse::<IpAddr>().ok())
+                    .is_some_and(|ip| match ip {
+                        IpAddr::V4(v4) => {
+                            v4.is_loopback()
+                                || v4.is_private()
+                                || v4.is_unspecified()
+                                || v4.is_link_local()
+                        }
+                        IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+                    })
+            })
+    })
+}
+
+fn finalize_service_check(service: &mut Value, dns_port: &mut Value, health_port: &Value) {
+    let dns_raw_ok = dns_port["status"].as_str() == Some("responding");
+    let health_ok = health_port["status"].as_str() == Some("responding");
+    let foreign_dns = dns_raw_ok && (!health_ok || has_non_public_answer(dns_port));
+    if foreign_dns {
+        if let Some(dns_map) = dns_port.as_object_mut() {
+            dns_map.insert("status".into(), json!("foreign_dns"));
+        }
+    }
+
+    let Some(map) = service.as_object_mut() else {
+        return;
+    };
+    if !map.contains_key("query_status") {
+        // Timed out or collector failed: preserve its unavailable status.
+        return;
+    }
+    let dns_ok = dns_raw_ok && !foreign_dns;
+    let both_responding = dns_ok && health_ok;
+    let any_responding = dns_ok || health_ok;
+    let registered = map.get("registered").and_then(Value::as_bool);
+    let running = map.get("process_detected").and_then(Value::as_bool);
+    let matches_current = map
+        .get("installed_matches_current")
+        .and_then(Value::as_bool);
+
+    let state = match (registered, running) {
+        (None, _) | (_, None) => "query_failed",
+        _ if foreign_dns => "port_53_conflict",
+        (Some(false), Some(false)) if !any_responding => "not_installed",
+        (Some(false), _) if any_responding => "unregistered_responding",
+        (Some(true), Some(false)) if !any_responding => "registered_not_running",
+        (_, Some(true)) if !any_responding => "running_not_responding",
+        (Some(true), Some(true)) if both_responding && matches_current == Some(false) => {
+            "running_binary_mismatch"
+        }
+        (Some(true), Some(true)) if both_responding => "running",
+        _ if any_responding && matches_current == Some(false) => "running_binary_mismatch",
+        _ if any_responding => "degraded_ports",
+        _ => "not_installed",
+    };
+
+    map.insert("status".into(), json!(state));
+    map.insert("dns_port_responding".into(), json!(dns_ok));
+    map.insert("health_port_responding".into(), json!(health_ok));
+    if foreign_dns {
+        map.insert("foreign_dns_on_port_53".into(), json!(true));
+    }
 }
 
 fn relay_probe(port: u16) -> Value {
@@ -437,7 +585,11 @@ pub fn collect() -> Value {
             Box::new(|| relay_probe(net::relay::HEALTH_PORT)),
         ),
     ];
-    for host in net::provider::NRPT_AGENT {
+    for host in net::provider::NRPT_AGENT
+        .iter()
+        .copied()
+        .chain(["gemini.google.com", "aistudio.google.com"])
+    {
         jobs.push((
             format!("connection:{host}"),
             Box::new(move || connection(net::health::probe_host(host))),
@@ -454,7 +606,17 @@ pub fn collect() -> Value {
             }),
         ));
     }
-    let checks = bounded_jobs(jobs, Duration::from_secs(20));
+    let mut checks = bounded_jobs(jobs, Duration::from_secs(20));
+    if let Some(map) = checks.as_object_mut() {
+        let mut dns_port = map.get("relay_dns_port").cloned().unwrap_or(Value::Null);
+        let health_port = map.get("relay_health_port").cloned().unwrap_or(Value::Null);
+        if let Some(service) = map.get_mut("service") {
+            finalize_service_check(service, &mut dns_port, &health_port);
+        }
+        if map.contains_key("relay_dns_port") {
+            map.insert("relay_dns_port".into(), dns_port);
+        }
+    }
     let safe_pins: Vec<_> = pins
         .as_ref()
         .map(|p| {
@@ -474,6 +636,7 @@ pub fn collect() -> Value {
         "rank": ranks,
         "configured_interface": net::relay::load_if_index(),
         "configured_upstream_dns": net::relay::load_upstream_servers(),
+        "last_attempt": attempt::snapshot(),
         "recent_recovery": recent_events(&net::config::directory().join("network-events.log")),
         "previous_recovery": recent_events(&net::config::directory().join("network-events.previous.log")),
         "checks": checks
@@ -597,5 +760,177 @@ mod tests {
         drop(release);
         assert_eq!(result["fast"], 42);
         assert_eq!(result["stalled"]["status"], "timeout");
+    }
+
+    #[test]
+    fn service_check_reports_actual_runtime_state() {
+        let down = json!({"status": "no_response"});
+        let up = json!({"status": "responding", "answers": ["31.58.216.201"]});
+        let health_up = json!({"status": "responding", "answers": ["127.0.0.1"]});
+
+        let mut not_installed = json!({
+            "status": "pending",
+            "query_status": "ok",
+            "registered": false,
+            "process_detected": false,
+            "installed_matches_current": null
+        });
+        let mut dns = down.clone();
+        finalize_service_check(&mut not_installed, &mut dns, &down);
+        assert_eq!(not_installed["status"], "not_installed");
+        assert_eq!(not_installed["dns_port_responding"], false);
+        assert_eq!(not_installed["health_port_responding"], false);
+
+        let mut mismatch = json!({
+            "status": "pending",
+            "query_status": "ok",
+            "registered": true,
+            "process_detected": true,
+            "installed_matches_current": false
+        });
+        let mut dns = up.clone();
+        finalize_service_check(&mut mismatch, &mut dns, &health_up);
+        assert_eq!(mismatch["status"], "running_binary_mismatch");
+        assert_eq!(mismatch["dns_port_responding"], true);
+        assert_eq!(mismatch["health_port_responding"], true);
+
+        let mut healthy = json!({
+            "status": "pending",
+            "query_status": "ok",
+            "registered": true,
+            "process_detected": true,
+            "installed_matches_current": true
+        });
+        let mut dns = up.clone();
+        finalize_service_check(&mut healthy, &mut dns, &health_up);
+        assert_eq!(healthy["status"], "running");
+
+        let mut stuck = json!({
+            "status": "pending",
+            "query_status": "ok",
+            "registered": true,
+            "process_detected": true,
+            "installed_matches_current": true
+        });
+        let mut dns = down.clone();
+        finalize_service_check(&mut stuck, &mut dns, &down);
+        assert_eq!(stuck["status"], "running_not_responding");
+
+        // Issue #57: foreign DNS (e.g. AdGuard 127.65.71.1) occupies port 53 while our health port is silent.
+        let mut conflict = json!({
+            "status": "pending",
+            "query_status": "ok",
+            "registered": true,
+            "process_detected": false,
+            "installed_matches_current": true
+        });
+        let mut foreign = json!({"status": "responding", "answers": ["127.65.71.1"]});
+        finalize_service_check(&mut conflict, &mut foreign, &down);
+        assert_eq!(conflict["status"], "port_53_conflict");
+        assert_eq!(conflict["foreign_dns_on_port_53"], true);
+        assert_eq!(conflict["dns_port_responding"], false);
+        assert_eq!(foreign["status"], "foreign_dns");
+
+        let mut failed_query = json!({
+            "status": "pending",
+            "query_status": "partial",
+            "registered": null,
+            "process_detected": false,
+            "installed_matches_current": null
+        });
+        let mut dns = down.clone();
+        finalize_service_check(&mut failed_query, &mut dns, &down);
+        assert_eq!(failed_query["status"], "query_failed");
+    }
+
+    #[test]
+    fn installations_report_skips_app_asar_and_desktop_rtc_and_identifies_unknown_cli() {
+        fn app_asar(version: &str) -> Vec<u8> {
+            let pkg = format!(r#"{{"name":"antigravity","version":"{version}"}}"#).into_bytes();
+            let main_js = b"// app dist";
+            let header = serde_json::to_vec(&json!({
+                "files": {
+                    "package.json": {"size": pkg.len(), "offset": "0"},
+                    "dist": {"files": {
+                        "main.js": {"size": main_js.len(), "offset": pkg.len().to_string()}
+                    }}
+                }
+            }))
+            .unwrap();
+            let header_size = 8 + header.len().div_ceil(4) * 4;
+            let mut data = Vec::new();
+            for value in [
+                4u32,
+                header_size as u32,
+                (header_size - 4) as u32,
+                header.len() as u32,
+            ] {
+                data.extend(value.to_le_bytes());
+            }
+            data.extend(header);
+            data.resize(8 + header_size, 0);
+            data.extend(pkg);
+            data.extend(main_js);
+            data
+        }
+
+        fn go_pe_fixture() -> Vec<u8> {
+            let mut data = vec![0u8; 1024];
+            data[..2].copy_from_slice(b"MZ");
+            data[60..64].copy_from_slice(&128u32.to_le_bytes());
+            data[128..132].copy_from_slice(b"PE\0\0");
+            for (offset, value) in [(132, 0x8664u16), (134, 1), (148, 240), (152, 0x20b)] {
+                data[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+            }
+            data[392..400].copy_from_slice(b".data\0\0\0");
+            for (offset, value) in [(400, 512u32), (404, 0x1000), (408, 512), (412, 512)] {
+                data[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            data[512..526].copy_from_slice(b"\xff Go buildinf:");
+            data[526] = 8;
+            data[527] = 2;
+            data
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let app_root = dir.path().join("SECRET_USER_APP");
+        fs::create_dir_all(app_root.join("resources/bin")).unwrap();
+        fs::write(app_root.join("resources/app.asar"), app_asar("2.35.2")).unwrap();
+        fs::write(
+            app_root.join("resources/bin/agy-desktop-rtc"),
+            go_pe_fixture(),
+        )
+        .unwrap();
+
+        let cli_dir = dir.path().join("SECRET_PATH_BIN");
+        fs::create_dir_all(&cli_dir).unwrap();
+        let unknown_cli = cli_dir.join("agy.exe");
+        fs::write(&unknown_cli, go_pe_fixture()).unwrap();
+        let canonical_cli = fs::canonicalize(&unknown_cli).unwrap();
+
+        let report = installations_for(vec![
+            (app_root, detector::DiscoverySource::Standard),
+            (cli_dir, detector::DiscoverySource::Standard),
+            (canonical_cli, detector::DiscoverySource::Path),
+        ]);
+        assert!(!report.to_string().contains("SECRET"));
+        let items = report["installations"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+
+        // Antigravity App: version preserved, no false IdeAsar, no agy-desktop-rtc.
+        assert_eq!(items[0]["discovery_source"], "standard");
+        assert_eq!(items[0]["versions"], json!(["2.35.2"]));
+        assert!(items[0]["targets"].as_array().unwrap().is_empty());
+
+        // Unknown CLI discovered both by folder and verbatim canonical path appears once.
+        assert_eq!(items[1]["discovery_source"], "standard");
+        let target = &items[1]["targets"][0];
+        assert_eq!(target["component"], "AgyCli");
+        assert_eq!(target["patch_state"], "Unknown");
+        assert_eq!(target["file_name"], "agy.exe");
+        assert_eq!(target["profile"], "agy-x64-long-v2");
+        assert_eq!(target["reason"], "profile_mismatch");
+        assert_eq!(target["match_counts"]["matches"], 0);
+        assert_eq!(target["sha256"].as_str().unwrap().len(), 64);
     }
 }

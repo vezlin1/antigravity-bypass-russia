@@ -350,29 +350,49 @@ fn probe_dead(addrs: &[IpAddr]) -> Vec<IpAddr> {
     dead
 }
 
+/// Google front-end (GFE) networks that serve `*.googleapis.com` directly.
+/// Google Cloud customer space (34/8, 35/8, …) is deliberately excluded: proxies
+/// may be hosted there. Missing a GFE block lets a direct Google address pass
+/// as a proxy and outrank real proxies (issues #55–#57).
+const GOOGLE_V4: &[([u8; 4], u8)] = &[
+    ([64, 233, 0, 0], 16),
+    ([66, 102, 0, 0], 16),
+    ([66, 249, 0, 0], 16),
+    ([72, 14, 0, 0], 16),
+    ([74, 125, 0, 0], 16),
+    ([108, 177, 0, 0], 17),
+    ([142, 250, 0, 0], 15),
+    ([172, 217, 0, 0], 16),
+    ([172, 253, 0, 0], 16),
+    ([173, 194, 0, 0], 16),
+    ([192, 178, 0, 0], 15),
+    ([209, 85, 128, 0], 17),
+    ([216, 58, 0, 0], 16),
+    ([216, 239, 0, 0], 16),
+];
+
+/// Google /32 IPv6 allocations (first two segments).
+const GOOGLE_V6: &[[u16; 2]] = &[
+    [0x2001, 0x4860],
+    [0x2404, 0x6800],
+    [0x2607, 0xf8b0],
+    [0x2800, 0x03f0],
+    [0x2a00, 0x1450],
+    [0x2c0f, 0xfb50],
+];
+
 pub(crate) fn looks_google(addr: &IpAddr) -> bool {
     match addr {
         IpAddr::V4(v4) => {
-            let o = v4.octets();
-            matches!(
-                (o[0], o[1]),
-                (64, 233)
-                    | (66, 102)
-                    | (66, 249)
-                    | (72, 14)
-                    | (74, 125)
-                    | (142, 250)
-                    | (142, 251)
-                    | (172, 217)
-                    | (173, 194)
-                    | (192, 178)
-                    | (216, 58)
-                    | (216, 239)
-            )
+            let ip = u32::from(*v4);
+            GOOGLE_V4.iter().any(|(net, bits)| {
+                let mask = u32::MAX << (32 - u32::from(*bits));
+                ip & mask == u32::from_be_bytes(*net) & mask
+            })
         }
         IpAddr::V6(v6) => {
-            let o = v6.octets();
-            o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x48 && o[3] == 0x60
+            let s = v6.segments();
+            GOOGLE_V6.iter().any(|prefix| s[..2] == prefix[..])
         }
     }
 }
@@ -941,6 +961,32 @@ pub fn invalidate_network_caches() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn google_front_end_blocks_are_recognised_and_neighbours_are_not() {
+        for google in [
+            "172.217.114.4",
+            "142.251.1.95",
+            "108.177.14.95",
+            "209.85.233.95",
+            "172.253.63.95",
+            "192.179.1.1",
+            "2a00:1450:4010::5f",
+            "2001:4860:4860::8888",
+        ] {
+            assert!(looks_google(&google.parse().unwrap()), "{google}");
+        }
+        for other in [
+            "45.131.64.204",
+            "185.4.64.180",
+            "108.177.200.1",
+            "209.85.1.1",
+            "34.120.0.1",
+            "2a00:1451::1",
+        ] {
+            assert!(!looks_google(&other.parse().unwrap()), "{other}");
+        }
+    }
 
     #[test]
     fn reference_answers_are_reused_only_while_both_resolvers_are_fresh() {
